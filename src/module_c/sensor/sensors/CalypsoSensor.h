@@ -18,8 +18,8 @@
 // would fragment the heap over time.
 class CalypsoSensor : public ISensor {
 public:
-  CalypsoSensor(HardwareSerial &serial, uint8_t rxPin, uint8_t txPin)
-      : _serial(serial), _rxPin(rxPin), _txPin(txPin) {}
+  CalypsoSensor(HardwareSerial &serial, uint8_t rxPin, uint8_t txPin, uint32_t baud = 38400)
+      : _serial(serial), _rxPin(rxPin), _txPin(txPin), _baud(baud) {}
 
   bool begin() override;
   Reading read() override;
@@ -31,6 +31,7 @@ private:
 
   HardwareSerial &_serial;
   uint8_t _rxPin, _txPin;
+  uint32_t _baud;
   char _line[kLineMax + 1] = {0};
   uint8_t _lineLen = 0;
 

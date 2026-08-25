@@ -54,6 +54,31 @@ bool parseQiurcRecv(const char *line, int &connectId, int &dataLen);
 // the raw bytes are whatever the caller already captured after this line.
 bool parseQirdHeader(const char *line, int &len);
 
+// ---------- MQTT URCs (BC660K-GL MQTT AT command set) ----------
+// Syntax below follows Quectel's standard QMT command shape shared across
+// the BC66/BC660K/EC-series family - cross-check against the actual
+// "BC660K-GL MQTT Application Note" if any of these ever come back
+// unparsed, rather than assuming the field layout is wrong.
+
+// "+QMTOPEN: <client_idx>,<result>" - async URC after AT+QMTOPEN's OK ack.
+// result==0 means the TCP link to the broker opened successfully.
+bool parseQmtopen(const char *line, int &clientIdx, int &result);
+
+// "+QMTCONN: <client_idx>,<result>,<retCode>" - async URC after AT+QMTCONN's
+// OK ack. result==0 means the CONNECT packet was sent and a response
+// received; retCode==0 means the broker accepted the connection.
+bool parseQmtconn(const char *line, int &clientIdx, int &result, int &retCode);
+
+// "+QMTPUB: <client_idx>,<msgId>,<result>[,<value>]" - async URC after
+// AT+QMTPUB. result==0 means publish succeeded (value is only meaningful
+// for QoS>0, not used here since telemetry publishes at QoS 0).
+bool parseQmtpub(const char *line, int &clientIdx, int &msgId, int &result);
+
+// "+QMTSTAT: <client_idx>,<errCode>" - unsolicited, reports the MQTT client
+// dropped (broker/network closed it, keepalive timeout, etc). Not tied to
+// any in-flight command - always routed through the URC path.
+bool parseQmtstat(const char *line, int &clientIdx, int &errCode);
+
 // ---------- Downlink application grammar ----------
 // Server replies to an uplink datagram with either:
 //   ACK,<seq>

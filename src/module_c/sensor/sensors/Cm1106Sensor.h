@@ -18,8 +18,9 @@ public:
   // Some breakouts don't expose an EN pin at all; pass kNoEnPin (and warmupMs=0) for those.
   static constexpr uint8_t kNoEnPin = 0xFF;
 
-  Cm1106Sensor(HardwareSerial &serial, uint8_t rxPin, uint8_t txPin, uint8_t enPin, uint32_t warmupMs)
-      : _serial(serial), _rxPin(rxPin), _txPin(txPin), _enPin(enPin), _warmupMs(warmupMs) {}
+  Cm1106Sensor(HardwareSerial &serial, uint8_t rxPin, uint8_t txPin, uint8_t enPin, uint32_t warmupMs,
+               uint32_t baud = 9600)
+      : _serial(serial), _rxPin(rxPin), _txPin(txPin), _enPin(enPin), _warmupMs(warmupMs), _baud(baud) {}
 
   bool begin() override;
   Reading read() override;
@@ -30,4 +31,5 @@ private:
   HardwareSerial &_serial;
   uint8_t _rxPin, _txPin, _enPin;
   uint32_t _warmupMs;
+  uint32_t _baud;
 };

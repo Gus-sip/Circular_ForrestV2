@@ -7,6 +7,29 @@ from the sensor node (Module C, `src/module_c/` in this same project,
 originally the sibling `../../sensor_node/` project); the two only need to agree on the LoRa
 link parameters and the telemetry payload format.
 
+## 2026-08-25 — PCB bring-up session
+
+- **`LORA_EN_PIN` (GPIO13) added.** The physical Module B PCB gates the LoRa
+  module's power rail through a transistor (Q4 on the schematic) that this
+  firmware never drove - `radio.begin()` was being called with the module
+  unpowered. Found via the same kind of pin-scan bring-up that found the
+  NB-IoT PWRKEY/channel pins earlier; confirmed LOW = powered on. Now set
+  LOW in `setup()`, with a 300ms settle before `radio.begin()`.
+- **Module B's firmware in `circular_forest_v2` re-synced against this
+  project's current state** - it had drifted onto an older snapshot (still
+  on the retired raw-UDP `ModemNBIoT`, missing every NB-IoT hardware fix
+  below). Now matches: MQTT/ThingsBoard uplink, hardware-confirmed NB-IoT
+  pins/PWRKEY sequence, `sensor.net` APN, `AT+QCGDEFCONT`.
+- **OLED status display added** - a GME12864 (SSD1306-compatible 128x64 I2C)
+  wired to GPIO1 (SDA) / GPIO2 (SCL), `Config.h`'s `OLED_*` defines. Refreshed
+  every 500ms in `loop()`: LoRa RX recency + RSSI/SNR, the NB-IoT/MQTT state
+  machine's current state name (`PUBLISHING` while actively sending, etc.),
+  MQTT connection status, and sent/failed/dropped counters. Labels are in
+  Spanish (`Modulo B`, `inactivo`, `activo`/`caido`, `Env`/`Err`/`Prd`) at the
+  user's request; state names themselves stay in English to match the serial
+  log and web dashboard. Libraries: `adafruit/Adafruit SSD1306` +
+  `adafruit/Adafruit GFX Library`, both in `module-b-main`'s `lib_deps`.
+
 ## Hardware
 
 | Module pin | ESP32-S3-Zero |

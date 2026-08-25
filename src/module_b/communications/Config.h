@@ -1,5 +1,9 @@
 #pragma once
 
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+
 // LoRa ground-station receiver configuration. Everything tunable lives here,
 // same convention as the sensor-node repo's Config.h.
 
@@ -9,6 +13,7 @@
 #define LORA_RX_PIN 4  // module TXD -> ESP RX
 #define LORA_TX_PIN 5  // module RXD <- ESP TX
 #define LORA_BAUD 115200
+#define LORA_EN_PIN 13  // Q4 power-rail gate, LOW = on - 2026-08-19 pin-scan discovery (see project memory)
 
 // ---------- LoRa link parameters - MUST match the sensor node exactly ----------
 // SF/BW/CR/preamble are NOT the generic "commonly documented" RYLR998 defaults
@@ -26,6 +31,42 @@
 
 #define LORA_NODE_ADDR 1  // sensor node's AT+ADDRESS
 #define LORA_MY_ADDR 2    // this receiver's own AT+ADDRESS - must differ from the node's
+
+// ---------- Node name table (LoRa AT+ADDRESS -> ThingsBoard device name) ----------
+// Used by the MQTT gateway publish to name each node in the
+// v1/gateway/telemetry payload. One entry per node deployed so far - add to
+// this as more nodes join, never remove/renumber an existing entry (the
+// name is what ThingsBoard uses to identify the device going forward).
+struct NodeNameEntry {
+  uint16_t addr;
+  const char *name;
+};
+
+static const NodeNameEntry NBIOT_NODE_NAMES[] = {
+    {LORA_NODE_ADDR, "NodoC-1"},
+};
+
+// Resolves addr to its configured name, or "NodoDesconocido-<addr>" if addr
+// isn't in the table above. Deliberately never drops a reading just because
+// its sender isn't recognized - a node with a placeholder name is visible
+// and fixable in ThingsBoard; a node whose data is silently discarded isn't.
+inline void nbiotResolveNodeName(uint16_t addr, char *outName, size_t outCap) {
+  for (size_t i = 0; i < sizeof(NBIOT_NODE_NAMES) / sizeof(NBIOT_NODE_NAMES[0]); i++) {
+    if (NBIOT_NODE_NAMES[i].addr == addr) {
+      strncpy(outName, NBIOT_NODE_NAMES[i].name, outCap - 1);
+      outName[outCap - 1] = '\0';
+      return;
+    }
+  }
+  snprintf(outName, outCap, "NodoDesconocido-%u", addr);
+}
+
+// ---------- OLED status display (GME12864, SSD1306-compatible 128x64 I2C) ----------
+#define OLED_SDA_PIN 1
+#define OLED_SCL_PIN 2
+#define OLED_I2C_ADDR 0x3C
+#define OLED_WIDTH 128
+#define OLED_HEIGHT 64
 
 // ---------- WiFi AP ----------
 // PLACEHOLDER credentials - change before field deployment. WPA2 requires an
@@ -53,48 +94,104 @@
 // owns on GPIO4/5. ESP32-S3 only has three UART controllers (0/1/2) and
 // USB-CDC is separate from all of them; reusing UART1 for the modem would
 // collide with the LoRa radio the moment both run in the same firmware.
-// (src/bc660k_bridge.cpp's standalone prototype used HardwareSerial(1) on
-// GP5/GP10 - that never collided only because its build env excludes main.cpp
-// and the radio driver. Don't copy that instantiation into the real hub.)
-#define NBIOT_RX_PIN 8  // ESP RX <- module TXD (breakout P14 TXD)
-#define NBIOT_TX_PIN 7  // ESP TX -> module RXD (breakout P14 RXD)
 #define NBIOT_BAUD 115200
 
-// Power gating on the production PCB: P-FET, active LOW enables 3V3_NBIoT_EN
-// (same polarity/topology as bc660k_bridge.cpp's NBIOT_EN_PIN - LOW = powered).
+// Power/pin sequence hardware-confirmed 2026-08-19 on the real PCB (see
+// project memory "project_nbiot_uplink_bringup") - supersedes everything
+// this section previously assumed, none of which had been validated against
+// real hardware timing before that session:
+//   GP9 LOW (VIN) -> GP10 LOW (a transistor-gated channel not in any
+//   schematic reviewed - without it, UART carries no signal at all) ->
+//   settle -> GP11 pulsed LOW ~1000ms then released HIGH (PWRKEY - contrary
+//   to the old assumption below, this module does NOT auto-boot on VIN
+//   alone) -> wait for boot -> AT works on RX=GP44/TX=GP43 @ 115200 (the
+//   schematic's UARTDB_TX/RX native-UART0 pins were right all along; the
+//   module just never booted far enough to use them before).
+#define NBIOT_RX_PIN 44  // ESP RX <- module TXD
+#define NBIOT_TX_PIN 43  // ESP TX -> module RXD
+
 #define NBIOT_EN_PIN 9
 #define NBIOT_EN_ACTIVE LOW
 #define NBIOT_DISABLE (!NBIOT_EN_ACTIVE)
 
+#define NBIOT_CHANNEL_PIN 10  // transistor-gated channel, LOW = open - 2026-08-19 discovery
+#define NBIOT_CHANNEL_ACTIVE LOW
+
+#define NBIOT_PWRKEY_PIN 11
+#define NBIOT_PWRKEY_ACTIVE LOW
+#define NBIOT_PWRKEY_PULSE_MS 1000
+
 // RST, P1 pin 5 (the schematic mislabels this net "RTS" - it is not a UART
-// flow-control line, it's the module's reset input). Active-low pulse.
+// flow-control line, it's the module's reset input). Active-low pulse. Not
+// exercised by the confirmed bring-up sequence above - kept for a future
+// explicit-reset recovery path, not currently wired into POWERING.
 #define NBIOT_RST_PIN 6
 #define NBIOT_RST_ACTIVE LOW
 #define NBIOT_RST_PULSE_MS 200
 
-// PWRKEY (PWR, P1 pin 8) is unconnected on this board - no define needed. The
-// breakout auto-boots once VIN is present, consistent with what bc660k_bridge.cpp
-// observed on real hardware. If a future rev wires PWRKEY, this file is where
-// its pin/pulse timing would go.
-
 // ---------- Network (1NCE SIM) ----------
-#define NBIOT_APN "iot.1nce.net"
+// "iot.1nce.net" is 1NCE Platform 1.0 and gets registration denied on this
+// account (Platform 2.0) - confirmed both by 1NCE support directly and by
+// hardware bring-up 2026-08-19. Use sensor.net, PAP, empty user/pass.
+#define NBIOT_APN "sensor.net"
 // BC660K-GL's own PDP context is numbered from 0, NOT 1 - the BC66 docs (and
 // most Quectel AT-command examples) use context 1, which is a common trap on
-// this specific module. Confirmed by hand: AT+CGDCONT=0,... is what the
-// verified bring-up sequence used.
+// this specific module. IMPORTANT: context 0 is this module's built-in
+// default context, and the standard AT+CGDCONT command does NOT work on it
+// (rejected with "+CME ERROR: operation not supported", confirmed
+// 2026-08-19) - use AT+QCGDEFCONT="IP",<apn> instead. Also: AT+CFUN=1 must
+// be sent explicitly before AT+CPIN? - this module does not auto-enable its
+// radio/protocol stack on boot (AT+CPIN? fails "+CME ERROR: ue not power
+// on" until CFUN=1 is issued).
 #define NBIOT_CONTEXT_ID 0
 
-// TODO fill in before flashing - left blank deliberately rather than a
-// plausible-looking fake value, so a forgotten edit fails loudly (empty host
-// string / port 0) instead of silently sending traffic nowhere useful.
-#define NBIOT_SERVER_HOST ""
-#define NBIOT_SERVER_PORT 0
-#define NBIOT_LOCAL_PORT 0  // 0 = let the modem pick an ephemeral source port
-#define NBIOT_CONNECT_ID 0  // AT+QIOPEN/QISEND/QIRD/QICLOSE session id - only one socket is ever open, so a fixed 0 is fine
+// ---------- MQTT / ThingsBoard (ModemNBIoTMqtt) ----------
+// test-moduloa.home.kg is Module A's self-hosted ThingsBoard instance - not
+// ThingsBoard Cloud/demo.thingsboard.io, confirmed by the user 2026-08-19.
+//
+// Port 1883 is direct-LAN only and NOT reachable from the public internet -
+// found 2026-08-19 by comparing against a working ESPHome device's config
+// for this same broker: internet-connected clients (this one, over
+// cellular) go through an Azure relay + reverse SSH tunnel on port 18831
+// instead. Connecting to 1883 over the internet doesn't fail to connect at
+// the TCP/MQTT-framing level - it produces a real, well-formed CONNACK,
+// just always with reason code 5 ("not authorized"), which looks exactly
+// like a credentials problem and cost real debugging time before the port
+// mismatch was found. Verified directly: a plain Python paho-mqtt client
+// got CONNACK 5 on 1883 and CONNACK 0 (success) on 18831 with the exact
+// same token, no other change.
+#define MQTT_BROKER_HOST "test-moduloa.home.kg"
+#define MQTT_BROKER_PORT 18831
+#define MQTT_CLIENT_ID "moduloB"
+// ThingsBoard access-token auth: token goes in as the MQTT username, no
+// password. This is the gateway device's ("CON-MODB_TEST" in ThingsBoard)
+// token, not any individual node's - the hub publishes on nodes' behalf via
+// the Gateway API (see modem_nbiot_mqtt.h).
+#define MQTT_ACCESS_TOKEN "xkvckj3protc3q4je7nb"
+#define MQTT_CLIENT_IDX 0  // AT+QMTOPEN/QMTCONN/QMTPUB client index - only one MQTT client is ever open, so a fixed 0 is fine
 
-// 1NCE's outbound NAT means nothing can dial in - the socket the device opens
-// for uplink is also the only path anything downlink can ever arrive on.
+// Keepalive set comfortably above NBIOT_BATCH_DEFAULT_SECONDS (below) rather
+// than pinging between real sends - see project memory
+// "project_thingsboard_mqtt_plan" for why: a PINGREQ cadence tight enough to
+// matter (e.g. every 90s) would run ~13x the actual telemetry traffic, all
+// of it spent saying nothing, against the SIM's data allowance and Module
+// B's battery. Instead: if the MQTT session is found dead at send time
+// (either +QMTSTAT fired, or nothing was ever connected), reconnect lazily
+// right there before publishing - reconnecting once per batch is cheap,
+// holding a connection open with pings is not. Set to the maximum
+// AT+QMTCFG="keepalive" allows (3600s) rather than just above the batch
+// interval - a higher value costs nothing (it only controls how long the
+// broker waits before giving up on us; our own PUBLISH traffic resets its
+// timer every send regardless), and it buys margin against a delayed/
+// retried send pushing past a tighter value.
+#define MQTT_KEEPALIVE_S 3600UL
+
+// JSON is far more verbose than the legacy binary batch frame (~15 fields/
+// reading as "key":value text runs well over 100 bytes/reading, vs. the
+// binary format's fixed 30) - sized generously for a full
+// NBIOT_BATCH_DEFAULT_READINGS-reading batch with room to spare, not
+// trimmed tight the way the old NBIOT_PAYLOAD_MAX_BYTES was.
+#define MQTT_PAYLOAD_MAX_BYTES 4096
 
 // ---------- Batching ----------
 // Uplink payload is a packed binary frame (see nbiot/NbiotProtocol.h), not
@@ -109,13 +206,11 @@
 #define NBIOT_RING_CAPACITY 24  // > max batch so a slow upload doesn't force an immediate drop
 #define NBIOT_PAYLOAD_MAX_BYTES 500
 
-// Downlink CFG can retune the two batching knobs above (see the ACK,<seq>,CFG,...
-// grammar in NbiotProtocol.h) but only within these compile-time ranges - a
-// value outside its range is dropped, never applied, and never stops uplink.
-#define NBIOT_CFG_READINGS_MIN 1
+// Ceiling used by NbiotProtocol.h's batch-frame static_assert. The downlink
+// CFG mechanism that used to retune this at runtime (ModemNBIoT/legacy UDP
+// path) has been removed with that class - ModemNBIoTMqtt doesn't do
+// downlink yet (see its header for why), so this is compile-time fixed.
 #define NBIOT_CFG_READINGS_MAX 16  // (500 - kBatchHeaderSize) / kBatchRecordSize, see static_assert
-#define NBIOT_CFG_SECONDS_MIN 60UL
-#define NBIOT_CFG_SECONDS_MAX (6UL * 3600UL)
 
 // ---------- State timeouts (ms) - every state in ModemNBIoT::tick() has one ----------
 #define NBIOT_TIMEOUT_POWERING_MS 3000
@@ -140,10 +235,3 @@
 #define NBIOT_BACKOFF_BASE_MS 2000
 #define NBIOT_BACKOFF_MAX_MS 120000
 #define NBIOT_POWER_OFF_SETTLE_MS 500  // EN held deasserted this long before re-asserting on a power cycle
-
-// ---------- PSM ----------
-// Cheaper to stay attached and let the modem sleep (AT+QSCLK=1) between
-// batches than to drop the socket/attach and pay full re-attach cost next
-// time. Idle this long with nothing queued before requesting sleep; woken
-// (AT+QSCLK=0) as soon as a batch is ready to send.
-#define NBIOT_PSM_IDLE_MS 5000

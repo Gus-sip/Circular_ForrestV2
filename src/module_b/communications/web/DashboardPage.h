@@ -44,13 +44,13 @@ function render(d) {
     'CO Temp:     ' + fmt(d.coTemp) + ' C\n' +
     'Wind Angle:  ' + fmt(d.windAngle) + ' deg\n' +
     'Wind Speed:  ' + fmt(d.windSpeed) + '\n\n' +
-    '--- NB-IoT uplink (Module B) ---\n' +
+    '--- NB-IoT/MQTT uplink (Module B -> ThingsBoard) ---\n' +
     'State:       ' + n.state + (n.lastError && n.lastError !== 'none' ? ' (' + n.lastError + ')' : '') + '\n' +
     'Attached:    ' + (n.attached ? ('yes, ' + n.attachedSec + 's') : 'no') + '\n' +
+    'MQTT:        ' + (n.mqttConnected ? 'connected' : 'not connected') + ' (' + n.mqttReconnects + ' reconnects)\n' +
     'RSSI:        ' + n.rssiDbm + ' dBm\n' +
     'Sent/Failed/Dropped: ' + n.sent + ' / ' + n.failed + ' / ' + n.dropped + '\n' +
-    'Batch:       ' + n.ringCount + ' pending, target ' + n.batchReadings + ' readings / ' + n.batchSeconds + 's\n' +
-    'CFG version: ' + n.cfgVersion;
+    'Batch:       ' + n.ringCount + ' pending, target ' + n.batchReadings + ' readings / ' + n.batchSeconds + 's';
 }
 
 function poll() {

@@ -13,8 +13,8 @@
  * SEN0466 shares BME690's Wire bus - its address (0x74) doesn't collide with BME690 (0x76).
  *
  * Per-sensor protocol handling (CO2 UART framing, wind NMEA parsing, BMV080 SDK
- * callbacks, ...) lives in sensors/ behind the shared ISensor interface, same as the
- * chip_forest_v1 bring-up harness - this file just wires up the board-specific pins/buses
+ * callbacks, ...) lives in sensors/ behind the shared ISensor interface, same as
+ * chip_forest_lora_tx.cpp - this file just wires up the board-specific pins/buses
  * and prints each reading in this node's own format.
  */
 #include <Arduino.h>

@@ -8,7 +8,15 @@ merged from two sibling project folders, `../sensor_node/` and `../relay/`,
 that still exist independently and are unaffected by anything here).
 
 Fixes made in one place don't propagate to the others automatically - if you
-patch a bug here, port it back (or vice versa) by hand.
+patch a bug here, port it back (or vice versa) by hand. As of 2026-08-25 this
+folder was re-synced against `../sensor_node/`'s and `../relay/`'s
+then-current state (both had drifted ahead - sensor baud configurability,
+dead-code cleanup, and a full NB-IoT rewrite from raw-UDP to MQTT/ThingsBoard
+with real hardware-confirmed pin/timing fixes) via a manual file-by-file
+merge, not a blind copy - `chip_forest_lora_tx.cpp`'s light-sleep + LoRa
+downlink CFG protocol only exists here, not in `sensor_node`, and had to be
+preserved rather than overwritten. Still requires hand-porting either way
+from this point forward.
 
 ## Layout
 
@@ -50,14 +58,18 @@ within whichever subfolder it moved into.
 
 ## Environments
 
-Every env from `combined_modules` is here unchanged (same `module-c-`/
-`module-b-` prefixed env ids), just repointed at the new `sensor/`/
-`communications/` paths. The two that actually ship:
+13 ESP32 envs (`module-c-*`/`module-b-*`) plus `module-b-native`. Four envs
+present at the original restructure were removed during the 2026-08-25
+re-sync to match `sensor_node`'s/`relay`'s own cleanup: `module-c-cmi1032-test`
+(redundant with `module-c-ulp-pro-uart-test` - both built the same file),
+`module-c-chip-forest-v1` (superseded prototype, file deleted), and
+`module-b-bc660k-bridge`/`module-b-bc660k-tcp-test` (superseded by the real
+MQTT driver; their source files were removed too). The two that actually ship:
 
 - **`module-c-lora-tx`** - Module C's real firmware: five sensors, LoRa TX to
   Module B, light-sleep between cycles, answers CFG downlinks.
 - **`module-b-main`** - Module B's real firmware: LoRa RX, BC660K-GL NB-IoT
-  uplink to Module A, AP-mode web dashboard.
+  uplink to Module A over MQTT/ThingsBoard, AP-mode web dashboard.
 
 Everything else is a bring-up/isolation-test rig carried over from each
 project's history (per-sensor test envs, AT-liveness bridges, param probes,
@@ -82,19 +94,21 @@ cd bosch_bmv080_sdk
 ./restore.ps1 -EnvName module-c-lora-tx
 ```
 
-Already done for `module-c-main`, `module-c-lora-tx`, `module-c-bringup`, and
-`module-c-chip-forest-v1` (the four envs that pull in the BMV080 library) as
-of this restructure. Needed again if `.pio` ever gets wiped. Note:
+Already done for `module-c-main`, `module-c-lora-tx`, and `module-c-bringup`
+(the envs that pull in the BMV080 library - `module-c-chip-forest-v1` also
+needed it before it was removed in the 2026-08-25 re-sync). Needed again if
+`.pio` ever gets wiped. Note:
 `restore.ps1` needs PowerShell script execution enabled
 (`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` or similar) - if it's
 blocked, copy the four files by hand per the commands inside the script.
 
 ## Verified
 
-All 17 ESP32 environments (both `module-c-*` and `module-b-*`) build clean
-as of this restructure, including the two production envs above. `module-b-native`
-was not verified - it needs a system GCC/G++ toolchain, which this machine
-doesn't currently have installed (pre-existing, unrelated to this restructure).
+All 13 ESP32 environments (both `module-c-*` and `module-b-*`) build clean
+as of the 2026-08-25 re-sync (`pio run`, one by one), including the two
+production envs above. `module-b-native` was not verified - it needs a
+system GCC/G++ toolchain, which this machine doesn't currently have
+installed (pre-existing, unrelated to this restructure).
 
 ## Note on a pre-existing bug (carried over from `combined_modules`)
 

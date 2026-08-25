@@ -3,7 +3,7 @@
 #include <string.h>
 
 bool CalypsoSensor::begin() {
-  _serial.begin(38400, SERIAL_8N1, _rxPin, _txPin);
+  _serial.begin(_baud, SERIAL_8N1, _rxPin, _txPin);
   return true;  // no handshake beyond opening the UART - presence confirmed by the first valid sentence
 }
 

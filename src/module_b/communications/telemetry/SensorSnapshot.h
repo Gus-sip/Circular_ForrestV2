@@ -8,6 +8,7 @@
 struct SensorSnapshot {
   bool hasData = false;     // false until the very first valid packet arrives
   uint32_t lastHeardMs = 0;  // millis() timestamp of the last valid packet
+  uint16_t senderAddr = 0;  // LoRa AT+ADDRESS of the node that sent this reading
   int16_t rssi = 0;
   int8_t snr = 0;
 

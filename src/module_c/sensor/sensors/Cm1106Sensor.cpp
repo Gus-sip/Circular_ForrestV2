@@ -7,7 +7,7 @@ bool Cm1106Sensor::begin() {
     pinMode(_enPin, OUTPUT);
     digitalWrite(_enPin, HIGH);
   }
-  _serial.begin(9600, SERIAL_8N1, _rxPin, _txPin);
+  _serial.begin(_baud, SERIAL_8N1, _rxPin, _txPin);
   if (_warmupMs > 0) delay(_warmupMs);
   return true;  // no handshake beyond EN + baud - presence is confirmed by the first valid read
 }

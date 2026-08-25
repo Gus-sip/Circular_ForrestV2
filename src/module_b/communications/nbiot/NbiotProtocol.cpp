@@ -99,6 +99,57 @@ bool parseQirdHeader(const char *line, int &len) {
   return true;
 }
 
+bool parseQmtopen(const char *line, int &clientIdx, int &result) {
+  if (strncmp(line, "+QMTOPEN:", 9) != 0) return false;
+  const char *p = line + 9;
+  while (*p == ' ') p++;
+  const char *resultField = skipCommas(p, 1);
+  if (!resultField) return false;
+  clientIdx = (int)strtol(p, nullptr, 10);
+  result = (int)strtol(resultField, nullptr, 10);
+  return true;
+}
+
+bool parseQmtconn(const char *line, int &clientIdx, int &result, int &retCode) {
+  if (strncmp(line, "+QMTCONN:", 9) != 0) return false;
+  const char *p = line + 9;
+  while (*p == ' ') p++;
+  const char *resultField = skipCommas(p, 1);
+  if (!resultField) return false;
+  const char *retCodeField = skipCommas(p, 2);
+  clientIdx = (int)strtol(p, nullptr, 10);
+  result = (int)strtol(resultField, nullptr, 10);
+  // retCode only accompanies result==0 (a response was actually received) -
+  // absent otherwise, so don't fail the whole parse over a missing field.
+  retCode = retCodeField ? (int)strtol(retCodeField, nullptr, 10) : -1;
+  return true;
+}
+
+bool parseQmtpub(const char *line, int &clientIdx, int &msgId, int &result) {
+  if (strncmp(line, "+QMTPUB:", 8) != 0) return false;
+  const char *p = line + 8;
+  while (*p == ' ') p++;
+  const char *msgIdField = skipCommas(p, 1);
+  if (!msgIdField) return false;
+  const char *resultField = skipCommas(p, 2);
+  if (!resultField) return false;
+  clientIdx = (int)strtol(p, nullptr, 10);
+  msgId = (int)strtol(msgIdField, nullptr, 10);
+  result = (int)strtol(resultField, nullptr, 10);
+  return true;
+}
+
+bool parseQmtstat(const char *line, int &clientIdx, int &errCode) {
+  if (strncmp(line, "+QMTSTAT:", 9) != 0) return false;
+  const char *p = line + 9;
+  while (*p == ' ') p++;
+  const char *errField = skipCommas(p, 1);
+  if (!errField) return false;
+  clientIdx = (int)strtol(p, nullptr, 10);
+  errCode = (int)strtol(errField, nullptr, 10);
+  return true;
+}
+
 bool parseDownlink(const char *text, DownlinkAck &out) {
   out = DownlinkAck{};
   if (strncmp(text, "ACK,", 4) != 0) return false;

@@ -23,25 +23,30 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WebServer.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
 #include "Config.h"
-#include "modem_nbiot.h"
+#include "OledSplash.h"
+#include "modem_nbiot_mqtt.h"
 #include "radio/RYLR998.h"
 #include "telemetry/SensorSnapshot.h"
 #include "telemetry/TelemetryParser.h"
 #include "web/DashboardPage.h"
 
+// -1 = no separate reset pin - this module's RESET ties to the ESP32's own
+// reset, same convention as every other SSD1306 breakout on this project.
+Adafruit_SSD1306 oled(OLED_WIDTH, OLED_HEIGHT, &Wire, -1);
+
 RYLR998 radio(Serial1, LORA_RX_PIN, LORA_TX_PIN, LORA_BAUD);
 // UART2 - deliberately not Serial1, which the LoRa radio above already owns.
-// See the NB-IoT wiring comment in Config.h.
-ModemNBIoT modem(Serial2, NBIOT_RX_PIN, NBIOT_TX_PIN, NBIOT_EN_PIN, NBIOT_RST_PIN);
+// See the NB-IoT wiring comment in Config.h. Pins here are the
+// hardware-confirmed GP44/GP43 (native UART0), not the stale GP8/GP7 an
+// earlier assumption used - see Config.h's NB-IoT section.
+ModemNBIoTMqtt modem(Serial2, NBIOT_RX_PIN, NBIOT_TX_PIN, NBIOT_EN_PIN, NBIOT_CHANNEL_PIN, NBIOT_PWRKEY_PIN);
 WebServer server(80);
 
 SensorSnapshot g_latest;
-
-static void onNbiotConfigApplied(uint8_t version, uint16_t batchReadings, uint32_t batchSeconds) {
-  Serial.printf("[nbiot] applied downlink CFG v%u: batch=%u readings / %lus\n", version, batchReadings,
-                (unsigned long)batchSeconds);
-}
 
 static void handleRoot() {
   server.send_P(200, "text/html", DASHBOARD_HTML);
@@ -53,7 +58,7 @@ static void handleData() {
   const char *status = !g_latest.hasData ? "no_data" : (stale ? "stale" : "ok");
   uint32_t secondsAgo = g_latest.hasData ? (now - g_latest.lastHeardMs) / 1000 : 0;
 
-  char json[768];
+  char json[800];
   snprintf(json, sizeof(json),
            "{\"status\":\"%s\",\"secondsAgo\":%lu,\"rssi\":%d,\"snr\":%d,"
            "\"temp\":%.2f,\"hum\":%.2f,\"pres\":%.2f,\"gas\":%.2f,"
@@ -61,19 +66,55 @@ static void handleData() {
            "\"co2\":%.2f,\"co\":%.2f,\"coTemp\":%.2f,"
            "\"windAngle\":%.2f,\"windSpeed\":%.2f,\"windValid\":%s,"
            "\"nbiot\":{\"state\":\"%s\",\"lastError\":\"%s\",\"rssiDbm\":%d,"
-           "\"attached\":%s,\"attachedSec\":%lu,\"sent\":%lu,\"failed\":%lu,\"dropped\":%lu,"
-           "\"cfgVersion\":%u,\"batchReadings\":%u,\"batchSeconds\":%lu,\"ringCount\":%u}}",
+           "\"attached\":%s,\"attachedSec\":%lu,\"mqttConnected\":%s,\"mqttReconnects\":%lu,"
+           "\"sent\":%lu,\"failed\":%lu,\"dropped\":%lu,"
+           "\"batchReadings\":%u,\"batchSeconds\":%lu,\"ringCount\":%u}}",
            status, (unsigned long)secondsAgo, g_latest.rssi, g_latest.snr, g_latest.temp, g_latest.hum,
            g_latest.pres, g_latest.gas, g_latest.pm1, g_latest.pm25, g_latest.pm10, g_latest.co2,
            g_latest.co, g_latest.coTemp, g_latest.windAngle, g_latest.windSpeed,
            g_latest.windValid ? "true" : "false",
            modem.stateName(), modem.lastError(), modem.rssiDbm(), modem.attached() ? "true" : "false",
-           (unsigned long)(modem.attachedUptimeMs() / 1000), (unsigned long)modem.packetsSent(),
+           (unsigned long)(modem.attachedUptimeMs() / 1000), modem.mqttConnected() ? "true" : "false",
+           (unsigned long)modem.mqttReconnects(), (unsigned long)modem.packetsSent(),
            (unsigned long)modem.packetsFailed(), (unsigned long)modem.packetsDropped(),
-           modem.appliedCfgVersion(), modem.batchReadingsTarget(), (unsigned long)modem.batchSecondsTarget(),
-           modem.ringCount());
+           modem.batchReadingsTarget(), (unsigned long)modem.batchSecondsTarget(), modem.ringCount());
 
   server.send(200, "application/json", json);
+}
+
+// Refreshes the OLED with a compact live-activity view - answers "what is
+// this board doing right now" at a glance without needing the web dashboard:
+// LoRa RX recency/link quality, and the NB-IoT/MQTT state machine's current
+// state (stateName() literally reads "PUBLISHING" while a batch is actively
+// being sent over NB-IoT, "ATTACHING"/"MQTT_CONNECT" while connecting, "IDLE"
+// while just waiting on the next batch - see modem_nbiot_mqtt.h's State enum).
+static void updateOledStatus() {
+  uint32_t now = millis();
+
+  oled.clearDisplay();
+  oled.setTextSize(1);
+  oled.setTextColor(SSD1306_WHITE);
+  oled.setCursor(0, 0);
+
+  oled.println("Modulo B");
+
+  if (g_latest.hasData) {
+    uint32_t ageS = (now - g_latest.lastHeardMs) / 1000;
+    // "RX!" window is short (a fresh packet is momentary, not a stream) -
+    // just long enough that a 500ms-refreshed screen visibly catches it.
+    oled.printf("LoRa: %s hace %lus\n", ageS < 3 ? "RX!" : "inactivo", (unsigned long)ageS);
+    oled.printf(" rssi %d snr %d\n", g_latest.rssi, g_latest.snr);
+  } else {
+    oled.println("LoRa: sin datos aun");
+    oled.println("");
+  }
+
+  oled.printf("NBIoT: %s\n", modem.stateName());
+  oled.printf("MQTT: %s\n", modem.mqttConnected() ? "activo" : "caido");
+  oled.printf("Env %lu Err %lu Prd %lu\n", (unsigned long)modem.packetsSent(),
+              (unsigned long)modem.packetsFailed(), (unsigned long)modem.packetsDropped());
+
+  oled.display();
 }
 
 void setup() {
@@ -95,6 +136,20 @@ void setup() {
   server.begin();
   Serial.println("Web server started.");
 
+  Wire.begin(OLED_SDA_PIN, OLED_SCL_PIN);
+  if (oled.begin(SSD1306_SWITCHCAPVCC, OLED_I2C_ADDR)) {
+    oled.clearDisplay();
+    oled.drawBitmap(0, 0, SPLASH_BITMAP, OLED_WIDTH, OLED_HEIGHT, SSD1306_WHITE);
+    oled.display();
+    Serial.println("OLED: splash displayed");
+  } else {
+    Serial.println("OLED: init FAILED (check wiring - SDA=GPIO1, SCL=GPIO2)");
+  }
+
+  pinMode(LORA_EN_PIN, OUTPUT);
+  digitalWrite(LORA_EN_PIN, LOW);  // power on LoRa rail (Q4 gate) - confirmed LOW=on by pin scan
+  delay(300);
+
   Serial.println("Configuring RYLR998 (link parameters must match the sensor node):");
   bool ok = radio.begin(LORA_MY_ADDR, LORA_NETWORK_ID, LORA_BAND_HZ,
                          {LORA_PARAM_SF, LORA_PARAM_BW, LORA_PARAM_CR, LORA_PARAM_PREAMBLE}, &Serial);
@@ -102,8 +157,7 @@ void setup() {
                      : "Radio init FAILED - check wiring/baud before assuming a parameter is wrong.");
   Serial.println();
 
-  Serial.println("Starting NB-IoT uplink (Module B backhaul) - non-blocking, see modem_nbiot.h:");
-  modem.setConfigAppliedCallback(onNbiotConfigApplied);
+  Serial.println("Starting NB-IoT/MQTT uplink to ThingsBoard - non-blocking, see modem_nbiot_mqtt.h:");
   modem.begin();
   Serial.println();
 }
@@ -120,6 +174,7 @@ void loop() {
     if (TelemetryParser::parse(msg.payload, msg.length, snap)) {
       snap.hasData = true;
       snap.lastHeardMs = millis();
+      snap.senderAddr = msg.senderAddr;
       snap.rssi = msg.rssi;
       snap.snr = msg.snr;
       g_latest = snap;
@@ -131,4 +186,10 @@ void loop() {
   }
 
   modem.tick();
+
+  static uint32_t lastOledMs = 0;
+  if (millis() - lastOledMs >= 500) {
+    lastOledMs = millis();
+    updateOledStatus();
+  }
 }
