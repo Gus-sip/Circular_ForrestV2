@@ -170,6 +170,7 @@ private:
   uint32_t _configStepEnteredMs = 0;  // lets QCGDEFCONT wait out CFUN=0's SIM-interface settle, non-blocking
 
   bool _cgpaddrChecked = false;
+  bool _csqCheckedAfterAttach = false;  // one AT+CSQ right after attach - see tickAttaching()
   uint32_t _lastCeregPollMs = 0;
   uint8_t _attachRetries = 0;
 

@@ -224,6 +224,7 @@ void ModemNBIoTMqtt::setState(State s) {
   switch (s) {
     case State::ATTACHING:
       _cgpaddrChecked = false;
+      _csqCheckedAfterAttach = false;
       _lastCeregPollMs = 0;
       break;
     case State::IDLE:
@@ -512,7 +513,24 @@ void ModemNBIoTMqtt::tickAttaching() {
 
   if (_cmd.active) return;
   if (_cmd.outcome == CmdOutcome::NONE) return;
-  consumeOutcome();  // whatever it said, CEREG already confirmed attachment - not worth failing over
+
+  if (!_csqCheckedAfterAttach) {
+    consumeOutcome();  // whatever CGPADDR said, CEREG already confirmed attachment - not worth failing over
+    // One AT+CSQ right here, not gated behind MQTT_CONNECT succeeding -
+    // otherwise the signal reading (and anything displaying it, e.g. the
+    // OLED's bars) never updates while Module A/the broker is unreachable,
+    // even though the modem is genuinely attached with a real signal.
+    issueCommand("AT+CSQ", NBIOT_AT_CMD_TIMEOUT_MS);
+    _csqCheckedAfterAttach = true;
+    return;
+  }
+
+  CmdOutcome csqOutcome = consumeOutcome();
+  if (csqOutcome == CmdOutcome::OK && _cmd.hasInfoLine) {
+    int dbm;
+    if (NbiotProtocol::parseCsq(_cmd.infoLine, dbm)) _rssiDbm = dbm;
+  }
+
   _mqttConnectSub = MqttConnectSub::KEEPALIVE_CFG;
   setState(State::MQTT_CONNECT);
 }

@@ -29,6 +29,27 @@ link parameters and the telemetry payload format.
   user's request; state names themselves stay in English to match the serial
   log and web dashboard. Libraries: `adafruit/Adafruit SSD1306` +
   `adafruit/Adafruit GFX Library`, both in `module-b-main`'s `lib_deps`.
+- **NB-IoT signal strength as bars, and a real bug behind it.** The OLED's
+  `NBIoT:` line now shows a 4-bar indicator (`drawSignalBars()`) instead of a
+  raw dBm number. Fixing it exposed a genuine bug: `AT+CSQ` was only ever
+  polled after `ModemNBIoTMqtt` reached `IDLE`, i.e. only after a *successful
+  MQTT connect* - so the signal reading (and the bars) stayed empty/unmeasured
+  the entire time Module A/the broker was unreachable, even when cellular
+  attach and signal were both fine. Fixed by polling `AT+CSQ` once
+  immediately after network attach (`tickAttaching()`), independent of
+  whether MQTT ever connects. Ported to both `relay` and here.
+- **Splash/decorative boot image removed** - was drawn once in `setup()` and
+  held until the first status refresh ~1s later (visible as a brief "flash"
+  on every reset, which read as a bug until traced back to this). OLED now
+  goes straight to the live status screen; `OledSplash.h` deleted.
+- **Two physical Module B units now exist**, both flashed identically as
+  plain spares (same `LORA_MY_ADDR`, MQTT identity, AP SSID - not the
+  distinct-per-cell multi-relay setup floated earlier and then scrapped).
+  One board initially couldn't attach to the NB-IoT network at all (stuck at
+  `+CEREG: 0,2` / "searching" indefinitely, despite SIM ready and APN config
+  succeeding) - moving it next to a window fixed it, confirming this was a
+  signal/antenna-positioning issue, not a config problem. The second unit hit
+  the identical symptom and likely needs the same repositioning.
 
 ## Hardware
 

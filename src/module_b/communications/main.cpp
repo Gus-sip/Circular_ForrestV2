@@ -27,7 +27,6 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include "Config.h"
-#include "OledSplash.h"
 #include "modem_nbiot_mqtt.h"
 #include "radio/RYLR998.h"
 #include "telemetry/SensorSnapshot.h"
@@ -82,6 +81,40 @@ static void handleData() {
   server.send(200, "application/json", json);
 }
 
+// Draws a 4-bar phone-style signal indicator (bars grow left->right, filled
+// up to the current level) at top-left corner (x, y), bottom-aligned within
+// an 8px-tall row. Thresholds are the common cellular-bar convention, mapped
+// onto parseCsq()'s -113..-51 dBm range (see NbiotProtocol.cpp); rssiDbm==0
+// means "no AT+CSQ reading yet" (a real reading is never 0), drawn as all
+// bars empty rather than misleadingly showing signal that hasn't been
+// measured.
+static void drawSignalBars(int x, int y, int rssiDbm) {
+  int level;
+  if (rssiDbm == 0) {
+    level = 0;
+  } else if (rssiDbm >= -70) {
+    level = 4;
+  } else if (rssiDbm >= -85) {
+    level = 3;
+  } else if (rssiDbm >= -100) {
+    level = 2;
+  } else {
+    level = 1;
+  }
+
+  const int barW = 3, gap = 1, maxH = 8;
+  for (int i = 0; i < 4; i++) {
+    int h = (i + 1) * 2;  // 2, 4, 6, 8 px tall
+    int bx = x + i * (barW + gap);
+    int by = y + (maxH - h);
+    if (i < level) {
+      oled.fillRect(bx, by, barW, h, SSD1306_WHITE);
+    } else {
+      oled.drawRect(bx, by, barW, h, SSD1306_WHITE);
+    }
+  }
+}
+
 // Refreshes the OLED with a compact live-activity view - answers "what is
 // this board doing right now" at a glance without needing the web dashboard:
 // LoRa RX recency/link quality, and the NB-IoT/MQTT state machine's current
@@ -114,6 +147,8 @@ static void updateOledStatus() {
   oled.printf("Env %lu Err %lu Prd %lu\n", (unsigned long)modem.packetsSent(),
               (unsigned long)modem.packetsFailed(), (unsigned long)modem.packetsDropped());
 
+  drawSignalBars(112, 0, modem.rssiDbm());  // top-right corner, same row as "Modulo B"
+
   oled.display();
 }
 
@@ -139,9 +174,8 @@ void setup() {
   Wire.begin(OLED_SDA_PIN, OLED_SCL_PIN);
   if (oled.begin(SSD1306_SWITCHCAPVCC, OLED_I2C_ADDR)) {
     oled.clearDisplay();
-    oled.drawBitmap(0, 0, SPLASH_BITMAP, OLED_WIDTH, OLED_HEIGHT, SSD1306_WHITE);
     oled.display();
-    Serial.println("OLED: splash displayed");
+    Serial.println("OLED: init OK");
   } else {
     Serial.println("OLED: init FAILED (check wiring - SDA=GPIO1, SCL=GPIO2)");
   }
