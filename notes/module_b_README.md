@@ -7,6 +7,41 @@ from the sensor node (Module C, `src/module_c/` in this same project,
 originally the sibling `../../sensor_node/` project); the two only need to agree on the LoRa
 link parameters and the telemetry payload format.
 
+## 2026-08-27 — First real Module C -> Module B LoRa confirmation, local logging
+
+- **First live end-to-end reception confirmed.** With a real Module C board
+  running (`module-c-lora-tx`) and a working Module B nearby, `+RCV=` packets
+  came through repeatedly with strong link quality (RSSI around -22 to -42,
+  SNR 10-11). Sensor values stabilized over consecutive packets as expected -
+  BME690 (temp/hum/pres/gas) and CM1106 (co2=588ppm steady) both went from
+  `0.00` placeholders to real, plausible readings within the first few
+  cycles; BMV080/wind hadn't produced a valid reading yet in this session.
+- **Local reading history added to Module B**, independent of ThingsBoard -
+  a 200-entry in-RAM ring buffer (`LORA_HISTORY_CAPACITY` in `Config.h`) of
+  every successfully-parsed LoRa reading, downloadable as CSV from `/history`
+  (also linked from the main dashboard). Not persisted across reboot - a
+  bench convenience, not a replacement for the real uplink. Every field is
+  captured: time since boot, sender address, RSSI/SNR, and all 13 sensor
+  fields.
+- **PC-side serial logger** (`logs/log_module_b_lora.py`, gitignored output)
+  - runs continuously in the background on the dev machine, tailing Module
+  B's USB serial for `+RCV=` lines and appending them to
+  `logs/module_b_lora_log.csv` with a real wall-clock timestamp (the board
+  itself has no RTC). Independent of the on-device `/history` buffer -
+  works even without WiFi access to Module B's AP.
+- **Module C's `TX_INTERVAL_MS` temporarily dropped to 5000** (from 120000)
+  for closer bench-test observation, clearly marked in the file header as
+  temporary/below the legal EU868 duty-cycle floor - **not yet flashed**,
+  see below.
+- **Module C board hit a persistent USB upload failure** (Windows error 31,
+  "device not functioning") that survived killing lingering python
+  processes holding the port and a full physical unplug/replug (port
+  re-enumerated with a new LOCATION but the same fault). Left unresolved at
+  session's end - the board's LoRa TX/RX keeps working fine over the radio
+  link regardless (confirmed above), this only blocks reflashing it over
+  USB. Try a different USB port/cable next, or check Device Manager for a
+  driver-level warning on that port.
+
 ## 2026-08-25 — PCB bring-up session
 
 - **`LORA_EN_PIN` (GPIO13) added.** The physical Module B PCB gates the LoRa

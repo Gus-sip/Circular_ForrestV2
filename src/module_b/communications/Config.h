@@ -74,6 +74,14 @@ inline void nbiotResolveNodeName(uint16_t addr, char *outName, size_t outCap) {
 #define WIFI_AP_SSID "CHIP-FOREST-RX"
 #define WIFI_AP_PASSWORD "chipforest1"
 
+// ---------- Local history log ----------
+// In-RAM ring buffer of received readings, downloadable as CSV from
+// /history - lets you record what Module C sent even when Module A/MQTT is
+// unreachable (or you just don't want to wait on ThingsBoard for a quick
+// bench test). Not persisted across a reboot/power loss - this is a bench
+// convenience, not a replacement for the real ThingsBoard uplink.
+#define LORA_HISTORY_CAPACITY 200
+
 // ---------- Dashboard staleness ----------
 // If no packet has arrived within this window, the dashboard shows "signal
 // lost" instead of the last numbers, so stale data is never mistaken for live.

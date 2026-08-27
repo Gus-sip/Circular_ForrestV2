@@ -47,6 +47,15 @@ WebServer server(80);
 
 SensorSnapshot g_latest;
 
+// Ring buffer of every successfully-parsed reading received over LoRa, in
+// RAM only (lost on reboot/power loss) - see Config.h's LORA_HISTORY_CAPACITY.
+// Independent of modem's own uplink ring (that one exists to batch for
+// NB-IoT and gets drained on publish; this one is purely a local record for
+// /history and is never drained, just wraps oldest-first once full).
+SensorSnapshot g_history[LORA_HISTORY_CAPACITY];
+uint16_t g_historyHead = 0;
+uint16_t g_historyCount = 0;
+
 static void handleRoot() {
   server.send_P(200, "text/html", DASHBOARD_HTML);
 }
@@ -79,6 +88,41 @@ static void handleData() {
            modem.batchReadingsTarget(), (unsigned long)modem.batchSecondsTarget(), modem.ringCount());
 
   server.send(200, "application/json", json);
+}
+
+// Serves every buffered reading as a downloadable CSV - millisSinceBoot lets
+// you compute wall-clock time if you know when the board booted, and stays
+// monotonic across the whole buffer even though there's no RTC on this
+// board. Oldest reading first. Built into a static buffer (not the Arduino
+// String heap) sized for LORA_HISTORY_CAPACITY rows at this row width, with
+// room to spare - see the size check below if either grows.
+static char g_historyCsvBuf[LORA_HISTORY_CAPACITY * 110 + 256];
+
+static void handleHistory() {
+  size_t pos = 0;
+  auto append = [&](const char *s) {
+    size_t n = strlen(s);
+    if (pos + n < sizeof(g_historyCsvBuf)) {
+      memcpy(g_historyCsvBuf + pos, s, n);
+      pos += n;
+    }
+  };
+
+  append(
+      "millisSinceBoot,senderAddr,rssi,snr,temp,hum,pres,gas,pm1,pm25,pm10,co2,co,coTemp,windAngle,"
+      "windSpeed,windValid\n");
+
+  for (uint16_t i = 0; i < g_historyCount; i++) {
+    const SensorSnapshot &s = g_history[(g_historyHead + i) % LORA_HISTORY_CAPACITY];
+    char row[110];
+    snprintf(row, sizeof(row), "%lu,%u,%d,%d,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d\n",
+             (unsigned long)s.lastHeardMs, s.senderAddr, s.rssi, s.snr, s.temp, s.hum, s.pres, s.gas, s.pm1,
+             s.pm25, s.pm10, s.co2, s.co, s.coTemp, s.windAngle, s.windSpeed, s.windValid ? 1 : 0);
+    append(row);
+  }
+
+  server.sendHeader("Content-Disposition", "attachment; filename=\"module_b_history.csv\"");
+  server.send(200, "text/csv", g_historyCsvBuf);
 }
 
 // Draws a 4-bar phone-style signal indicator (bars grow left->right, filled
@@ -168,8 +212,9 @@ void setup() {
 
   server.on("/", handleRoot);
   server.on("/data", handleData);
+  server.on("/history", handleHistory);
   server.begin();
-  Serial.println("Web server started.");
+  Serial.printf("Web server started - reading history CSV at http://%s/history\n", apIP.toString().c_str());
 
   Wire.begin(OLED_SDA_PIN, OLED_SCL_PIN);
   if (oled.begin(SSD1306_SWITCHCAPVCC, OLED_I2C_ADDR)) {
@@ -213,6 +258,14 @@ void loop() {
       snap.snr = msg.snr;
       g_latest = snap;
       modem.enqueue(snap);
+
+      uint16_t idx = (uint16_t)((g_historyHead + g_historyCount) % LORA_HISTORY_CAPACITY);
+      g_history[idx] = snap;
+      if (g_historyCount < LORA_HISTORY_CAPACITY) {
+        g_historyCount++;
+      } else {
+        g_historyHead = (uint16_t)((g_historyHead + 1) % LORA_HISTORY_CAPACITY);
+      }
     } else {
       Serial.println("  (payload didn't match the expected schema - dropped, see "
                       "telemetry/TelemetryParser.h)");

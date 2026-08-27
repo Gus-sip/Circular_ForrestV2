@@ -14,6 +14,7 @@ const char DASHBOARD_HTML[] PROGMEM = R"HTML(<!DOCTYPE html>
 </head>
 <body>
 <pre id="out">connecting...</pre>
+<p><a href="/history">Download reading history (CSV)</a></p>
 <script>
 function fmt(v) { return (typeof v === 'number') ? v.toFixed(1) : v; }
 

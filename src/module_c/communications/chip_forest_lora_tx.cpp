@@ -108,7 +108,12 @@
 #define LORA_MY_ADDR 1  // this node's AT+ADDRESS
 #define LORA_RX_ADDR 2  // pp1-lora-receiver's AT+ADDRESS
 
-#define TX_INTERVAL_MS 120000          // default sample/TX cadence - duty-cycle headroom, see file header
+// TEMPORARY 2026-08-25: shrunk to 5s for a bench test of the LoRa link with
+// Module B plugged in nearby. This is BELOW the ~47s legal EU863-870
+// duty-cycle floor calculated in the file header - fine for a short,
+// attended bench session, not legal for continuous/unattended operation.
+// Revert to 120000 before leaving this running unattended or deploying.
+#define TX_INTERVAL_MS 5000            // default sample/TX cadence - duty-cycle headroom, see file header
 #define TX_INTERVAL_MIN_MS 60000       // legal-duty-cycle floor with margin - CFG,INTERVAL can never go below this
 #define TX_INTERVAL_MAX_MS 86400000UL  // 24h sanity ceiling - guards a fat-fingered CFG bricking telemetry
 
