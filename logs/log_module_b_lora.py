@@ -21,8 +21,15 @@ RCV_RE = re.compile(r'\+RCV addr=(\d+) len=(\d+) rssi=(-?\d+) snr=(-?\d+) data="
 
 is_new_file = not os.path.exists(OUT_PATH)
 
-s = serial.Serial(PORT, BAUD, timeout=1)
-print(f"Logging Module B ({PORT}) LoRa receptions to {OUT_PATH}", flush=True)
+
+def open_port():
+    while True:
+        try:
+            return serial.Serial(PORT, BAUD, timeout=1)
+        except serial.SerialException as e:
+            print(f"open failed ({e}), retrying in 3s...", flush=True)
+            time.sleep(3)
+
 
 with open(OUT_PATH, "a", newline="") as f:
     writer = csv.writer(f)
@@ -30,8 +37,30 @@ with open(OUT_PATH, "a", newline="") as f:
         writer.writerow(FIELDS)
         f.flush()
 
+    s = open_port()
+    print(f"Logging Module B ({PORT}) LoRa receptions to {OUT_PATH}", flush=True)
+
     while True:
-        raw = s.readline()
+        # Windows' USB-CDC serial driver on this machine occasionally drops
+        # into a "device doesn't recognize the command" state mid-read
+        # (same class of glitch seen on other boards' ports this session) -
+        # not a data-corruption issue, just a transient driver hiccup. Rather
+        # than let that kill the logger, close and reopen the port and keep
+        # going; nothing is lost except whatever reading arrived during the
+        # brief gap.
+        try:
+            raw = s.readline()
+        except serial.SerialException as e:
+            print(f"serial error ({e}) - reopening port...", flush=True)
+            try:
+                s.close()
+            except Exception:
+                pass
+            time.sleep(2)
+            s = open_port()
+            print("port reopened, resuming.", flush=True)
+            continue
+
         if not raw:
             continue
         try:
