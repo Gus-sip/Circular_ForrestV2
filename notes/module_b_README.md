@@ -49,7 +49,32 @@ link parameters and the telemetry payload format.
   `+CEREG: 0,2` / "searching" indefinitely, despite SIM ready and APN config
   succeeding) - moving it next to a window fixed it, confirming this was a
   signal/antenna-positioning issue, not a config problem. The second unit hit
-  the identical symptom and likely needs the same repositioning.
+  the identical symptom, but repositioning it (and swapping in first the
+  known-good antenna, then a bigger one) made no difference - see below.
+- **Second Module B unit's NB-IoT: hardware fault found, not
+  antenna/positioning.** Repositioning didn't help this unit like it did the
+  first, so built a proper diagnostic tool
+  (`pcb_bringup_test/src/NBIoT_SignalDiag_test.cpp`, env
+  `nbiot-signal-diag`) that queries `AT+CSQ` (raw signal, works without
+  registration), `AT+QENG="servingcell"`, `AT+QCCID` (which SIM is
+  physically inserted), and a full `AT+COPS=?` operator scan. Result on this
+  unit: SIM reads fine (`+CPIN: READY`, ICCID `89882280666800022158`), `AT`
+  itself intermittently drops out entirely (recovers on its own, correlated
+  with handling the antenna connector), and `AT+CSQ` consistently reads
+  `99,99` ("no signal detectable") regardless of antenna - tried the
+  known-good antenna from the working unit, then a bigger one, no change.
+  Same firmware confirmed working fine on the other (good) unit, ruling out
+  a code issue. Continuity-tested by hand: the GPIO10 (`NBIOT_CHANNEL_PIN`)
+  transistor's *control* signal (GPIO -> gate) is fine, but its **3.3V power
+  path has a broken/marginal continuity** - not the antenna, not the EN
+  (GPIO9) transistor, not firmware. This is the same GPIO10 channel gate
+  flagged during last week's bring-up as being on the path needed for the
+  module to work at all (see `Config.h`'s NB-IoT section) - a flaky
+  connection there plausibly explains both symptoms: intermittent AT
+  (enough power to limp along sometimes) and permanently dead RF (never
+  enough clean power for the radio to actually operate). Needs a hardware
+  repair (trace/solder joint on that specific 3.3V segment) - not a
+  firmware fix, and not resolved by this session's end.
 
 ## Hardware
 
