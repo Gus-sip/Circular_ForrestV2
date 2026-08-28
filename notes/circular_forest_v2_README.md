@@ -26,7 +26,10 @@ src/
     sensor/          - sensor drivers (BME690, SEN0466, BMV080, CM1106,
                         Calypso wind meter), their ISensor/Reading interface,
                         the standalone single-sensor bring-up sketches,
-                        PowerManager/SleepManager/Sampler, Config.h, pins.h
+                        PowerManager/Sampler, Config.h, pins.h
+                        (SleepManager removed 2026-08-28 - light sleep broke
+                        USB-Serial/JTAG + the Calypso UART on the ESP32-S3;
+                        chip_forest_lora_tx.cpp now uses a plain delay())
     communications/   - the real LoRa-TX shipping firmware
                         (chip_forest_lora_tx.cpp) + RYLR998 bring-up/test
                         sketches (rylr998_bridge/demo/param_probe.cpp)
@@ -51,7 +54,7 @@ notes/                   docs carried over from each source project (this
 `chip_forest_lora_tx.cpp` is the one file that genuinely straddles both
 concerns (reads all five sensors *and* transmits over LoRa) - it lives in
 `module_c/communications/` since that's its role in the system, and its
-`#include`s for `pins.h`/`Config.h`/`PowerManager.h`/`SleepManager.h`/the
+`#include`s for `pins.h`/`Config.h`/`PowerManager.h`/the
 sensor headers were updated to `../sensor/...` accordingly. No other file
 needed its include paths touched - everything else's dependencies stayed
 within whichever subfolder it moved into.

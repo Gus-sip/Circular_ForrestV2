@@ -18,12 +18,20 @@ bool CalypsoSensor::checksumOk(const char *sentence, uint8_t len, int starIdx) {
   return calc == received;
 }
 
+void CalypsoSensor::flushInput() {
+  while (_serial.available()) _serial.read();
+  _lineLen = 0;
+  _lastReadBytes = 0;  // start a fresh count for the poll window that follows
+}
+
 Reading CalypsoSensor::read() {
   Reading r;
   r.status = ReadingStatus::NotReady;
 
+  uint16_t bytesThisCall = 0;
   while (_serial.available()) {
     char c = _serial.read();
+    bytesThisCall++;
 
     if (c == '\n') {
       if (_lineLen > 0 && _line[0] == '$' && _lineLen > 5 && memcmp(_line + 3, "MWV", 3) == 0) {
@@ -67,5 +75,7 @@ Reading CalypsoSensor::read() {
       }
     }
   }
+
+  _lastReadBytes += bytesThisCall;
   return r;
 }

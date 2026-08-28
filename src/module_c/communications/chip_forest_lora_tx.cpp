@@ -2,7 +2,8 @@
  * CHIP FOREST bring-up + LoRa TX: all five sensors read each cycle, encoded
  * into a CSV payload, and transmitted over the RYLR998 to the ground-station
  * receiver (the separate pp1-lora-receiver project). Between cycles the node
- * light-sleeps (see SleepManager) rather than busy-looping.
+ * waits on a plain delay() - light sleep was removed (it broke USB-Serial/JTAG
+ * and the Calypso UART on the ESP32-S3); see the cycle-timing note below.
  *
  * Payload schema (must match pp1-lora-receiver's TelemetryParser exactly):
  *   temp,hum,pres,gas,pm1,pm25,pm10,co2,co,coTemp,windAngle,windSpeed,windValid
@@ -47,23 +48,28 @@
  * about a year. A long-term deployment should uplink 1-min averages from
  * Module B instead of every raw sample (not done here).
  *
- * Sleep cycle and remote config-push: the node light-sleeps between cycles
- * (SleepManager) rather than busy-looping, waking only on its own timer -
- * this is a scheduled Class-A-style cycle, not an asynchronous listener.
- * Each cycle: wake, read sensors, transmit telemetry, then open a short
- * LORA_POST_TX_LISTEN_MS window to receive a config command from Module B
- * (if one is queued), reply with an ACK if one was applied, then sleep
- * again. This is the *only* moment Module C can be reached - whatever
- * relays Module A's commands down to it must hold/queue a pending command
- * and send it the instant it sees this node's uplink, not at an arbitrary
- * time. Light sleep (not deep sleep) is deliberate even though the radio no
- * longer needs to stay listening: deep sleep would force a full reboot each
- * cycle, repaying BMV080's 5s startup delay + CM1106's 3s EN warmup + the
- * RYLR998's AT handshake every 120s, and risking BMV080 (which needs
- * "several seconds of continuous operation" per its own driver header)
- * never producing a properly stabilized reading. Light sleep preserves
- * RAM/peripheral driver state across cycles, so all of that only happens
- * once at boot - see SleepManager.h.
+ * Cycle timing and remote config-push: the node runs a plain delay()
+ * between cycles (NOT light/deep sleep - see below), on a scheduled
+ * Class-A-style cycle, not an asynchronous listener. Each cycle: read
+ * sensors, transmit telemetry, open a short LORA_POST_TX_LISTEN_MS window to
+ * receive a config command from Module B (if one is queued), reply with an
+ * ACK if one was applied, then delay to the next cycle. That post-TX window
+ * is the *only* moment Module C can be reached - whatever relays Module A's
+ * commands down to it must hold/queue a pending command and send it the
+ * instant it sees this node's uplink, not at an arbitrary time.
+ *
+ * No sleep (2026-08-28): light sleep was removed. On the ESP32-S3 the
+ * USB-Serial/JTAG peripheral does not survive esp_light_sleep_start() - it
+ * dropped and re-enumerated every cycle, wedging the host serial port and
+ * making the board effectively un-debuggable over USB, and it also cost the
+ * Calypso UART its buffered data each cycle (the driver ISR is halted during
+ * sleep). delay() keeps the CPU in a FreeRTOS wait (USB + all UART ISRs
+ * still serviced) and preserves every driver's RAM/peripheral state across
+ * cycles, so BMV080's 5s startup, CM1106's 3s warmup and the RYLR998 AT
+ * handshake are still paid only once at boot. The cost is power: the node no
+ * longer sleeps between cycles. Re-introducing a sleep for a battery
+ * deployment is future work and must keep USB debugging in mind (e.g. gate
+ * it behind a build flag, or only sleep when no USB host is attached).
  *
  * Downlink command grammar (Module B -> this node), styled to match
  * pp1-lora-receiver's own Module A->B grammar (NbiotProtocol.h) so a future
@@ -99,7 +105,6 @@
 #include "../sensor/pins.h"
 #include "../sensor/Config.h"
 #include "../sensor/PowerManager.h"
-#include "../sensor/SleepManager.h"
 #include "../sensor/sensors/Bme690Sensor.h"
 #include "../sensor/sensors/Sen0466Sensor.h"
 #include "../sensor/sensors/Cm1106Sensor.h"
@@ -140,8 +145,15 @@
 
 #define LORA_POST_TX_LISTEN_MS 2000  // window after each TX to receive a queued CFG command - see file header
 
+// After a light-sleep wake the Calypso's UART wasn't being serviced, so its
+// RX buffer holds only a stale fragment. Flush it, then poll this long for a
+// fresh checksum-valid $--MWV sentence (the unit streams several per second,
+// so this usually returns in well under half the window). A single read on
+// wake, as this loop did before, almost never caught a complete sentence -
+// which is why wind read 0/0/false even with the sensor connected.
+#define CALYPSO_READ_WINDOW_MS 1500
+
 PowerManager power;
-SleepManager sleepMgr;
 
 Bme690Sensor bme690(BME690_I2C_ADDR);
 Sen0466Sensor sen0466(SEN0466_I2C_ADDR);
@@ -322,15 +334,34 @@ void setup() {
 }
 
 void loop() {
-  sleepMgr.sleep((uint64_t)g_txIntervalMs * 1000ULL);
+  // Plain wait to the next cycle - NOT light sleep (broke USB-Serial/JTAG and
+  // the Calypso UART on the ESP32-S3, see the file header). delay() yields to
+  // FreeRTOS, so USB and every UART ISR keep running through it.
+  delay(g_txIntervalMs);
 
-  // Wind sensor streams continuously - one snapshot per wake.
+  // Wind sensor streams NMEA continuously. Flush the stale fragment left by
+  // the light-sleep, then poll briefly for a fresh valid sentence - see
+  // CALYPSO_READ_WINDOW_MS.
   if (g_calypsoEnabled) {
-    Reading wind = calypso.read();
+    calypso.flushInput();
+    Reading wind;
+    uint32_t windStart = millis();
+    do {
+      wind = calypso.read();
+      if (wind.ok()) break;
+      delay(10);
+    } while (millis() - windStart < CALYPSO_READ_WINDOW_MS);
+
     if (wind.ok()) {
       g_windAngle = wind.values[0];
       g_windSpeed = wind.values[1];
       g_windValid = wind.values[2] > 0.5f;
+      Serial.printf("Wind: %.1f deg  %.2f  %s\n", g_windAngle, g_windSpeed,
+                    g_windValid ? "valid(A)" : "void(V)");
+    } else {
+      // rx=0 across cycles -> sensor silent (unwired / no power / wrong pins/baud);
+      // rx>0 but no valid sentence -> data arriving but garbled/wrong format.
+      Serial.printf("Wind: no valid NMEA this cycle (rx bytes=%u)\n", calypso.lastReadBytes());
     }
   }
 

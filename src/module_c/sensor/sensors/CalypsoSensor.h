@@ -26,6 +26,17 @@ public:
   void sleep() override {}
   const char *name() const override { return "Calypso"; }
 
+  // Drops any buffered bytes and resets the partial-line parser. Call right
+  // after a light-sleep wake: the UART ISR was halted through the sleep, so
+  // whatever survived in the RX FIFO is a stale, likely-truncated fragment -
+  // parsing it just wastes the first read() and can desync the next one.
+  void flushInput();
+
+  // Bytes drained by the last read() call - lets the caller tell "sensor not
+  // wired / silent" (0 across every cycle) from "data arriving but no valid
+  // sentence yet" (>0).
+  uint16_t lastReadBytes() const { return _lastReadBytes; }
+
 private:
   static constexpr uint8_t kLineMax = 120;
 
@@ -34,6 +45,7 @@ private:
   uint32_t _baud;
   char _line[kLineMax + 1] = {0};
   uint8_t _lineLen = 0;
+  uint16_t _lastReadBytes = 0;
 
   static bool checksumOk(const char *sentence, uint8_t len, int starIdx);
 };
