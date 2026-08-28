@@ -20,19 +20,32 @@
  * band, as low as 1% in the commonly used 868.0-868.6MHz sub-band that this
  * project's AT+BAND=868000000 falls in. Using Semtech's public LoRa airtime
  * formula (not measured on this exact module - treat as an estimate) at
- * SF9/BW125kHz(index 7 on this module)/CR 4/5/preamble 12 with an ~80-byte
+ * SF7/BW125kHz(index 7 on this module)/CR 4/5/preamble 12 with an ~75-byte
  * payload:
- *   preamble time   = (12 + 4.25) * 2^9/125000s           ~= 66.6ms
- *   payload symbols = 8 + ceil((8*80 - 36 + 28 + 16) / 36) * 5 = 98
- *   payload time    = 98 * 2^9/125000s                    ~= 401ms
- *   total per packet ~= 468ms
- * A 1% duty cycle allows ~36s of airtime per hour, i.e. one 468ms packet
- * roughly every 47s at the legal limit. TX_INTERVAL_MS below (120s default)
- * keeps better than 2.5x margin under that. The interval is now runtime-
- * mutable via downlink CFG (see below) but is always clamped to
- * TX_INTERVAL_MIN_MS (60s) so a remote push can't drive it under the legal
- * floor - recompute the floor above before lowering that clamp, this is a
- * legal constraint, not a tunable.
+ *   symbol time     = 2^7/125000s                         ~= 1.024ms
+ *   preamble time   = (12 + 4.25) * 1.024ms               ~= 16.6ms
+ *   payload symbols = 8 + ceil((8*75 - 4*7 + 28 + 16) / (4*7)) * 5 = 8 + 22*5 = 118
+ *   payload time    = 118 * 1.024ms                       ~= 120.8ms
+ *   total per packet ~= 137ms
+ * A 1% duty cycle allows ~36s of airtime per hour. At TX_INTERVAL_MS = 15s
+ * that's 240 packets/hour * 137ms ~= 33s/hour - under the 36s cap, ~9%
+ * margin. This is TIGHT: it only holds at SF7 and this payload size. The old
+ * SF9 setting (468ms/packet) made 15s a 3x duty-cycle violation - SF7 was
+ * chosen specifically to make this cadence legal, at a real cost of ~5-6dB
+ * link budget (roughly half the range, worse through foliage - no field
+ * range test has confirmed the deployment still closes at SF7). If you
+ * revert to SF9, you MUST raise TX_INTERVAL_MS back to >=50s. The interval
+ * is runtime-mutable via downlink CFG (see below) but is always clamped to
+ * TX_INTERVAL_MIN_MS so a remote push can't drive it under the legal floor -
+ * recompute the floor above before touching SF, BW, payload size, or that
+ * clamp: this is a legal constraint, not a tunable.
+ *
+ * Cellular-data cost note (Module B's NB-IoT uplink, not this link): at 15s
+ * this node emits ~5760 readings/day, which Module B batches to ThingsBoard
+ * roughly every 2 min. That is ~1.5MB/day of cellular traffic - fine for
+ * attended/bench use, but it exhausts a 1NCE lifetime SIM (~500MB total) in
+ * about a year. A long-term deployment should uplink 1-min averages from
+ * Module B instead of every raw sample (not done here).
  *
  * Sleep cycle and remote config-push: the node light-sleeps between cycles
  * (SleepManager) rather than busy-looping, waking only on its own timer -
@@ -101,20 +114,28 @@
 // ---------- LoRa link parameters - MUST match pp1-lora-receiver's Config.h ----------
 #define LORA_BAND_HZ 868000000UL  // EU868, Spain deployment (confirmed)
 #define LORA_NETWORK_ID 5
-#define LORA_PARAM_SF 9
+// SF7 (was SF9): halves airtime enough to make the 15s TX_INTERVAL_MS below
+// legal under the EU868 1% duty cycle - see the file-header airtime math.
+// Costs ~5-6dB link budget vs SF9. MUST match Module B's Config.h
+// (LORA_PARAM_SF) exactly. Re-verify AT+PARAMETER=7,7,1,12 comes back +OK on
+// real hardware - this SF/BW/CR/preamble combo has not been confirmed on
+// this module (an earlier 7,7,1,4 attempt returned +ERR=18).
+#define LORA_PARAM_SF 7
 #define LORA_PARAM_BW 7
 #define LORA_PARAM_CR 1
 #define LORA_PARAM_PREAMBLE 12
 #define LORA_MY_ADDR 1  // this node's AT+ADDRESS
 #define LORA_RX_ADDR 2  // pp1-lora-receiver's AT+ADDRESS
 
-// TEMPORARY 2026-08-25: shrunk to 5s for a bench test of the LoRa link with
-// Module B plugged in nearby. This is BELOW the ~47s legal EU863-870
-// duty-cycle floor calculated in the file header - fine for a short,
-// attended bench session, not legal for continuous/unattended operation.
-// Revert to 120000 before leaving this running unattended or deploying.
-#define TX_INTERVAL_MS 5000            // default sample/TX cadence - duty-cycle headroom, see file header
-#define TX_INTERVAL_MIN_MS 60000       // legal-duty-cycle floor with margin - CFG,INTERVAL can never go below this
+// 15s cadence (2026-08-28): fast sampling for a responsive live view. Legal
+// under the EU868 1% duty cycle ONLY at SF7 with this payload size - see the
+// file-header airtime math (~33s airtime/hour vs the ~36s cap, ~9% margin).
+// The 15000 floor below reflects that: at SF7 it's the tightest cadence that
+// stays legal; do NOT lower it, and raise it back to >=50000 if SF ever goes
+// back to 9. See the header's cellular-data-cost note before running this
+// unattended for long.
+#define TX_INTERVAL_MS 15000           // default sample/TX cadence - see file header
+#define TX_INTERVAL_MIN_MS 15000       // legal-duty-cycle floor at SF7 - CFG,INTERVAL can never go below this
 #define TX_INTERVAL_MAX_MS 86400000UL  // 24h sanity ceiling - guards a fat-fingered CFG bricking telemetry
 
 #define LORA_POST_TX_LISTEN_MS 2000  // window after each TX to receive a queued CFG command - see file header

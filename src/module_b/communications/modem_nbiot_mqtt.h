@@ -83,11 +83,23 @@ public:
   uint16_t batchReadingsTarget() const { return _batchReadingsTarget; }
   uint32_t batchSecondsTarget() const { return _batchSecondsTarget; }
   uint8_t ringCount() const { return _ringCount; }
+  bool haveNetTime() const { return _haveNetTime; }
 
 private:
   enum class CmdKind : uint8_t { PLAIN, QMTOPEN, QMTCONN, QMTPUB };
   enum class CmdOutcome : uint8_t { NONE, OK, ERR, TIMEOUT };
-  enum class ConfigStep : uint8_t { ATE0, CMEE, QSCLK, CFUN_ON_1, CPIN, CFUN_OFF, QCGDEFCONT, CFUN_ON_2, DONE };
+  enum class ConfigStep : uint8_t {
+    ATE0,
+    CMEE,
+    CTZU,  // AT+CTZU=1 - auto network time update, so AT+CCLK? works (best-effort)
+    QSCLK,
+    CFUN_ON_1,
+    CPIN,
+    CFUN_OFF,
+    QCGDEFCONT,
+    CFUN_ON_2,
+    DONE
+  };
   enum class MqttConnectSub : uint8_t { CLOSE_FIRST, KEEPALIVE_CFG, OPEN, CONN };
   enum class RecoveryLevel : uint8_t { PUBLISH, MQTT_CONNECT, ATTACH };
 
@@ -141,7 +153,15 @@ private:
   // ---------- Ring buffer ----------
   const SensorSnapshot &ringPeek(uint8_t i) const;
   void popSentReadings();
-  size_t buildGatewayPayload(uint8_t *out, size_t cap);
+  // Builds one AT+QMTPUB payload from up to maxReadings oldest ring entries
+  // (grouped by node name). Sets _lastPublishCount to how many it actually
+  // encoded. Emits {"ts":<ms>,"values":{...}} per reading when network time
+  // is known, else the flat no-"ts" form.
+  size_t buildGatewayPayload(uint8_t *out, size_t cap, uint8_t maxReadings);
+
+  // Epoch-ms "now" from the last AT+CCLK? sync + elapsed millis(). Only
+  // meaningful when _haveNetTime.
+  int64_t netNowMs() const;
 
   // ---------- Fixed config ----------
   HardwareSerial &_serial;
@@ -171,8 +191,18 @@ private:
 
   bool _cgpaddrChecked = false;
   bool _csqCheckedAfterAttach = false;  // one AT+CSQ right after attach - see tickAttaching()
+  bool _cclkChecked = false;            // one AT+CCLK? right after the CSQ check - see tickAttaching()
   uint32_t _lastCeregPollMs = 0;
   uint8_t _attachRetries = 0;
+
+  // ---------- Network time (per-reading uplink timestamps) ----------
+  // Read once per attach via AT+CCLK? (needs AT+CTZU=1). _netEpochMsAtSync is
+  // epoch-ms at the moment _netSyncLocalMs (a millis() value) was captured;
+  // netNowMs() extrapolates from there. Left as "no time" if the network
+  // never provides a plausible clock - the uplink then omits "ts".
+  bool _haveNetTime = false;
+  int64_t _netEpochMsAtSync = 0;
+  uint32_t _netSyncLocalMs = 0;
 
   MqttConnectSub _mqttConnectSub = MqttConnectSub::KEEPALIVE_CFG;
   uint8_t _mqttConnectRetries = 0;
@@ -196,9 +226,11 @@ private:
   // ---------- Batching (fixed for now - no downlink CFG yet, see project
   // memory "project_thingsboard_mqtt_plan" - the v1/gateway/attributes and
   // v1/gateway/rpc topics are the natural home for this later, deliberately
-  // not built yet) ----------
-  uint16_t _batchReadingsTarget = NBIOT_BATCH_DEFAULT_READINGS;
-  uint32_t _batchSecondsTarget = NBIOT_BATCH_DEFAULT_SECONDS;
+  // not built yet). PUBLISHING fires when the ring hits _batchReadingsTarget
+  // OR _batchSecondsTarget elapses since the oldest pending reading, then
+  // drains the whole ring in MQTT_PUB_CHUNK_READINGS-sized QMTPUBs. ----------
+  uint16_t _batchReadingsTarget = MQTT_BATCH_MAX_READINGS;
+  uint32_t _batchSecondsTarget = MQTT_BATCH_SECONDS;
 
   // ---------- Observability ----------
   bool _attached = false;

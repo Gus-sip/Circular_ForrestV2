@@ -225,6 +225,7 @@ void ModemNBIoTMqtt::setState(State s) {
     case State::ATTACHING:
       _cgpaddrChecked = false;
       _csqCheckedAfterAttach = false;
+      _cclkChecked = false;
       _lastCeregPollMs = 0;
       break;
     case State::IDLE:
@@ -405,9 +406,10 @@ void ModemNBIoTMqtt::tickConfig() {
 
   if (_cmd.outcome != CmdOutcome::NONE) {
     CmdOutcome outcome = consumeOutcome();
-    // QSCLK is best-effort (see its case below) - every other step is
-    // required, an ERROR/timeout there is fatal.
-    if (outcome != CmdOutcome::OK && _configStep != ConfigStep::QSCLK) {
+    // CTZU and QSCLK are best-effort (see their cases below) - every other
+    // step is required, an ERROR/timeout there is fatal.
+    if (outcome != CmdOutcome::OK && _configStep != ConfigStep::QSCLK &&
+        _configStep != ConfigStep::CTZU) {
       enterError("a CONFIG step returned ERROR/timeout");
       return;
     }
@@ -421,6 +423,13 @@ void ModemNBIoTMqtt::tickConfig() {
       break;
     case ConfigStep::CMEE:
       issueCommand("AT+CMEE=2", NBIOT_AT_CMD_TIMEOUT_MS);  // verbose errors - "ue not power on" etc, not bare ERROR
+      break;
+    case ConfigStep::CTZU:
+      // Auto network time-zone/clock update, so AT+CCLK? later returns real
+      // network time to timestamp each uplink reading. Set before CFUN=1 so
+      // the sync happens during attach. Best-effort: if the module rejects
+      // it, per-reading "ts" is just skipped (see buildGatewayPayload).
+      issueCommand("AT+CTZU=1", NBIOT_AT_CMD_TIMEOUT_MS);
       break;
     case ConfigStep::QSCLK:
       // BENCH SETTING, NOT A DESIGN DECISION - the hub runs off solar +
@@ -525,14 +534,41 @@ void ModemNBIoTMqtt::tickAttaching() {
     return;
   }
 
-  CmdOutcome csqOutcome = consumeOutcome();
-  if (csqOutcome == CmdOutcome::OK && _cmd.hasInfoLine) {
-    int dbm;
-    if (NbiotProtocol::parseCsq(_cmd.infoLine, dbm)) _rssiDbm = dbm;
+  if (!_cclkChecked) {
+    CmdOutcome csqOutcome = consumeOutcome();
+    if (csqOutcome == CmdOutcome::OK && _cmd.hasInfoLine) {
+      int dbm;
+      if (NbiotProtocol::parseCsq(_cmd.infoLine, dbm)) _rssiDbm = dbm;
+    }
+    // One AT+CCLK? per attach to seed the epoch<->millis() offset used to
+    // timestamp each reading in the MQTT uplink. Best-effort: a failure (or
+    // an implausible clock) just leaves _haveNetTime false and the uplink
+    // omits "ts".
+    issueCommand("AT+CCLK?", NBIOT_AT_CMD_TIMEOUT_MS);
+    _cclkChecked = true;
+    return;
+  }
+
+  CmdOutcome cclkOutcome = consumeOutcome();
+  if (cclkOutcome == CmdOutcome::OK && _cmd.hasInfoLine) {
+    int64_t epochMs;
+    if (NbiotProtocol::parseCclk(_cmd.infoLine, epochMs) && epochMs >= NBIOT_MIN_VALID_EPOCH_MS) {
+      _netEpochMsAtSync = epochMs;
+      _netSyncLocalMs = millis();
+      _haveNetTime = true;
+      Serial.printf("[nbiot-mqtt] network time acquired: epoch %lld ms - uplink readings will carry per-reading ts\n",
+                    (long long)epochMs);
+    } else {
+      Serial.println("[nbiot-mqtt] no usable network time (AT+CCLK?) - uplink will use ThingsBoard receipt time");
+    }
   }
 
   _mqttConnectSub = MqttConnectSub::KEEPALIVE_CFG;
   setState(State::MQTT_CONNECT);
+}
+
+int64_t ModemNBIoTMqtt::netNowMs() const {
+  return _netEpochMsAtSync + (int64_t)(int32_t)(millis() - _netSyncLocalMs);
 }
 
 void ModemNBIoTMqtt::tickMqttConnect() {
@@ -662,7 +698,7 @@ void ModemNBIoTMqtt::tickPublishing() {
   if (_cmd.active) return;
 
   if (!_publishInFlight) {
-    _publishPayloadLen = buildGatewayPayload(_publishPayload, sizeof(_publishPayload));
+    _publishPayloadLen = buildGatewayPayload(_publishPayload, sizeof(_publishPayload), MQTT_PUB_CHUNK_READINGS);
     if (_publishPayloadLen == 0) {
       setState(State::IDLE);  // nothing to publish - shouldn't happen, batchDue implies a non-empty ring
       return;
@@ -695,6 +731,15 @@ void ModemNBIoTMqtt::onPublishSucceeded() {
   _consecutiveFailures = 0;
   _publishRetries = 0;
   popSentReadings();
+  // One batch is drained as several MQTT_PUB_CHUNK_READINGS-sized QMTPUBs -
+  // stay in PUBLISHING until the ring is empty, only then back to IDLE. The
+  // session is already open, so the next chunk goes out on the following
+  // tick with no reconnect. Arrival rate (~1 reading/15s) is far below drain
+  // rate (a chunk per tick), so this always terminates.
+  if (_ringCount > 0) {
+    _publishInFlight = false;
+    return;
+  }
   setState(State::IDLE);
 }
 
@@ -703,21 +748,38 @@ void ModemNBIoTMqtt::onPublishFailed() {
   handleFailureAtLevel(RecoveryLevel::PUBLISH, "publish failed");
 }
 
-// Builds the ThingsBoard Gateway API telemetry payload:
-//   {"<node>":[{...},...], "<otherNode>":[...]}
-// Groups ring entries by resolved node name (see Config.h's
-// nbiotResolveNodeName) rather than assuming a single node - today there's
-// only ever one, but a mixed batch shouldn't silently mis-group once a
-// second node exists.
+// Writes the decimal digits of a non-negative int64 into out (no NUL), and
+// returns the count. Avoids relying on %lld being compiled into this
+// toolchain's snprintf (nano newlib often omits it).
+static size_t appendI64(char *out, int64_t v) {
+  if (v < 0) v = 0;  // epoch ms is always positive here - defensive only
+  char tmp[24];
+  size_t n = 0;
+  uint64_t u = (uint64_t)v;
+  do {
+    tmp[n++] = (char)('0' + (int)(u % 10));
+    u /= 10;
+  } while (u);
+  for (size_t i = 0; i < n; i++) out[i] = tmp[n - 1 - i];
+  return n;
+}
+
+// Builds one ThingsBoard Gateway API telemetry payload from up to maxReadings
+// of the oldest pending ring entries:
+//   {"<node>":[<rec>,<rec>,...], "<otherNode>":[...]}
+// Ring entries are grouped by resolved node name (see Config.h's
+// nbiotResolveNodeName) rather than assuming a single node.
 //
-// No "ts" field and NO "values" wrapper - the two go together. ThingsBoard's
-// gateway telemetry parser only accepts "values" when it's paired with a "ts"
-// (client-side timestamp); with no reliable clock on this board (see project
-// memory "project_thingsboard_mqtt_plan") the keys must sit flat in each
-// array object and the server timestamps on receipt. Sending {"values":{...}}
-// without a "ts" is the one shape TB rejects outright - QMTPUB still returns
-// OK, but every record is silently dropped server-side (found 2026-08-28).
-size_t ModemNBIoTMqtt::buildGatewayPayload(uint8_t *out, size_t cap) {
+// Two record shapes, and the choice is not free-form - ThingsBoard's gateway
+// parser only accepts a "values" wrapper when it's paired with a "ts":
+//   _haveNetTime : {"ts":<epoch_ms>,"values":{<keys>}}  - real per-reading time
+//   otherwise    : {<keys>}                             - server stamps on receipt
+// Each reading's ts is its LoRa-receive moment: netNowMs() rebased through the
+// reading's own lastHeardMs (a millis() value), so a 2-min batch of 15s-spaced
+// readings lands in ThingsBoard as a real 15s-resolution trend, not 8 points
+// at one instant. The flat fallback (no clock from the network) still stores
+// fine, just at batch-arrival resolution.
+size_t ModemNBIoTMqtt::buildGatewayPayload(uint8_t *out, size_t cap, uint8_t maxReadings) {
   char *buf = reinterpret_cast<char *>(out);
   size_t pos = 0;
   auto append = [&](const char *s) {
@@ -729,7 +791,7 @@ size_t ModemNBIoTMqtt::buildGatewayPayload(uint8_t *out, size_t cap) {
   };
 
   uint8_t count = _ringCount;
-  if (count > _batchReadingsTarget) count = (uint8_t)_batchReadingsTarget;
+  if (count > maxReadings) count = maxReadings;
 
   bool grouped[NBIOT_RING_CAPACITY] = {false};
   char groupName[24];
@@ -758,8 +820,8 @@ size_t ModemNBIoTMqtt::buildGatewayPayload(uint8_t *out, size_t cap) {
       if (!firstReading) append(",");
       firstReading = false;
 
-      char record[400];
-      snprintf(record, sizeof(record),
+      char keys[420];
+      snprintf(keys, sizeof(keys),
                "{"
                "\"temp\":%.2f,\"rh\":%.2f,\"pres\":%.2f,\"gas\":%.2f,"
                "\"pm1\":%.2f,\"pm25\":%.2f,\"pm10\":%.2f,\"co2\":%.2f,"
@@ -768,7 +830,23 @@ size_t ModemNBIoTMqtt::buildGatewayPayload(uint8_t *out, size_t cap) {
                snap.temp, snap.hum, snap.pres, snap.gas, snap.pm1, snap.pm25, snap.pm10, snap.co2, snap.co,
                snap.coTemp, snap.windAngle, snap.windSpeed, snap.windValid ? "true" : "false", (int)snap.rssi,
                (int)snap.snr);
-      append(record);
+
+      if (_haveNetTime) {
+        int64_t ts = _netEpochMsAtSync + (int64_t)(int32_t)(snap.lastHeardMs - _netSyncLocalMs);
+        char tsField[40];
+        size_t tn = 0;
+        memcpy(tsField, "{\"ts\":", 6);
+        tn = 6;
+        tn += appendI64(tsField + tn, ts);
+        memcpy(tsField + tn, ",\"values\":", 10);
+        tn += 10;
+        tsField[tn] = '\0';
+        append(tsField);
+        append(keys);
+        append("}");
+      } else {
+        append(keys);
+      }
     }
     append("]");
   }

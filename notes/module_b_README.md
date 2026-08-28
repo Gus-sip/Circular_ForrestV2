@@ -7,6 +7,41 @@ from the sensor node (Module C, `src/module_c/` in this same project,
 originally the sibling `../../sensor_node/` project); the two only need to agree on the LoRa
 link parameters and the telemetry payload format.
 
+## 2026-08-28 (cont.) — Fast 15s cadence: SF7, time-batched uplink, per-reading timestamps
+
+- **LoRa dropped to SF7** (was SF9) on both ends (`LORA_PARAM_SF` in Module B
+  `Config.h` and Module C `chip_forest_lora_tx.cpp`). Airtime ~137ms/packet
+  (was ~468ms), which is what makes Module C's new 15s TX cadence legal under
+  the EU868 1% duty cycle (~33s airtime/hour vs the ~36s cap - ~9% margin,
+  TIGHT). Cost: ~5-6dB link budget, roughly half the range and worse through
+  foliage. No field range test has confirmed the deployment still closes at
+  SF7. `AT+PARAMETER=7,7,1,12` confirmed `+OK` on Module B's RYLR998.
+- **Module C TX interval 120s -> 15s** (`TX_INTERVAL_MS`), floor
+  `TX_INTERVAL_MIN_MS` also 15s. **Not flashed** - Module C's USB (COM5) hit
+  the same error-31 "device not functioning" fault as 2026-08-27; needs
+  BOOT-button download mode / different cable/port / driver reinstall.
+- **Module B uplink is now time-batched, not 1-per-reading.** New
+  `MQTT_BATCH_*` constants in `Config.h` (separate from the legacy binary-
+  frame `NBIOT_BATCH_*`): publish every `MQTT_BATCH_SECONDS` (120s) or when
+  the ring hits `MQTT_BATCH_MAX_READINGS` (12), then drain the whole ring in
+  `MQTT_PUB_CHUNK_READINGS` (4)-reading `AT+QMTPUB`s back-to-back over the
+  open session (one QMTPUB payload must stay under the BC660K-GL's ~1400B
+  limit). Each chunk is popped from the ring the instant it gets `+QMTPUB:
+  OK` - sent data is never kept or re-sent (`onPublishSucceeded`).
+- **Per-reading timestamps.** Module B now reads network time once per attach
+  via `AT+CCLK?` (needs `AT+CTZU=1`, added to CONFIG) and stamps each reading
+  at its LoRa-receive moment, uplinking `{"ts":<ms>,"values":{...}}`. Without
+  it, a 2-min batch of 8 readings would all land in ThingsBoard at one
+  timestamp. Falls back to the flat no-"ts" form if the network gives no
+  usable clock (year < 2023). New `NbiotProtocol::parseCclk()` +
+  `test_nbiot_protocol` cases (host tests NOT run here - no native gcc on
+  this machine). Confirmed on hardware: `+CCLK: 26/08/28,11:22:54+08` ->
+  epoch 1787908974000 ms.
+- **Cellular data cost:** 15s sampling is ~1.5MB/day of NB-IoT traffic -
+  exhausts a 1NCE lifetime SIM (~500MB) in ~1 year. Fine for bench/attended,
+  not multi-year unattended. Real fix later: uplink 1-min averages from
+  Module B, not every raw sample. Marked in both files' headers.
+
 ## 2026-08-28 — Fixed the gateway telemetry payload shape (data never landed in ThingsBoard)
 
 - **Module B connects to ThingsBoard fine, but no telemetry was ever

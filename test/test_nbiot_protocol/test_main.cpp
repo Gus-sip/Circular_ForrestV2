@@ -48,6 +48,45 @@ void test_parseCsq_unknown_is_rejected() {
   TEST_ASSERT_FALSE(parseCsq("+CSQ: 99,99", dbm));
 }
 
+void test_parseCclk_utc_quoted() {
+  int64_t ms;
+  TEST_ASSERT_TRUE(parseCclk("+CCLK: \"24/01/01,00:00:00+00\"", ms));
+  TEST_ASSERT_EQUAL_INT64(1704067200000LL, ms);  // 2024-01-01T00:00:00Z
+}
+
+void test_parseCclk_positive_tz_shifts_to_utc() {
+  // +08 = 8 * 15min = +2h ahead of UTC; local 00:00 -> UTC 22:00 the day before
+  int64_t ms;
+  TEST_ASSERT_TRUE(parseCclk("+CCLK: 24/01/01,00:00:00+08", ms));
+  TEST_ASSERT_EQUAL_INT64(1704060000000LL, ms);
+}
+
+void test_parseCclk_negative_tz_and_time_of_day() {
+  int64_t ms;
+  TEST_ASSERT_TRUE(parseCclk("+CCLK: \"24/01/01,12:00:00-04\"", ms));
+  TEST_ASSERT_EQUAL_INT64(1704114000000LL, ms);  // 1704067200 + 43200(noon) + 3600(-1h tz)
+}
+
+void test_parseCclk_no_timezone_field() {
+  int64_t ms;
+  TEST_ASSERT_TRUE(parseCclk("+CCLK: 24/06/15,12:30:45", ms));
+  TEST_ASSERT_EQUAL_INT64(1718454645000LL, ms);
+}
+
+void test_parseCclk_rejects_unrelated_line() {
+  int64_t ms;
+  TEST_ASSERT_FALSE(parseCclk("+CSQ: 20,0", ms));
+}
+
+void test_parseCclk_placeholder_year_parses_but_is_implausible() {
+  // A modem with no network time answers with a ~2000-2004 placeholder - it
+  // must still parse (so the caller can range-check), just yield a value the
+  // caller's own epoch floor rejects.
+  int64_t ms;
+  TEST_ASSERT_TRUE(parseCclk("+CCLK: \"04/01/01,00:00:00+00\"", ms));
+  TEST_ASSERT_LESS_THAN_INT64(1672531200000LL, ms);  // < 2023-01-01
+}
+
 void test_parseQiopen_success() {
   int connectId, err;
   TEST_ASSERT_TRUE(parseQiopen("+QIOPEN: 0,0", connectId, err));
@@ -223,6 +262,12 @@ int main(int argc, char **argv) {
   RUN_TEST(test_parseCereg_rejects_unrelated_line);
   RUN_TEST(test_parseCsq_typical);
   RUN_TEST(test_parseCsq_unknown_is_rejected);
+  RUN_TEST(test_parseCclk_utc_quoted);
+  RUN_TEST(test_parseCclk_positive_tz_shifts_to_utc);
+  RUN_TEST(test_parseCclk_negative_tz_and_time_of_day);
+  RUN_TEST(test_parseCclk_no_timezone_field);
+  RUN_TEST(test_parseCclk_rejects_unrelated_line);
+  RUN_TEST(test_parseCclk_placeholder_year_parses_but_is_implausible);
   RUN_TEST(test_parseQiopen_success);
   RUN_TEST(test_parseQiopen_error_code);
   RUN_TEST(test_parseQiurcRecv);

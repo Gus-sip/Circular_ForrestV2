@@ -67,6 +67,63 @@ bool parseCsq(const char *line, int &rssiDbm) {
   return true;
 }
 
+bool parseCclk(const char *line, int64_t &epochMs) {
+  if (strncmp(line, "+CCLK:", 6) != 0) return false;
+  const char *p = line + 6;
+  while (*p == ' ' || *p == '"') p++;
+
+  // yy/MM/dd,hh:mm:ss[+/-zz]
+  char *end = nullptr;
+  long yy = strtol(p, &end, 10);
+  if (end == p || *end != '/') return false;
+  p = end + 1;
+  long mon = strtol(p, &end, 10);
+  if (end == p || *end != '/') return false;
+  p = end + 1;
+  long day = strtol(p, &end, 10);
+  if (end == p || *end != ',') return false;
+  p = end + 1;
+  long hh = strtol(p, &end, 10);
+  if (end == p || *end != ':') return false;
+  p = end + 1;
+  long mm = strtol(p, &end, 10);
+  if (end == p || *end != ':') return false;
+  p = end + 1;
+  long ss = strtol(p, &end, 10);
+  if (end == p) return false;
+  p = end;
+
+  long tzQuarters = 0;
+  if (*p == '+' || *p == '-') {
+    int sign = (*p == '-') ? -1 : 1;
+    p++;
+    const char *q = p;
+    long v = strtol(q, &end, 10);
+    if (end != q) tzQuarters = sign * v;
+  }
+
+  if (mon < 1 || mon > 12 || day < 1 || day > 31 || hh < 0 || hh > 23 || mm < 0 || mm > 59 || ss < 0 ||
+      ss > 60)
+    return false;
+
+  // days_from_civil (Howard Hinnant) - days since 1970-01-01, proleptic
+  // Gregorian, no library/timezone dependency.
+  long y = 2000 + yy;
+  unsigned m = (unsigned)mon;
+  unsigned d = (unsigned)day;
+  y -= (m <= 2);
+  long era = (y >= 0 ? y : y - 399) / 400;
+  unsigned yoe = (unsigned)(y - era * 400);
+  unsigned doy = (153u * (m + (m > 2 ? -3 : 9)) + 2u) / 5u + d - 1u;
+  unsigned doe = yoe * 365u + yoe / 4u - yoe / 100u + doy;
+  long long days = (long long)era * 146097 + (long long)doe - 719468;
+
+  long long secs = days * 86400LL + hh * 3600LL + mm * 60LL + ss;
+  secs -= (long long)tzQuarters * 15LL * 60LL;  // local -> UTC
+  epochMs = (int64_t)secs * 1000LL;
+  return true;
+}
+
 bool parseQiopen(const char *line, int &connectId, int &err) {
   if (strncmp(line, "+QIOPEN:", 8) != 0) return false;
   const char *p = line + 8;

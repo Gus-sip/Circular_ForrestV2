@@ -24,7 +24,11 @@
 // both ends together and re-verify with that same probe.
 #define LORA_BAND_HZ 868000000UL  // EU868 - Spain deployment (confirmed, do not change)
 #define LORA_NETWORK_ID 5
-#define LORA_PARAM_SF 9
+// SF7 (was SF9) - MUST match the sensor node's chip_forest_lora_tx.cpp
+// (LORA_PARAM_SF). Dropped from 9 to 7 (2026-08-28) so the node's 15s TX
+// cadence stays under the EU868 1% duty cycle; costs ~5-6dB link budget. See
+// that file's header for the airtime math and the range caveat.
+#define LORA_PARAM_SF 7
 #define LORA_PARAM_BW 7
 #define LORA_PARAM_CR 1
 #define LORA_PARAM_PREAMBLE 12
@@ -179,6 +183,35 @@ inline void nbiotResolveNodeName(uint16_t addr, char *outName, size_t outCap) {
 #define MQTT_ACCESS_TOKEN "QRPJgyk5COJPCavycmpp"
 #define MQTT_CLIENT_IDX 0  // AT+QMTOPEN/QMTCONN/QMTPUB client index - only one MQTT client is ever open, so a fixed 0 is fine
 
+// ---------- MQTT batching / publish cadence (ModemNBIoTMqtt) ----------
+// Decoupled from the legacy NBIOT_BATCH_* binary-frame constants below (those
+// still feed the retired raw-UDP path and its host test). The MQTT path
+// buffers LoRa readings and uplinks them in time-driven batches:
+//
+//   MQTT_BATCH_SECONDS       - publish this often. The node TXes every ~15s,
+//                              so a 120s batch carries ~8 readings.
+//   MQTT_BATCH_MAX_READINGS  - count trigger: publish early if the ring hits
+//                              this many before the timer (guards against a
+//                              slowed-down uplink letting the ring overflow).
+//   MQTT_PUB_CHUNK_READINGS  - a single AT+QMTPUB payload must stay under the
+//                              BC660K-GL's ~1400-byte message limit; one
+//                              batch is sent as ceil(N/chunk) back-to-back
+//                              QMTPUBs over the already-open session. A
+//                              timestamped reading is ~230 bytes typical,
+//                              ~300 worst case, so 4 (~1200B worst case)
+//                              keeps margin under 1400.
+#define MQTT_BATCH_SECONDS 120UL
+#define MQTT_BATCH_MAX_READINGS 12
+#define MQTT_PUB_CHUNK_READINGS 4
+
+// Per-reading timestamps: without a "ts" ThingsBoard stamps every reading in
+// a batch at receipt time, collapsing a 2-min batch to one instant. Module B
+// has no RTC, so it reads network time once per attach via AT+CCLK? (needs
+// AT+CTZU=1, set in CONFIG) and timestamps each reading at its LoRa-receive
+// moment. If the network never provides time (CCLK year < 2023), the uplink
+// falls back to the flat no-"ts" form automatically.
+#define NBIOT_MIN_VALID_EPOCH_MS 1672531200000LL  // 2023-01-01T00:00:00Z - anything earlier = "no network time"
+
 // Keepalive set comfortably above NBIOT_BATCH_DEFAULT_SECONDS (below) rather
 // than pinging between real sends - see project memory
 // "project_thingsboard_mqtt_plan" for why: a PINGREQ cadence tight enough to
@@ -210,6 +243,8 @@ inline void nbiotResolveNodeName(uint16_t addr, char *outName, size_t outCap) {
 // kBatchRecordSize (30) bytes, so the numbers below are chosen to keep
 // worst-case payload size (see the static_assert next to kBatchRecordSize)
 // under NBIOT_PAYLOAD_MAX_BYTES with room to spare.
+// Legacy raw-UDP binary-frame path only (retired ModemNBIoT + its host test).
+// The live MQTT path uses MQTT_BATCH_* in the MQTT section above instead.
 #define NBIOT_BATCH_DEFAULT_READINGS 10
 #define NBIOT_BATCH_DEFAULT_SECONDS (20UL * 60UL)
 #define NBIOT_RING_CAPACITY 24  // > max batch so a slow upload doesn't force an immediate drop

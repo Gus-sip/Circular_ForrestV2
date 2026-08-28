@@ -41,6 +41,14 @@ bool parseCereg(const char *line, CeregState &out);
 // Returns false if the line doesn't parse; rssiDbm is only valid when true.
 bool parseCsq(const char *line, int &rssiDbm);
 
+// "+CCLK: \"yy/MM/dd,hh:mm:ss[+/-zz]\"" (quotes and the trailing timezone
+// field are both optional). <zz> is a signed count of 15-minute steps from
+// UTC. Converts to Unix epoch milliseconds (UTC). Returns false if the line
+// doesn't parse or the fields are out of range; the caller still has to
+// sanity-check the value (a modem with no network time answers with a
+// year-2000-ish placeholder, which parses fine but is not real time).
+bool parseCclk(const char *line, int64_t &epochMs);
+
 // "+QIOPEN: <connectID>,<err>" - the async URC that follows the OK ack of
 // AT+QIOPEN. err==0 means the socket opened successfully.
 bool parseQiopen(const char *line, int &connectId, int &err);
