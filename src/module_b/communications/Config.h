@@ -170,12 +170,13 @@ inline void nbiotResolveNodeName(uint16_t addr, char *outName, size_t outCap) {
 // same token, no other change.
 #define MQTT_BROKER_HOST "test-moduloa.home.kg"
 #define MQTT_BROKER_PORT 18831
-#define MQTT_CLIENT_ID "moduloB"
+#define MQTT_CLIENT_ID "CON-1"
 // ThingsBoard access-token auth: token goes in as the MQTT username, no
-// password. This is the gateway device's ("CON-MODB_TEST" in ThingsBoard)
-// token, not any individual node's - the hub publishes on nodes' behalf via
-// the Gateway API (see modem_nbiot_mqtt.h).
-#define MQTT_ACCESS_TOKEN "xkvckj3protc3q4je7nb"
+// password. This is the gateway device's ("CON-1" in ThingsBoard, created
+// 2026-08-28 with "Is gateway" enabled to replace the earlier
+// "CON-MODB_TEST") token, not any individual node's - the hub publishes on
+// nodes' behalf via the Gateway API (see modem_nbiot_mqtt.h).
+#define MQTT_ACCESS_TOKEN "QRPJgyk5COJPCavycmpp"
 #define MQTT_CLIENT_IDX 0  // AT+QMTOPEN/QMTCONN/QMTPUB client index - only one MQTT client is ever open, so a fixed 0 is fine
 
 // Keepalive set comfortably above NBIOT_BATCH_DEFAULT_SECONDS (below) rather

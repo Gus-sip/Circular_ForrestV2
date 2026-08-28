@@ -7,6 +7,37 @@ from the sensor node (Module C, `src/module_c/` in this same project,
 originally the sibling `../../sensor_node/` project); the two only need to agree on the LoRa
 link parameters and the telemetry payload format.
 
+## 2026-08-28 — Fixed the gateway telemetry payload shape (data never landed in ThingsBoard)
+
+- **Module B connects to ThingsBoard fine, but no telemetry was ever
+  stored.** `buildGatewayPayload()` wrapped each reading as
+  `{"values":{...}}` with no `ts`. ThingsBoard's gateway telemetry parser
+  only accepts a `"values"` wrapper when it's paired with a client-side
+  `"ts"`; with no clock on this board the keys must sit **flat** in each
+  array object (`{"NodoC-1":[{"temp":..,"rh":..}]}`) and the server
+  timestamps on receipt. The `"values"`-without-`"ts"` shape is the one
+  combination TB rejects outright - `AT+QMTPUB` still returns `OK` and the
+  `Env` counter climbs, so it looked like a working uplink. Fixed by
+  dropping the wrapper in `modem_nbiot_mqtt.cpp`. Ref:
+  https://thingsboard.io/docs/reference/gateway-api/telemetry/
+- **New gateway device `CON-1`** created in ThingsBoard (token
+  `QRPJgyk5COJPCavycmpp`, in `Config.h`) to replace the earlier
+  `CON-MODB_TEST` and start from clean state. It **must have "Is gateway"
+  enabled** in its device details, or `v1/gateway/*` topics are ignored.
+  With that set, the first telemetry batch auto-creates a child device named
+  `NodoC-1`; open **Entities → Devices → NodoC-1 → Latest telemetry** to see
+  the live values, then add them to a dashboard from there.
+- **Verified from the dev PC** with `logs/tb_gateway_test.py` (paho-mqtt,
+  same broker/port/token/topic/flat-payload as the firmware): CONNACK
+  Success, PUBACK received, and `NodoC-1` telemetry showed in ThingsBoard -
+  so the whole uplink path is proven independent of the modem.
+- **Module B reflashed and confirmed on real hardware (COM10).** Serial:
+  `+CEREG: 1,5` (attached), `+IP: 10.0.0.1`, `+CSQ: 30,0` (~-53 dBm),
+  `+QMTOPEN: 0,0`, `+QMTCONN: 0,0,0` - reaches IDLE and holds the MQTT
+  session to CON-1 open. No `QMTPUB` observed yet only because Module C was
+  disconnected during this test (empty ring, no batch); reconnect Module C
+  to see real telemetry land in `NodoC-1`.
+
 ## 2026-08-27 — First real Module C -> Module B LoRa confirmation, local logging
 
 - **First live end-to-end reception confirmed.** With a real Module C board

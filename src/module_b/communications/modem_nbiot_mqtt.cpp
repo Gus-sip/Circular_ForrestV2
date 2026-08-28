@@ -704,13 +704,19 @@ void ModemNBIoTMqtt::onPublishFailed() {
 }
 
 // Builds the ThingsBoard Gateway API telemetry payload:
-//   {"<node>":[{"values":{...}},...], "<otherNode>":[...]}
+//   {"<node>":[{...},...], "<otherNode>":[...]}
 // Groups ring entries by resolved node name (see Config.h's
 // nbiotResolveNodeName) rather than assuming a single node - today there's
 // only ever one, but a mixed batch shouldn't silently mis-group once a
-// second node exists. No "ts" field - see project memory
-// "project_thingsboard_mqtt_plan" for why (no reliable clock yet;
-// ThingsBoard timestamps with its own receipt time when ts is absent).
+// second node exists.
+//
+// No "ts" field and NO "values" wrapper - the two go together. ThingsBoard's
+// gateway telemetry parser only accepts "values" when it's paired with a "ts"
+// (client-side timestamp); with no reliable clock on this board (see project
+// memory "project_thingsboard_mqtt_plan") the keys must sit flat in each
+// array object and the server timestamps on receipt. Sending {"values":{...}}
+// without a "ts" is the one shape TB rejects outright - QMTPUB still returns
+// OK, but every record is silently dropped server-side (found 2026-08-28).
 size_t ModemNBIoTMqtt::buildGatewayPayload(uint8_t *out, size_t cap) {
   char *buf = reinterpret_cast<char *>(out);
   size_t pos = 0;
@@ -754,11 +760,11 @@ size_t ModemNBIoTMqtt::buildGatewayPayload(uint8_t *out, size_t cap) {
 
       char record[400];
       snprintf(record, sizeof(record),
-               "{\"values\":{"
+               "{"
                "\"temp\":%.2f,\"rh\":%.2f,\"pres\":%.2f,\"gas\":%.2f,"
                "\"pm1\":%.2f,\"pm25\":%.2f,\"pm10\":%.2f,\"co2\":%.2f,"
                "\"co\":%.2f,\"coTemp\":%.2f,\"windAngle\":%.2f,\"windSpeed\":%.2f,"
-               "\"windValid\":%s,\"rssi\":%d,\"snr\":%d}}",
+               "\"windValid\":%s,\"rssi\":%d,\"snr\":%d}",
                snap.temp, snap.hum, snap.pres, snap.gas, snap.pm1, snap.pm25, snap.pm10, snap.co2, snap.co,
                snap.coTemp, snap.windAngle, snap.windSpeed, snap.windValid ? "true" : "false", (int)snap.rssi,
                (int)snap.snr);
