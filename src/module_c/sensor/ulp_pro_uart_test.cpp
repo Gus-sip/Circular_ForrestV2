@@ -1,103 +1,89 @@
 /*
- * Calypso ULP PRO Wind Sensor - UART Test Sketch
- * Target: ESP32-S3 Super Mini (PlatformIO, Arduino framework)
+ * Calypso ULP PRO Wind Sensor - UART diagnostic sweep
+ * Target: ESP32-S3 Mini (PlatformIO, Arduino framework)
  *
- * Wiring (UART/I2C version, CMI1032):
- *   Brown  -> 3V3            (VCC, sensor accepts 3.3-18 VDC)
- *   White  -> GND
- *   Green  -> GPIO 5 (RX)    (sensor TX)
- *   Yellow -> GPIO 6 (TX)    (sensor RX - only needed for poll mode)
+ * 2026-08-28: rewritten as a sweep. The plain listener on GPIO9 @ 38400 saw
+ * ZERO bytes with the sensor reportedly powered and wired, so this cycles
+ * through every plausible (RX pin, baud) combination and reports the byte
+ * count for each, plus a raw hex dump of whatever arrives. It also pokes the
+ * TX line with a newline each round in case the unit is in poll mode.
  *
- * Sensor defaults: 38400 baud, 8N1, streaming NMEA 0183:
- *   $IIMWV,<angle>,R,<speed>,N,A*<checksum>
+ * Wiring being tested (per the user): GREEN (sensor TX) -> GPIO9,
+ * YELLOW (sensor RX) -> GPIO8, BROWN -> 3.3-18V, WHITE -> GND (common).
  */
 
 #include <Arduino.h>
 
-#define WIND_RX_PIN 5   // connect to sensor GREEN wire (TX out of sensor)
-#define WIND_TX_PIN 6   // connect to sensor YELLOW wire (RX into sensor)
-#define WIND_BAUD   38400
+HardwareSerial WindSerial(1);  // UART1
 
-HardwareSerial WindSerial(1);   // UART1
+// (rxPin, txPin, baud) combos to try, ~6s each.
+struct Combo {
+  uint8_t rx;
+  uint8_t tx;
+  uint32_t baud;
+};
+static const Combo kCombos[] = {
+    {9, 8, 38400}, {8, 9, 38400},  // as-wired, then TX/RX swapped
+    {9, 8, 9600},  {8, 9, 9600},
+    {9, 8, 4800},  {8, 9, 4800},
+    {9, 8, 115200},
+    {9, 8, 19200},
+};
+static const size_t kNumCombos = sizeof(kCombos) / sizeof(kCombos[0]);
 
-String nmeaBuffer = "";
+static size_t comboIdx = 0;
+static uint32_t comboStartMs = 0;
+static uint32_t bytesThisCombo = 0;
+static uint32_t rawDumpCount = 0;
 
-// Validate NMEA checksum: XOR of chars between '$' and '*'
-bool checksumOk(const String &sentence) {
-  int star = sentence.indexOf('*');
-  if (star < 0 || sentence.length() < star + 3) return false;
-
-  uint8_t calc = 0;
-  for (int i = 1; i < star; i++) calc ^= sentence[i];
-
-  uint8_t received = (uint8_t) strtol(sentence.substring(star + 1, star + 3).c_str(), nullptr, 16);
-  return calc == received;
-}
-
-// Parse $--MWV,angle,R,speed,units,status*hh
-void parseMWV(const String &sentence) {
-  // Split into fields
-  String fields[6];
-  int fieldIdx = 0, start = 0;
-  for (int i = 0; i < (int)sentence.length() && fieldIdx < 6; i++) {
-    char c = sentence[i];
-    if (c == ',' || c == '*') {
-      fields[fieldIdx++] = sentence.substring(start, i);
-      start = i + 1;
-    }
-  }
-
-  if (fieldIdx < 6) {
-    Serial.println("  [parse error: not enough fields]");
-    return;
-  }
-
-  float angle = fields[1].toFloat();
-  float speed = fields[3].toFloat();
-  String units = fields[4];   // K = km/h, M = m/s, N = knots
-  String status = fields[5];  // A = valid
-
-  String unitName = (units == "M") ? "m/s" : (units == "N") ? "knots" : (units == "K") ? "km/h" : units;
-
-  Serial.printf("  Wind: %.1f deg  |  %.1f %s  |  status: %s\n",
-                angle, speed, unitName.c_str(),
-                status == "A" ? "VALID" : "INVALID");
+static void startCombo(size_t i) {
+  const Combo &c = kCombos[i];
+  WindSerial.end();
+  delay(20);
+  // Pull-up on RX in case the sensor's TX is open-drain / floating.
+  pinMode(c.rx, INPUT_PULLUP);
+  WindSerial.begin(c.baud, SERIAL_8N1, c.rx, c.tx);
+  comboStartMs = millis();
+  bytesThisCombo = 0;
+  rawDumpCount = 0;
+  Serial.printf("\n=== combo %u/%u : RX=GPIO%u  TX=GPIO%u  baud=%lu ===\n", (unsigned)(i + 1),
+                (unsigned)kNumCombos, c.rx, c.tx, (unsigned long)c.baud);
 }
 
 void setup() {
-  Serial.begin(115200);         // USB serial monitor
-  delay(2000);                  // give USB CDC time to enumerate
-
-  WindSerial.begin(WIND_BAUD, SERIAL_8N1, WIND_RX_PIN, WIND_TX_PIN);
-
-  Serial.println("=== Calypso ULP PRO UART test ===");
-  Serial.printf("Listening on UART1 @ %d baud (RX=%d, TX=%d)\n", WIND_BAUD, WIND_RX_PIN, WIND_TX_PIN);
-  Serial.println("Waiting for NMEA sentences...\n");
+  Serial.begin(115200);
+  delay(2000);
+  Serial.println("=== Calypso ULP PRO UART diagnostic sweep ===");
+  Serial.println("Sensor should be powered (BROWN 3.3-18V, WHITE common GND).");
+  startCombo(0);
 }
 
 void loop() {
+  const Combo &c = kCombos[comboIdx];
+
   while (WindSerial.available()) {
-    char c = WindSerial.read();
-
-    if (c == '\n') {
-      nmeaBuffer.trim();
-      if (nmeaBuffer.length() > 0) {
-        // Show the raw sentence exactly as received
-        Serial.print("RAW: ");
-        Serial.println(nmeaBuffer);
-
-        if (nmeaBuffer.startsWith("$") && nmeaBuffer.indexOf("MWV") == 3) {
-          if (checksumOk(nmeaBuffer)) {
-            parseMWV(nmeaBuffer);
-          } else {
-            Serial.println("  [checksum FAILED - check wiring/baud]");
-          }
-        }
-      }
-      nmeaBuffer = "";
-    } else if (c != '\r') {
-      nmeaBuffer += c;
-      if (nmeaBuffer.length() > 120) nmeaBuffer = "";  // guard against garbage
+    uint8_t b = (uint8_t)WindSerial.read();
+    bytesThisCombo++;
+    if (rawDumpCount < 64) {
+      Serial.printf("%02X%c", b, (b >= 32 && b < 127) ? (char)b : '.');
+      rawDumpCount++;
+      if (rawDumpCount % 16 == 0) Serial.println();
     }
+  }
+
+  // Poke the TX line once a second - a unit in poll mode may answer a CR/LF
+  // or a generic NMEA query.
+  static uint32_t lastPoke = 0;
+  if (millis() - lastPoke >= 1000) {
+    lastPoke = millis();
+    WindSerial.print("\r\n");
+  }
+
+  if (millis() - comboStartMs >= 6000) {
+    Serial.printf("\n[combo %u result] RX=GPIO%u baud=%lu -> %lu bytes\n", (unsigned)(comboIdx + 1), c.rx,
+                  (unsigned long)c.baud, (unsigned long)bytesThisCombo);
+    comboIdx = (comboIdx + 1) % kNumCombos;
+    if (comboIdx == 0) Serial.println("\n---- sweep complete, looping ----");
+    startCombo(comboIdx);
   }
 }

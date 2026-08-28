@@ -1,5 +1,36 @@
 # CHIP FOREST — Session Status
 
+## 2026-08-28 — Fast cadence live, Calypso wind sensor confirmed dead on the wire
+
+- **End-to-end pipeline running:** Module C (SF7, ~18s cycle) → LoRa → Module B
+  → NB-IoT/MQTT → ThingsBoard `NodoC-1`, with per-reading timestamps. PC-side
+  serial logger resumed (`logs/log_module_b_lora.py COM10` →
+  `logs/module_b_lora_log.csv`).
+- **Sensor status in the live telemetry:** BME690 temp/hum/pres/gas — good.
+  CM1106 CO2 — reading 1400-ish ppm now (briefly spiked to its 5000 ceiling
+  earlier in the session, recovered on its own). SEN0466 — coTemp reads, CO
+  stays 0. BMV080 PM — mostly 0, occasional 1-2. Calypso wind — **0/0/false,
+  see below.**
+- **Calypso wind sensor: not a software problem.** Ruled out exhaustively:
+  a standalone diagnostic that does nothing but listen on UART1 (swept
+  GPIO8↔9, baud 4800/9600/19200/38400/115200, RX pull-ups on, TX poked for
+  poll-mode) saw **0 bytes on every combination**. The ESP UART is fine; the
+  wire is electrically silent. `chip_forest_lora_tx.cpp` now polls the
+  Calypso up to `CALYPSO_READ_WINDOW_MS` (1500ms) after wake and logs
+  `Wind: no valid NMEA this cycle (rx bytes=N)` - N has been 0 every cycle.
+  Root cause is physical (no common ground with the 5V supply / dead sensor /
+  broken green-wire contact / UART-vs-I2C mode strap on the CMI1032) - needs
+  a multimeter on the sensor's TX line and GND continuity. NOTE the repo has
+  **conflicting Calypso pin maps**: `pins.h` (and the LoRa-TX firmware) use
+  GPIO9/8; `sensor/main.cpp` and `ulp_pro_uart_test.cpp` use GPIO5/6. User
+  confirmed the physical wiring is green→GPIO9, yellow→GPIO8 (matches
+  pins.h). `ulp_pro_uart_test.cpp` was rewritten as the diagnostic sweep and
+  left pointing at GPIO9/8.
+- **Light sleep removed from Module C** - it broke the ESP32-S3 USB-Serial/
+  JTAG (port wedged every cycle) and starved the Calypso UART. Now a plain
+  `delay()`. See `chip_forest_lora_tx.cpp` header + git.
+
+
 > Carried over from the standalone `../../sensor_node/` project as of this
 > restructure into `circular_forest_v2`. Paths and env names below reflect
 > that project's layout, not this one's `src/module_c/sensor/` +
