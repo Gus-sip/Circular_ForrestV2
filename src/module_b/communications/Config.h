@@ -89,17 +89,14 @@ inline void nbiotResolveNodeName(uint16_t addr, char *outName, size_t outCap) {
 // ---------- Dashboard staleness ----------
 // If no packet has arrived within this window, the dashboard shows "signal
 // lost" instead of the last numbers, so stale data is never mistaken for live.
-// Must stay comfortably above the node's default TX interval (120s, in
-// pp1-optimize's chip_forest_lora_tx.cpp) or the dashboard would flag "lost"
-// between every normal transmission. Kept at ~2.5x that default (same margin
-// convention chip_forest_lora_tx.cpp uses for its own duty-cycle floor), not
-// exactly 1 missed packet, since the node's TX interval is now remotely
-// tunable via downlink CFG,INTERVAL=... - a fixed threshold can't track an
-// arbitrarily-pushed interval, so a much longer pushed interval will still
-// eventually show "stale" before its own next packet. Tracking the
-// last-applied interval dynamically is future work, contingent on Module B
-// actually relaying CFG downlink to the node (it doesn't yet).
-#define DATA_STALE_MS 300000
+// Must stay comfortably above the node's LoRa send period (LORA_TX_PERIOD_MS,
+// 5 min default in chip_forest_lora_tx.cpp) or the dashboard would flag "lost"
+// between every normal transmission. Set to ~2.4x that (12 min) - roughly two
+// missed packets before it reads stale. The node's send period is remotely
+// tunable via CFG,INTERVAL=..., so a fixed threshold can't track an
+// arbitrarily-pushed value; tracking the last-applied interval dynamically is
+// future work, contingent on Module B relaying CFG downlink (it doesn't yet).
+#define DATA_STALE_MS 720000
 
 // ---------- NB-IoT uplink (Quectel BC660K-GL, "Module B" cellular backhaul) ----------
 // UART2 - deliberately NOT Serial1 (UART1), which the RYLR998 above already
@@ -188,8 +185,8 @@ inline void nbiotResolveNodeName(uint16_t addr, char *outName, size_t outCap) {
 // still feed the retired raw-UDP path and its host test). The MQTT path
 // buffers LoRa readings and uplinks them in time-driven batches:
 //
-//   MQTT_BATCH_SECONDS       - publish this often. The node TXes every ~15s,
-//                              so a 120s batch carries ~8 readings.
+//   MQTT_BATCH_SECONDS       - publish this often. Module C TXes every ~5 min,
+//                              so a 10-min batch carries ~2 readings.
 //   MQTT_BATCH_MAX_READINGS  - count trigger: publish early if the ring hits
 //                              this many before the timer (guards against a
 //                              slowed-down uplink letting the ring overflow).
@@ -200,8 +197,8 @@ inline void nbiotResolveNodeName(uint16_t addr, char *outName, size_t outCap) {
 //                              timestamped reading is ~230 bytes typical,
 //                              ~300 worst case, so 4 (~1200B worst case)
 //                              keeps margin under 1400.
-#define MQTT_BATCH_SECONDS 120UL
-#define MQTT_BATCH_MAX_READINGS 12
+#define MQTT_BATCH_SECONDS 600UL
+#define MQTT_BATCH_MAX_READINGS 6
 #define MQTT_PUB_CHUNK_READINGS 4
 
 // Per-reading timestamps: without a "ts" ThingsBoard stamps every reading in

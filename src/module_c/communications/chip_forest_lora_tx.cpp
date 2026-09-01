@@ -1,82 +1,60 @@
 /*
- * CHIP FOREST bring-up + LoRa TX: all five sensors read each cycle, encoded
- * into a CSV payload, and transmitted over the RYLR998 to the ground-station
- * receiver (the separate pp1-lora-receiver project). Between cycles the node
- * waits on a plain delay() - light sleep was removed (it broke USB-Serial/JTAG
- * and the Calypso UART on the ESP32-S3); see the cycle-timing note below.
+ * CHIP FOREST bring-up + LoRa TX: all five sensors sampled continuously into a
+ * last-known-good cache, and that cache transmitted over the RYLR998 to the
+ * ground-station receiver (Module B) once every LORA_TX_PERIOD_MS.
  *
- * Payload schema (must match pp1-lora-receiver's TelemetryParser exactly):
+ * Payload schema (must match Module B's TelemetryParser exactly):
  *   temp,hum,pres,gas,pm1,pm25,pm10,co2,co,coTemp,windAngle,windSpeed,windValid
- * See that project's src/telemetry/TelemetryParser.h for the authoritative
- * field list/order - provisional on both ends; if either side changes this
- * encoding, update the other to match.
+ * See src/module_b/communications/telemetry/TelemetryParser.h for the
+ * authoritative field list/order - provisional on both ends; if either side
+ * changes this encoding, update the other to match.
  *
- * LoRa parameters (SF9/BW7/CR1/preamble12): NOT the generic "commonly
- * documented" RYLR998 defaults this file originally assumed (7,7,1,4) - that
- * combination came back +ERR=18 from this actual module. These values were
- * read directly off the module via AT+PARAMETER? (src/rylr998_param_probe.cpp)
- * instead of guessed a second time - ground truth beats another guess.
+ * ---- Cadence (2026-09-01) --------------------------------------------------
+ * Sample-then-send is split into two independent rates:
+ *   - loop() re-reads EVERY sensor every SAMPLE_GAP_MS (~2s) and updates its
+ *     cached value whenever the read succeeds. A sensor that hasn't produced a
+ *     valid reading yet just keeps being retried; once it has, the cache holds
+ *     the freshest good value.
+ *   - The radio transmits that whole cached snapshot to Module B once every
+ *     LORA_TX_PERIOD_MS (default 5 min; first packet 30s after boot). Module B
+ *     in turn batches to Module A / ThingsBoard on its own ~10-min cadence
+ *     (MQTT_BATCH_SECONDS in module_b/communications/Config.h).
+ * So by the time a packet goes out, each sensor has had ~150 read attempts -
+ * even a flaky sensor almost always has a fresh value in it.
  *
- * TX interval and duty cycle: EU863-870 SRD regulations cap airtime on this
- * band, as low as 1% in the commonly used 868.0-868.6MHz sub-band that this
- * project's AT+BAND=868000000 falls in. Using Semtech's public LoRa airtime
- * formula (not measured on this exact module - treat as an estimate) at
- * SF7/BW125kHz(index 7 on this module)/CR 4/5/preamble 12 with an ~75-byte
- * payload:
- *   symbol time     = 2^7/125000s                         ~= 1.024ms
- *   preamble time   = (12 + 4.25) * 1.024ms               ~= 16.6ms
- *   payload symbols = 8 + ceil((8*75 - 4*7 + 28 + 16) / (4*7)) * 5 = 8 + 22*5 = 118
- *   payload time    = 118 * 1.024ms                       ~= 120.8ms
- *   total per packet ~= 137ms
- * A 1% duty cycle allows ~36s of airtime per hour. At TX_INTERVAL_MS = 15s
- * that's 240 packets/hour * 137ms ~= 33s/hour - under the 36s cap, ~9%
- * margin. This is TIGHT: it only holds at SF7 and this payload size. The old
- * SF9 setting (468ms/packet) made 15s a 3x duty-cycle violation - SF7 was
- * chosen specifically to make this cadence legal, at a real cost of ~5-6dB
- * link budget (roughly half the range, worse through foliage - no field
- * range test has confirmed the deployment still closes at SF7). If you
- * revert to SF9, you MUST raise TX_INTERVAL_MS back to >=50s. The interval
- * is runtime-mutable via downlink CFG (see below) but is always clamped to
- * TX_INTERVAL_MIN_MS so a remote push can't drive it under the legal floor -
- * recompute the floor above before touching SF, BW, payload size, or that
- * clamp: this is a legal constraint, not a tunable.
+ * ---- LoRa parameters (SF7/BW7/CR1/preamble12) ----------------------------
+ * SF7 (not the generic "7,7,1,4" default, which returned +ERR=18 from this
+ * module - preamble had to be 12). At SF7/BW125/CR4-5/preamble12 with an
+ * ~75-byte payload one packet is ~137ms on air. The EU868 1% duty cycle
+ * allows ~36s airtime/hour; at a 5-min send period that's ~12 packets/hour
+ * (~1.6s/hour) - three orders of magnitude under the cap, so the duty cycle
+ * is never the binding constraint at this cadence. LORA_TX_PERIOD_MIN_MS is
+ * kept at 15s purely as a sanity floor. SF7 costs ~5-6dB link budget vs SF9
+ * (~half the range, worse through foliage) - no field range test has
+ * confirmed the deployment closes at SF7 yet. MUST match Module B's
+ * Config.h LORA_PARAM_SF.
  *
- * Cellular-data cost note (Module B's NB-IoT uplink, not this link): at 15s
- * this node emits ~5760 readings/day, which Module B batches to ThingsBoard
- * roughly every 2 min. That is ~1.5MB/day of cellular traffic - fine for
- * attended/bench use, but it exhausts a 1NCE lifetime SIM (~500MB total) in
- * about a year. A long-term deployment should uplink 1-min averages from
- * Module B instead of every raw sample (not done here).
+ * ---- No sleep yet -------------------------------------------------------
+ * The node runs a plain delay(SAMPLE_GAP_MS) between sample passes - NOT
+ * light or deep sleep. Light sleep was removed 2026-08-28: on the ESP32-S3 it
+ * kills USB-Serial/JTAG (port re-enumerates every cycle, wedges the host) and
+ * halts the Calypso UART ISR. delay() keeps USB + all UART ISRs serviced and
+ * preserves driver state, so the BMV080 5s / CM1106 3s warmups are paid once
+ * at boot. The cost is power - this firmware does NOT meet the supercap
+ * budget in notes/power_budget.md. The deployment version (deep sleep,
+ * switched rails, per-sensor sample periods, Normal/Prealarma/Alarma states)
+ * is a separate build on top of this - see that doc.
  *
- * Cycle timing and remote config-push: the node runs a plain delay()
- * between cycles (NOT light/deep sleep - see below), on a scheduled
- * Class-A-style cycle, not an asynchronous listener. Each cycle: read
- * sensors, transmit telemetry, open a short LORA_POST_TX_LISTEN_MS window to
- * receive a config command from Module B (if one is queued), reply with an
- * ACK if one was applied, then delay to the next cycle. That post-TX window
- * is the *only* moment Module C can be reached - whatever relays Module A's
- * commands down to it must hold/queue a pending command and send it the
- * instant it sees this node's uplink, not at an arbitrary time.
- *
- * No sleep (2026-08-28): light sleep was removed. On the ESP32-S3 the
- * USB-Serial/JTAG peripheral does not survive esp_light_sleep_start() - it
- * dropped and re-enumerated every cycle, wedging the host serial port and
- * making the board effectively un-debuggable over USB, and it also cost the
- * Calypso UART its buffered data each cycle (the driver ISR is halted during
- * sleep). delay() keeps the CPU in a FreeRTOS wait (USB + all UART ISRs
- * still serviced) and preserves every driver's RAM/peripheral state across
- * cycles, so BMV080's 5s startup, CM1106's 3s warmup and the RYLR998 AT
- * handshake are still paid only once at boot. The cost is power: the node no
- * longer sleeps between cycles. Re-introducing a sleep for a battery
- * deployment is future work and must keep USB debugging in mind (e.g. gate
- * it behind a build flag, or only sleep when no USB host is attached).
+ * The post-TX LORA_POST_TX_LISTEN_MS window is still the only moment Module B
+ * can reach this node with a CFG downlink - whatever relays a command down
+ * must hold it and send it the instant it sees this node's uplink.
  *
  * Downlink command grammar (Module B -> this node), styled to match
  * pp1-lora-receiver's own Module A->B grammar (NbiotProtocol.h) so a future
  * relay is a thin translation rather than two incompatible formats:
  *   CFG,<key>=<value>[,<key>=<value>...]
- * Recognized keys: INTERVAL (seconds, clamped to
- * [TX_INTERVAL_MIN_MS/1000, TX_INTERVAL_MAX_MS/1000]), and one per sensor -
+ * Recognized keys: INTERVAL (the LoRa send period, seconds, clamped to
+ * [LORA_TX_PERIOD_MIN_MS/1000, LORA_TX_PERIOD_MAX_MS/1000]), and one per sensor -
  * BME690/SEN0466/BMV080/CM1106/CALYPSO (0/1) - to mute/unmute it without a
  * reflash (e.g. BME690, which is known-not-detected on this board per
  * STATUS.md). Unrecognized keys are ignored, not fatal. Applied config is
@@ -132,25 +110,24 @@
 #define LORA_MY_ADDR 1  // this node's AT+ADDRESS
 #define LORA_RX_ADDR 2  // pp1-lora-receiver's AT+ADDRESS
 
-// 15s cadence (2026-08-28): fast sampling for a responsive live view. Legal
-// under the EU868 1% duty cycle ONLY at SF7 with this payload size - see the
-// file-header airtime math (~33s airtime/hour vs the ~36s cap, ~9% margin).
-// The 15000 floor below reflects that: at SF7 it's the tightest cadence that
-// stays legal; do NOT lower it, and raise it back to >=50000 if SF ever goes
-// back to 9. See the header's cellular-data-cost note before running this
-// unattended for long.
-#define TX_INTERVAL_MS 15000           // default sample/TX cadence - see file header
-#define TX_INTERVAL_MIN_MS 15000       // legal-duty-cycle floor at SF7 - CFG,INTERVAL can never go below this
-#define TX_INTERVAL_MAX_MS 86400000UL  // 24h sanity ceiling - guards a fat-fingered CFG bricking telemetry
+// LoRa send period - Module C -> Module B. Sampling runs continuously
+// (SAMPLE_GAP_MS); this is only how often the cached snapshot is transmitted.
+// Runtime-tunable via CFG,INTERVAL=<seconds>. At this cadence the EU868 duty
+// cycle is a non-issue (see file header); the MIN floor is just a sanity guard.
+#define LORA_TX_PERIOD_MS 300000UL      // 5 min
+#define LORA_TX_PERIOD_MIN_MS 15000UL   // sanity floor - CFG,INTERVAL can't go below this
+#define LORA_TX_PERIOD_MAX_MS 86400000UL  // 24h ceiling - guards a fat-fingered CFG
+#define FIRST_TX_DELAY_MS 30000UL       // first packet this soon after boot, then every LORA_TX_PERIOD_MS
+
+#define SAMPLE_GAP_MS 2000UL   // re-read every sensor into its cache this often
+#define READ_LOG_GAP_MS 10000UL  // throttle the [read] diagnostic line to at most this rate
 
 #define LORA_POST_TX_LISTEN_MS 2000  // window after each TX to receive a queued CFG command - see file header
 
-// After a light-sleep wake the Calypso's UART wasn't being serviced, so its
-// RX buffer holds only a stale fragment. Flush it, then poll this long for a
-// fresh checksum-valid $--MWV sentence (the unit streams several per second,
-// so this usually returns in well under half the window). A single read on
-// wake, as this loop did before, almost never caught a complete sentence -
-// which is why wind read 0/0/false even with the sensor connected.
+// The Calypso streams NMEA continuously. flushInput() drops whatever's stale in
+// the RX buffer, then read() is polled for up to this long for a fresh
+// checksum-valid $--MWV. With the UART ISR running (no sleep) this usually
+// returns almost immediately.
 #define CALYPSO_READ_WINDOW_MS 1500
 
 PowerManager power;
@@ -167,7 +144,9 @@ bool sen0466Ready = false;
 bool bmvReady = false;
 bool radioReady = false;
 
-// Last-known-good readings, cached across cycles - see file header.
+// Last-known-good readings, refreshed continuously by sampleSensors() - see
+// file header. A field stays at its last good value (0 until the first ever
+// success) rather than snapping to 0 on a transient miss.
 float g_temp = 0, g_hum = 0, g_pres = 0, g_gas = 0;
 float g_pm1 = 0, g_pm25 = 0, g_pm10 = 0;
 float g_co2 = 0;
@@ -175,9 +154,16 @@ float g_co = 0, g_coTemp = 0;
 float g_windAngle = 0, g_windSpeed = 0;
 bool g_windValid = false;
 
+// Status of each sensor's most recent read attempt - for the [read] diag line.
+ReadingStatus g_bmeSt = ReadingStatus::NotInitialized;
+ReadingStatus g_coSt = ReadingStatus::NotInitialized;
+ReadingStatus g_bmvSt = ReadingStatus::NotInitialized;
+ReadingStatus g_co2St = ReadingStatus::NotInitialized;
+ReadingStatus g_calSt = ReadingStatus::NotInitialized;
+
 // Runtime-mutable config, pushed via downlink CFG - see file header. Volatile
 // only: resets to these compiled-in defaults on every reboot, by design.
-uint32_t g_txIntervalMs = TX_INTERVAL_MS;
+uint32_t g_txPeriodMs = LORA_TX_PERIOD_MS;  // CFG,INTERVAL=<seconds>
 bool g_bmeEnabled = true;
 bool g_sen0466Enabled = true;
 bool g_bmvEnabled = true;
@@ -218,8 +204,8 @@ static bool applyConfigCommand(const char *payload, uint8_t len, char *ackPayloa
 
       if (strcmp(key, "INTERVAL") == 0) {
         long seconds = atol(valueStr);
-        const long minSeconds = TX_INTERVAL_MIN_MS / 1000;
-        const long maxSeconds = TX_INTERVAL_MAX_MS / 1000;
+        const long minSeconds = LORA_TX_PERIOD_MIN_MS / 1000;
+        const long maxSeconds = LORA_TX_PERIOD_MAX_MS / 1000;
         if (seconds < minSeconds) {
           Serial.printf("[cfg] INTERVAL=%ld below floor, clamped to %ld\n", seconds, minSeconds);
           seconds = minSeconds;
@@ -227,7 +213,7 @@ static bool applyConfigCommand(const char *payload, uint8_t len, char *ackPayloa
           Serial.printf("[cfg] INTERVAL=%ld above ceiling, clamped to %ld\n", seconds, maxSeconds);
           seconds = maxSeconds;
         }
-        g_txIntervalMs = (uint32_t)seconds * 1000UL;
+        g_txPeriodMs = (uint32_t)seconds * 1000UL;
         snprintf(appliedKv, sizeof(appliedKv), "INTERVAL=%ld", seconds);
       } else if (strcmp(key, "BME690") == 0) {
         g_bmeEnabled = atoi(valueStr) != 0;
@@ -345,42 +331,31 @@ void setup() {
   Serial.println("Setup complete.\n");
 }
 
-void loop() {
-  // Plain wait to the next cycle - NOT light sleep (broke USB-Serial/JTAG and
-  // the Calypso UART on the ESP32-S3, see the file header). delay() yields to
-  // FreeRTOS, so USB and every UART ISR keep running through it.
-  delay(g_txIntervalMs);
-
-  // Wind sensor streams NMEA continuously. Flush the stale fragment left by
-  // the light-sleep, then poll briefly for a fresh valid sentence - see
-  // CALYPSO_READ_WINDOW_MS.
+// One pass over every enabled sensor, updating its cached g_* value on a
+// successful read and its g_*St status either way. Called every SAMPLE_GAP_MS.
+static void sampleSensors() {
   if (g_calypsoEnabled) {
+    // Calypso streams NMEA - drop the stale buffer, then poll briefly for a
+    // fresh checksum-valid $--MWV.
     calypso.flushInput();
     Reading wind;
-    uint32_t windStart = millis();
+    uint32_t t0 = millis();
     do {
       wind = calypso.read();
       if (wind.ok()) break;
       delay(10);
-    } while (millis() - windStart < CALYPSO_READ_WINDOW_MS);
-
+    } while (millis() - t0 < CALYPSO_READ_WINDOW_MS);
+    g_calSt = wind.status;
     if (wind.ok()) {
       g_windAngle = wind.values[0];
       g_windSpeed = wind.values[1];
       g_windValid = wind.values[2] > 0.5f;
-      Serial.printf("Wind: %.1f deg  %.2f  %s\n", g_windAngle, g_windSpeed,
-                    g_windValid ? "valid(A)" : "void(V)");
-    } else {
-      // rx=0 across cycles -> sensor silent (unwired / no power / wrong pins/baud);
-      // rx>0 but no valid sentence -> data arriving but garbled/wrong format.
-      Serial.printf("Wind: no valid NMEA this cycle (rx bytes=%u)\n", calypso.lastReadBytes());
     }
   }
 
-  ReadingStatus bmvSt = ReadingStatus::NotInitialized;
   if (bmvReady && g_bmvEnabled) {
     Reading pm = bmv080.read();
-    bmvSt = pm.status;
+    g_bmvSt = pm.status;
     if (pm.ok()) {
       g_pm1 = pm.values[0];
       g_pm25 = pm.values[1];
@@ -388,10 +363,9 @@ void loop() {
     }
   }
 
-  ReadingStatus bmeSt = ReadingStatus::NotInitialized;
   if (bmeReady && g_bmeEnabled) {
     Reading env = bme690.read();
-    bmeSt = env.status;
+    g_bmeSt = env.status;
     if (env.ok()) {
       g_temp = env.values[0];
       g_hum = env.values[1];
@@ -400,53 +374,74 @@ void loop() {
     }
   }
 
-  ReadingStatus coSt = ReadingStatus::NotInitialized;
   if (sen0466Ready && g_sen0466Enabled) {
     Reading co = sen0466.read();
-    coSt = co.status;
+    g_coSt = co.status;
     if (co.ok()) {
       g_co = co.values[0];
       g_coTemp = co.values[1];
     }
   }
 
-  ReadingStatus co2St = ReadingStatus::NotInitialized;
   if (g_cm1106Enabled) {
     Reading co2 = cm1106.read();
-    co2St = co2.status;
+    g_co2St = co2.status;
     if (co2.ok()) g_co2 = co2.values[0];
   }
+}
 
-  // One diagnostic line per cycle - which sensors actually answered this
-  // cycle vs. which are feeding a stale cached value into the payload.
-  Serial.printf("[read] bme=%s sen0466=%s bmv=%s cm1106=%s(co2 now %.0f) calypso=%s(rx=%u)\n",
-                statusName(bmeSt), statusName(coSt), statusName(bmvSt), statusName(co2St), g_co2,
-                g_calypsoEnabled ? (g_windValid ? "OK" : "silent") : "off", calypso.lastReadBytes());
-
+// Builds the CSV payload from the cache and transmits it to Module B, then
+// holds a short window open for a CFG downlink.
+static void transmitSnapshot() {
   char payload[96];
   int len = snprintf(payload, sizeof(payload), "%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d",
-                      g_temp, g_hum, g_pres, g_gas, g_pm1, g_pm25, g_pm10, g_co2, g_co, g_coTemp, g_windAngle,
-                      g_windSpeed, g_windValid ? 1 : 0);
+                     g_temp, g_hum, g_pres, g_gas, g_pm1, g_pm25, g_pm10, g_co2, g_co, g_coTemp, g_windAngle,
+                     g_windSpeed, g_windValid ? 1 : 0);
 
   if (!radioReady) {
-    // Never transmit under parameters the module didn't actually accept -
-    // a "sent" here would be a false signal that the link is configured
-    // correctly when it isn't.
+    // Never claim "sent" under parameters the module didn't accept.
     Serial.printf("TX skipped (radio not initialized): %s\n", payload);
-    return;  // no radio - nothing to listen on either
+    return;
   }
 
   bool sent = radio.send(LORA_RX_ADDR, payload, (uint8_t)len);
   Serial.printf("TX: %s  (%s)\n", payload, sent ? "sent" : "send FAILED");
 
-  // Post-TX listen window: the only moment Module B can reach this node -
-  // see file header for the sender-side contract this implies.
+  // Post-TX listen window: the only moment Module B can push a CFG downlink.
   LoRaMessage msg;
-  uint32_t listenStart = millis();
-  while (millis() - listenStart < LORA_POST_TX_LISTEN_MS) {
+  uint32_t t0 = millis();
+  while (millis() - t0 < LORA_POST_TX_LISTEN_MS) {
     if (radio.poll(msg)) {
       handleInboundMessage(msg);
-      break;  // one command per cycle - see file header
+      break;  // one command per window
     }
   }
+}
+
+void loop() {
+  uint32_t now = millis();
+
+  sampleSensors();
+
+  static uint32_t lastReadLogMs = 0;
+  if (now - lastReadLogMs >= READ_LOG_GAP_MS) {
+    lastReadLogMs = now;
+    Serial.printf("[read] bme=%s sen0466=%s bmv=%s cm1106=%s(co2=%.0f) calypso=%s(rx=%u)\n",
+                  statusName(g_bmeSt), statusName(g_coSt), statusName(g_bmvSt), statusName(g_co2St), g_co2,
+                  g_calypsoEnabled ? (g_windValid ? "OK" : "silent") : "off", calypso.lastReadBytes());
+  }
+
+  // Transmit the cached snapshot every g_txPeriodMs (first one FIRST_TX_DELAY_MS
+  // after boot so it doesn't wait a full period for the first packet).
+  static uint32_t lastTxMs = 0;
+  static bool firstTxDone = false;
+  uint32_t txDue = firstTxDone ? g_txPeriodMs : FIRST_TX_DELAY_MS;
+  if (now - lastTxMs >= txDue) {
+    lastTxMs = now;
+    firstTxDone = true;
+    transmitSnapshot();
+  }
+
+  // NOT sleep - see file header. Just paces the sample loop.
+  delay(SAMPLE_GAP_MS);
 }
