@@ -16,8 +16,13 @@
 #define PIN_CM1106_EN 3  // active high, through a 1k series resistor on the board
 
 // Calypso ULP PRO wind sensor: UART1. Confirmed TTL-UART/NMEA variant (not RS485).
-#define PIN_CALYPSO_TX 8  // ESP TX -> sensor RX (unused - sensor streams unprompted)
-#define PIN_CALYPSO_RX 9  // ESP RX <- sensor TX
+// 2026-09-01: RX moved 9->8 and TX 8->9. The sensor's TX (green) is physically
+// on GPIO8 - a bench sweep across GPIO5/6/8/9 x baud 4800-115200 got a valid
+// $IIMWV sentence ONLY on RX=GPIO8 @ 38400. Also: this unit needs 5V VCC, not
+// 3.3V (the old "confirmed fine at 3.3V" note was wrong for it - it was silent
+// on 3.3V, streamed the moment it moved to 5V).
+#define PIN_CALYPSO_TX 9  // ESP TX -> sensor RX/yellow (unused - sensor streams unprompted)
+#define PIN_CALYPSO_RX 8  // ESP RX <- sensor TX/green
 
 // Spare pin, unused for now (reserved for a future CM1106 RDY line).
 #define PIN_SPARE 12

@@ -268,6 +268,18 @@ static bool applyConfigCommand(const char *payload, uint8_t len, char *ackPayloa
   return appliedAny;
 }
 
+static const char *statusName(ReadingStatus s) {
+  switch (s) {
+    case ReadingStatus::NotInitialized: return "NotInit";
+    case ReadingStatus::NotReady:       return "NotReady";
+    case ReadingStatus::Timeout:        return "Timeout";
+    case ReadingStatus::NoAck:          return "NoAck";
+    case ReadingStatus::InvalidFrame:   return "BadFrame";
+    case ReadingStatus::Ok:             return "OK";
+  }
+  return "?";
+}
+
 // Handles one inbound LoRa message drained during the post-TX listen window -
 // either a recognized CFG downlink (apply + ACK) or anything else (logged
 // only; no command protocol beyond CFG exists yet).
@@ -365,8 +377,10 @@ void loop() {
     }
   }
 
+  ReadingStatus bmvSt = ReadingStatus::NotInitialized;
   if (bmvReady && g_bmvEnabled) {
     Reading pm = bmv080.read();
+    bmvSt = pm.status;
     if (pm.ok()) {
       g_pm1 = pm.values[0];
       g_pm25 = pm.values[1];
@@ -374,8 +388,10 @@ void loop() {
     }
   }
 
+  ReadingStatus bmeSt = ReadingStatus::NotInitialized;
   if (bmeReady && g_bmeEnabled) {
     Reading env = bme690.read();
+    bmeSt = env.status;
     if (env.ok()) {
       g_temp = env.values[0];
       g_hum = env.values[1];
@@ -384,18 +400,28 @@ void loop() {
     }
   }
 
+  ReadingStatus coSt = ReadingStatus::NotInitialized;
   if (sen0466Ready && g_sen0466Enabled) {
     Reading co = sen0466.read();
+    coSt = co.status;
     if (co.ok()) {
       g_co = co.values[0];
       g_coTemp = co.values[1];
     }
   }
 
+  ReadingStatus co2St = ReadingStatus::NotInitialized;
   if (g_cm1106Enabled) {
     Reading co2 = cm1106.read();
+    co2St = co2.status;
     if (co2.ok()) g_co2 = co2.values[0];
   }
+
+  // One diagnostic line per cycle - which sensors actually answered this
+  // cycle vs. which are feeding a stale cached value into the payload.
+  Serial.printf("[read] bme=%s sen0466=%s bmv=%s cm1106=%s(co2 now %.0f) calypso=%s(rx=%u)\n",
+                statusName(bmeSt), statusName(coSt), statusName(bmvSt), statusName(co2St), g_co2,
+                g_calypsoEnabled ? (g_windValid ? "OK" : "silent") : "off", calypso.lastReadBytes());
 
   char payload[96];
   int len = snprintf(payload, sizeof(payload), "%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d",

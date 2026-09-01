@@ -23,11 +23,14 @@ struct Combo {
   uint32_t baud;
 };
 static const Combo kCombos[] = {
-    {9, 8, 38400}, {8, 9, 38400},  // as-wired, then TX/RX swapped
-    {9, 8, 9600},  {8, 9, 9600},
-    {9, 8, 4800},  {8, 9, 4800},
-    {9, 8, 115200},
-    {9, 8, 19200},
+    // pins.h wiring (green->9, yellow->8), sensor default baud first
+    {9, 8, 38400}, {8, 9, 38400},
+    // sensor/main.cpp + old ulp test wiring (green->5, yellow->6)
+    {5, 6, 38400}, {6, 5, 38400},
+    // baud sweep on the pins.h wiring
+    {9, 8, 9600},  {9, 8, 4800}, {9, 8, 19200}, {9, 8, 115200}, {9, 8, 57600},
+    // baud sweep on the 5/6 wiring
+    {5, 6, 9600},  {5, 6, 4800}, {5, 6, 115200},
 };
 static const size_t kNumCombos = sizeof(kCombos) / sizeof(kCombos[0]);
 
