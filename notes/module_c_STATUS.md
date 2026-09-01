@@ -11,6 +11,11 @@
   earlier in the session, recovered on its own). SEN0466 — coTemp reads, CO
   stays 0. BMV080 PM — mostly 0, occasional 1-2. Calypso wind — **0/0/false,
   see below.**
+- **UPDATE 2026-09-01: Calypso is FIXED.** It needed **5V VCC** (silent on
+  3.3V) and its TX/green wire is on **GPIO8, not GPIO9**. `pins.h` swapped to
+  `PIN_CALYPSO_RX 8`. Now streams valid `$IIMWV` - `Wind: 65.0 deg 0.00
+  valid(A)`. The exhaustive-ruled-out notes below stand as the diagnosis path
+  but the conclusion ("physical, needs multimeter") resolved to power+pin.
 - **Calypso wind sensor: not a software problem.** Ruled out exhaustively:
   a standalone diagnostic that does nothing but listen on UART1 (swept
   GPIO8↔9, baud 4800/9600/19200/38400/115200, RX pull-ups on, TX poked for
