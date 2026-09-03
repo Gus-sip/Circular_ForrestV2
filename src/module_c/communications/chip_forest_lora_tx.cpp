@@ -426,9 +426,10 @@ void loop() {
   static uint32_t lastReadLogMs = 0;
   if (now - lastReadLogMs >= READ_LOG_GAP_MS) {
     lastReadLogMs = now;
-    Serial.printf("[read] bme=%s sen0466=%s bmv=%s cm1106=%s(co2=%.0f) calypso=%s(rx=%u)\n",
-                  statusName(g_bmeSt), statusName(g_coSt), statusName(g_bmvSt), statusName(g_co2St), g_co2,
-                  g_calypsoEnabled ? (g_windValid ? "OK" : "silent") : "off", calypso.lastReadBytes());
+    Serial.printf("[read] co2=%.1f(%s) co=%.2f(%s) | bme=%s bmv=%s calypso=%s(rx=%u) | T%.1f H%.1f gas%.0f pm2.5=%.1f\n",
+                  g_co2, statusName(g_co2St), g_co, statusName(g_coSt), statusName(g_bmeSt), statusName(g_bmvSt),
+                  g_calypsoEnabled ? (g_windValid ? "OK" : "silent") : "off", calypso.lastReadBytes(),
+                  g_temp, g_hum, g_gas, g_pm25);
   }
 
   // Transmit the cached snapshot every g_txPeriodMs (first one FIRST_TX_DELAY_MS
