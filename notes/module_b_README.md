@@ -7,6 +7,77 @@ from the sensor node (Module C, `src/module_c/` in this same project,
 originally the sibling `../../sensor_node/` project); the two only need to agree on the LoRa
 link parameters and the telemetry payload format.
 
+## 2026-09-02 — Downlink: Module A can now command Module B, and Module C through it
+
+Module B subscribes to two MQTT topics after every successful `QMTCONN`, so
+ThingsBoard can reconfigure the relay and the nodes without a reflash. Both
+subscribes are best-effort — a rejected SUBSCRIBE loses remote control but
+never blocks telemetry.
+
+### Reconfigure Module B itself
+
+Server-side RPC on the **gateway device** (`CON-1`). ThingsBoard sends it on
+`v1/devices/me/rpc/request/<id>`; the reply goes to
+`v1/devices/me/rpc/response/<id>`.
+
+```json
+{"method": "cfg", "params": {"UPLINK": 300, "BATCH": 4}}
+```
+
+| Key | Meaning | Clamped to |
+|---|---|---|
+| `UPLINK` | seconds between NB-IoT uplinks (`_batchSecondsTarget`) | 60 … 86400 |
+| `BATCH` | readings that trigger an early uplink (`_batchReadingsTarget`) | 1 … `NBIOT_RING_CAPACITY` (24) |
+
+Reply echoes the **post-clamp** values, so a clamped request is visible rather
+than silently assumed away:
+
+```json
+{"applied": {"UPLINK": 300}}
+```
+
+### Reconfigure a node (Module C) through Module B
+
+Server-side RPC on a **child device** (`NodoC-1`), which ThingsBoard delivers
+to the gateway on `v1/gateway/rpc`:
+
+```json
+{"device": "NodoC-1", "data": {"id": 42, "method": "cfg",
+ "params": {"INTERVAL": 300, "BMV080": 0}}}
+```
+
+Module B translates the params into the `CFG,<key>=<value>,…` string Module C
+already parses (`applyConfigCommand`), **queues** it, and transmits it over
+LoRa the instant that node's next uplink arrives. Keys aren't validated by
+Module B — Module C ignores what it doesn't recognise and ACKs only what it
+actually applied, so the node stays the authority on its own vocabulary.
+Currently understood by Module C: `INTERVAL` (seconds) and
+`BME690`/`SEN0466`/`BMV080`/`CM1106`/`CALYPSO` (0/1).
+
+The node's `ACK,…` comes back over LoRa and becomes the RPC result:
+
+```json
+{"device": "NodoC-1", "id": 42, "data": {"applied": "INTERVAL=300,BMV080=0"}}
+```
+
+### The latency you have to live with
+
+**A node command takes up to one full send period (5 min default) to land.**
+Module C only listens for ~2 s after each of its own transmissions — that's
+the Class-A power model, and continuous listening would wreck the supercap
+budget (`notes/power_budget.md`). So Module B parks the command and fires it
+on the node's next uplink. Only **one** node command is held at a time; a
+second arriving before the first is answered gets a "busy" error rather than
+being queued, since a backlog of stale config pushes helps nobody. If the node
+never uplinks, the RPC is answered with a timeout error after
+`DOWNLINK_QUEUE_TIMEOUT_MS` (15 min = 3 missed windows).
+
+### No authentication anywhere
+
+Module C only filters downlinks by LoRa sender address. Anyone transmitting on
+the same band/network ID could push a `CFG` to a node. Fine on the bench,
+must be addressed before deployment.
+
 ## 2026-08-28 (cont.) — Fast 15s cadence: SF7, time-batched uplink, per-reading timestamps
 
 - **LoRa dropped to SF7** (was SF9) on both ends (`LORA_PARAM_SF` in Module B

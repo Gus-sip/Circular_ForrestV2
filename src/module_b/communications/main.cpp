@@ -249,6 +249,29 @@ void loop() {
     Serial.printf("+RCV addr=%u len=%u rssi=%d snr=%d data=\"%.*s\"\n", msg.senderAddr, msg.length,
                   msg.rssi, msg.snr, msg.length, msg.payload);
 
+    // FIRST, before any parsing: if Module A queued a command for this node,
+    // fire it now. This uplink is the node's only listening moment - it opens
+    // a ~2s window right after transmitting and then goes deaf until its next
+    // send period. Anything we do before this send eats into that window.
+    if (modem.nodeCommandPending()) {
+      char name[24];
+      nbiotResolveNodeName(msg.senderAddr, name, sizeof(name));
+      if (strcmp(name, modem.nodeCommandDevice()) == 0) {
+        const char *cfg = modem.nodeCommandCfg();
+        bool sent = radio.send(msg.senderAddr, cfg, (uint8_t)strlen(cfg));
+        Serial.printf("  -> downlink to %s: %s (%s)\n", name, cfg, sent ? "sent" : "SEND FAILED");
+        if (sent) modem.onNodeCommandDelivered();
+      }
+    }
+
+    // A node's reply to a config push, not telemetry - route it to the modem
+    // so it can answer the original RPC, and don't try to parse it as a
+    // reading (it would just be dropped as "wrong field count").
+    if (msg.length >= 4 && strncmp(msg.payload, "ACK,", 4) == 0) {
+      modem.onNodeCommandAck(msg.payload);
+      continue;
+    }
+
     SensorSnapshot snap;
     if (TelemetryParser::parse(msg.payload, msg.length, snap)) {
       snap.hasData = true;

@@ -207,6 +207,182 @@ bool parseQmtstat(const char *line, int &clientIdx, int &errCode) {
   return true;
 }
 
+bool parseQmtsub(const char *line, int &clientIdx, int &msgId, int &result) {
+  if (strncmp(line, "+QMTSUB:", 8) != 0) return false;
+  const char *p = line + 8;
+  while (*p == ' ') p++;
+  const char *msgIdField = skipCommas(p, 1);
+  if (!msgIdField) return false;
+  const char *resultField = skipCommas(p, 2);
+  if (!resultField) return false;
+  clientIdx = (int)strtol(p, nullptr, 10);
+  msgId = (int)strtol(msgIdField, nullptr, 10);
+  result = (int)strtol(resultField, nullptr, 10);
+  return true;
+}
+
+bool parseQmtrecv(const char *line, MqttMessage &out) {
+  if (strncmp(line, "+QMTRECV:", 9) != 0) return false;
+  const char *p = line + 9;
+  while (*p == ' ') p++;
+
+  char *end = nullptr;
+  long idx = strtol(p, &end, 10);
+  if (end == p || *end != ',') return false;
+  p = end + 1;
+  long msg = strtol(p, &end, 10);
+  if (end == p || *end != ',') return false;
+  p = end + 1;
+
+  // topic: the first quoted run
+  if (*p != '"') return false;
+  const char *topicStart = p + 1;
+  const char *topicEnd = strchr(topicStart, '"');
+  if (!topicEnd) return false;
+  size_t topicLen = (size_t)(topicEnd - topicStart);
+  if (topicLen >= kMqttTopicLen) topicLen = kMqttTopicLen - 1;
+
+  // payload: from the quote that opens after the topic, to the LAST quote on
+  // the line. Skipping whatever sits between (an optional length field) means
+  // both URC shapes work, and taking the last quote means embedded commas in
+  // the JSON can't truncate it.
+  const char *afterTopic = topicEnd + 1;
+  const char *payStart = strchr(afterTopic, '"');
+  if (!payStart) return false;
+  payStart++;
+  const char *payEnd = strrchr(payStart, '"');
+  if (!payEnd || payEnd < payStart) return false;
+  size_t payLen = (size_t)(payEnd - payStart);
+  if (payLen >= kMqttPayloadLen) payLen = kMqttPayloadLen - 1;
+
+  out.clientIdx = (int)idx;
+  out.msgId = (int)msg;
+  memcpy(out.topic, topicStart, topicLen);
+  out.topic[topicLen] = '\0';
+  memcpy(out.payload, payStart, payLen);
+  out.payload[payLen] = '\0';
+  return true;
+}
+
+namespace {
+
+// Returns a pointer just past the ':' that follows "<key>", or nullptr.
+const char *jsonSeekValue(const char *json, const char *key) {
+  char quoted[40];
+  size_t n = strlen(key);
+  if (n + 3 > sizeof(quoted)) return nullptr;
+  quoted[0] = '"';
+  memcpy(quoted + 1, key, n);
+  quoted[n + 1] = '"';
+  quoted[n + 2] = '\0';
+
+  const char *at = strstr(json, quoted);
+  if (!at) return nullptr;
+  const char *p = at + n + 2;
+  while (*p == ' ') p++;
+  if (*p != ':') return nullptr;
+  p++;
+  while (*p == ' ') p++;
+  return p;
+}
+
+}  // namespace
+
+bool jsonString(const char *json, const char *key, char *out, size_t cap) {
+  const char *p = jsonSeekValue(json, key);
+  if (!p || *p != '"') return false;
+  p++;
+  const char *e = strchr(p, '"');
+  if (!e) return false;
+  size_t len = (size_t)(e - p);
+  if (len >= cap) len = cap - 1;
+  memcpy(out, p, len);
+  out[len] = '\0';
+  return true;
+}
+
+bool jsonInt(const char *json, const char *key, long &out) {
+  const char *p = jsonSeekValue(json, key);
+  if (!p) return false;
+  if (*p == '"') p++;  // tolerate a quoted number
+  char *end = nullptr;
+  long v = strtol(p, &end, 10);
+  if (end == p) return false;
+  out = v;
+  return true;
+}
+
+bool jsonObject(const char *json, const char *key, char *out, size_t cap) {
+  const char *p = jsonSeekValue(json, key);
+  if (!p || *p != '{') return false;
+  int depth = 0;
+  const char *start = p;
+  bool inStr = false;
+  for (; *p; p++) {
+    if (inStr) {
+      if (*p == '\\' && p[1]) p++;
+      else if (*p == '"') inStr = false;
+      continue;
+    }
+    if (*p == '"') inStr = true;
+    else if (*p == '{') depth++;
+    else if (*p == '}') {
+      depth--;
+      if (depth == 0) {
+        size_t len = (size_t)(p - start) + 1;
+        if (len >= cap) len = cap - 1;
+        memcpy(out, start, len);
+        out[len] = '\0';
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+bool jsonNextPair(const char *&cursor, char *key, size_t keyCap, char *value, size_t valueCap) {
+  const char *p = cursor;
+  // advance to the next quoted key
+  while (*p && *p != '"') {
+    if (*p == '}') return false;  // end of this object
+    p++;
+  }
+  if (*p != '"') return false;
+  p++;
+  const char *ke = strchr(p, '"');
+  if (!ke) return false;
+  size_t klen = (size_t)(ke - p);
+  if (klen >= keyCap) klen = keyCap - 1;
+  memcpy(key, p, klen);
+  key[klen] = '\0';
+
+  p = ke + 1;
+  while (*p == ' ') p++;
+  if (*p != ':') return false;
+  p++;
+  while (*p == ' ') p++;
+
+  if (*p == '"') {
+    p++;
+    const char *ve = strchr(p, '"');
+    if (!ve) return false;
+    size_t vlen = (size_t)(ve - p);
+    if (vlen >= valueCap) vlen = valueCap - 1;
+    memcpy(value, p, vlen);
+    value[vlen] = '\0';
+    cursor = ve + 1;
+  } else {
+    const char *ve = p;
+    while (*ve && *ve != ',' && *ve != '}' && *ve != ' ') ve++;
+    size_t vlen = (size_t)(ve - p);
+    if (vlen >= valueCap) vlen = valueCap - 1;
+    memcpy(value, p, vlen);
+    value[vlen] = '\0';
+    cursor = ve;
+  }
+  return true;
+}
+
 bool parseDownlink(const char *text, DownlinkAck &out) {
   out = DownlinkAck{};
   if (strncmp(text, "ACK,", 4) != 0) return false;

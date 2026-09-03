@@ -87,6 +87,48 @@ bool parseQmtpub(const char *line, int &clientIdx, int &msgId, int &result);
 // any in-flight command - always routed through the URC path.
 bool parseQmtstat(const char *line, int &clientIdx, int &errCode);
 
+// "+QMTSUB: <client_idx>,<msgID>,<result>[,<value>]" - async URC after
+// AT+QMTSUB's OK ack. result==0 means the subscription was accepted.
+bool parseQmtsub(const char *line, int &clientIdx, int &msgId, int &result);
+
+// ---------- Inbound MQTT message (downlink from Module A) ----------
+
+constexpr size_t kMqttTopicLen = 72;
+constexpr size_t kMqttPayloadLen = 320;
+
+struct MqttMessage {
+  int clientIdx = 0;
+  int msgId = 0;
+  char topic[kMqttTopicLen] = {0};
+  char payload[kMqttPayloadLen] = {0};
+};
+
+// "+QMTRECV: <client_idx>,<msgID>,"<topic>"[,<payload_len>],"<payload>""
+// Both URC shapes (with and without the explicit payload length) are accepted
+// - which one the module emits depends on AT+QMTCFG="recv/mode". The payload
+// is taken from the last quoted run on the line, so a payload containing
+// commas (every JSON one does) doesn't desync the fields after it.
+bool parseQmtrecv(const char *line, MqttMessage &out);
+
+// ---------- Minimal JSON field extraction ----------
+// Just enough for ThingsBoard's small RPC payloads - no allocator, no library,
+// no full parse. Each function scans for "<key>" and reads the value that
+// follows it, which is unambiguous for these payloads because their keys are
+// distinct and they nest at most two levels. Do NOT reuse this for arbitrary
+// JSON: it has no notion of scope, so a key repeated at a different depth
+// would match the first occurrence.
+bool jsonString(const char *json, const char *key, char *out, size_t cap);
+bool jsonInt(const char *json, const char *key, long &out);
+// Extracts the brace-balanced object that follows "<key>": - used to pull the
+// "data" and "params" sub-objects out of a gateway RPC payload.
+bool jsonObject(const char *json, const char *key, char *out, size_t cap);
+
+// Iterates the key/value pairs of a flat JSON object body. Call with cursor
+// pointing at the object (or just past its '{'); returns false when there are
+// no more pairs. Values are returned as text with any surrounding quotes
+// stripped, so both {"A":1} and {"A":"1"} yield "1".
+bool jsonNextPair(const char *&cursor, char *key, size_t keyCap, char *value, size_t valueCap);
+
 // ---------- Downlink application grammar ----------
 // Server replies to an uplink datagram with either:
 //   ACK,<seq>

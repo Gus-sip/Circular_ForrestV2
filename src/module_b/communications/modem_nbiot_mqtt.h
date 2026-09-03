@@ -51,6 +51,7 @@ public:
     MQTT_CONNECT,
     IDLE,
     PUBLISHING,
+    RPC_REPLY,
     ERROR,
   };
 
@@ -85,8 +86,31 @@ public:
   uint8_t ringCount() const { return _ringCount; }
   bool haveNetTime() const { return _haveNetTime; }
 
+  // ---------- Runtime config, settable from Module A ----------
+  // Both clamp to the MQTT_BATCH_*_MIN/MAX bounds in Config.h and return the
+  // value actually applied, so a clamped command is visible to the caller (and
+  // gets reported back in the RPC response) instead of silently assumed away.
+  uint32_t setBatchSeconds(uint32_t seconds);
+  uint16_t setBatchReadings(uint16_t readings);
+
+  // ---------- Downlink relay to a child node ----------
+  // A node-directed RPC can't be delivered on arrival: Module C only listens
+  // for ~2s after each of its own transmissions. So one command is parked here
+  // and main.cpp fires it over LoRa the instant it sees that node's uplink.
+  // Only one is held at a time - a second arriving before the first is
+  // answered is rejected with a "busy" RPC error rather than queued, since a
+  // deep queue of stale config pushes helps nobody.
+  bool nodeCommandPending() const { return _nodeCmd.pending && !_nodeCmd.awaitingAck; }
+  const char *nodeCommandDevice() const { return _nodeCmd.device; }
+  const char *nodeCommandCfg() const { return _nodeCmd.cfg; }
+  // Called by main.cpp once the CFG string has gone out over LoRa.
+  void onNodeCommandDelivered();
+  // Called by main.cpp when an "ACK,..." packet comes back from the node.
+  // Publishes the RPC response and clears the slot.
+  void onNodeCommandAck(const char *ackPayload);
+
 private:
-  enum class CmdKind : uint8_t { PLAIN, QMTOPEN, QMTCONN, QMTPUB };
+  enum class CmdKind : uint8_t { PLAIN, QMTOPEN, QMTCONN, QMTPUB, QMTSUB };
   enum class CmdOutcome : uint8_t { NONE, OK, ERR, TIMEOUT };
   enum class ConfigStep : uint8_t {
     ATE0,
@@ -100,7 +124,10 @@ private:
     CFUN_ON_2,
     DONE
   };
-  enum class MqttConnectSub : uint8_t { CLOSE_FIRST, KEEPALIVE_CFG, OPEN, CONN };
+  // SUB_DEVICE/SUB_GATEWAY run after CONN so downlink is live before IDLE.
+  // Both are best-effort: a failed subscribe loses remote control but must not
+  // stop telemetry, which is the module's actual job.
+  enum class MqttConnectSub : uint8_t { CLOSE_FIRST, KEEPALIVE_CFG, OPEN, CONN, SUB_DEVICE, SUB_GATEWAY };
   enum class RecoveryLevel : uint8_t { PUBLISH, MQTT_CONNECT, ATTACH };
 
   struct PendingCmd {
@@ -137,6 +164,20 @@ private:
   uint32_t computeBackoff(uint32_t attempt) const;
   void setLastError(const char *msg);
 
+  // ---------- Downlink handling ----------
+  // Routes one inbound MQTT message by topic: the gateway's own RPC topic
+  // means "reconfigure Module B", the gateway RPC topic means "relay this to
+  // a child node".
+  void handleInboundMqtt(const NbiotProtocol::MqttMessage &msg);
+  void handleOwnRpc(const NbiotProtocol::MqttMessage &msg);
+  void handleGatewayRpc(const NbiotProtocol::MqttMessage &msg);
+  // Applies a flat {"KEY":value,...} params object to Module B's own runtime
+  // config, writing what was actually applied (post-clamp) into applied.
+  bool applyOwnConfig(const char *params, char *applied, size_t cap);
+  // Queues an RPC response for RPC_REPLY to publish.
+  void queueRpcReply(const char *topic, const char *payload);
+  void tickNodeCommandTimeout();
+
   void tickOff();
   void tickPowering();
   void tickWaitAt();
@@ -145,6 +186,7 @@ private:
   void tickMqttConnect();
   void tickIdle();
   void tickPublishing();
+  void tickRpcReply();
   void tickError();
 
   void onPublishSucceeded();
@@ -216,6 +258,27 @@ private:
   uint8_t _publishPayload[MQTT_PAYLOAD_MAX_BYTES];
   size_t _publishPayloadLen = 0;
   uint8_t _lastPublishCount = 0;
+
+  // ---------- Downlink ----------
+  // One node-directed command in flight at a time - see nodeCommandPending().
+  struct NodeCommand {
+    bool pending = false;      // occupied
+    bool awaitingAck = false;  // already sent over LoRa, waiting for the node's ACK
+    char device[24] = {0};     // ThingsBoard child-device name, e.g. "NodoC-1"
+    char cfg[128] = {0};       // "CFG,INTERVAL=300,BMV080=0" as Module C expects it
+    long rpcId = 0;
+    uint32_t queuedMs = 0;
+  };
+  NodeCommand _nodeCmd;
+
+  // One queued RPC response, published by RPC_REPLY then cleared.
+  bool _rpcReplyPending = false;
+  char _rpcReplyTopic[NbiotProtocol::kMqttTopicLen] = {0};
+  char _rpcReplyPayload[224] = {0};
+  bool _rpcReplyInFlight = false;
+
+  uint16_t _subMsgId = 1;  // AT+QMTSUB message id, incremented per subscribe
+  uint32_t _downlinksReceived = 0;
 
   // ---------- Ring buffer of pending telemetry ----------
   SensorSnapshot _ring[NBIOT_RING_CAPACITY];

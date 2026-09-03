@@ -37,8 +37,29 @@ void ModemNBIoTMqtt::tick() {
     case State::MQTT_CONNECT: tickMqttConnect(); break;
     case State::IDLE: tickIdle(); break;
     case State::PUBLISHING: tickPublishing(); break;
+    case State::RPC_REPLY: tickRpcReply(); break;
     case State::ERROR: tickError(); break;
   }
+
+  tickNodeCommandTimeout();
+}
+
+// ---------- Runtime config, settable from Module A ----------
+
+uint32_t ModemNBIoTMqtt::setBatchSeconds(uint32_t seconds) {
+  if (seconds < MQTT_BATCH_SECONDS_MIN) seconds = MQTT_BATCH_SECONDS_MIN;
+  if (seconds > MQTT_BATCH_SECONDS_MAX) seconds = MQTT_BATCH_SECONDS_MAX;
+  _batchSecondsTarget = seconds;
+  Serial.printf("[nbiot-mqtt] uplink period set to %lus\n", (unsigned long)seconds);
+  return seconds;
+}
+
+uint16_t ModemNBIoTMqtt::setBatchReadings(uint16_t readings) {
+  if (readings < MQTT_BATCH_READINGS_MIN) readings = MQTT_BATCH_READINGS_MIN;
+  if (readings > MQTT_BATCH_READINGS_MAX) readings = MQTT_BATCH_READINGS_MAX;
+  _batchReadingsTarget = readings;
+  Serial.printf("[nbiot-mqtt] uplink batch size set to %u readings\n", readings);
+  return readings;
 }
 
 void ModemNBIoTMqtt::enqueue(const SensorSnapshot &snap) {
@@ -133,7 +154,8 @@ void ModemNBIoTMqtt::handleLine(const char *line, size_t len) {
   Serial.println(line);
 
   if (strcmp(line, "OK") == 0) {
-    if (_cmd.kind == CmdKind::QMTOPEN || _cmd.kind == CmdKind::QMTCONN || _cmd.kind == CmdKind::QMTPUB) {
+    if (_cmd.kind == CmdKind::QMTOPEN || _cmd.kind == CmdKind::QMTCONN || _cmd.kind == CmdKind::QMTPUB ||
+        _cmd.kind == CmdKind::QMTSUB) {
       _cmd.sawOk = true;  // ack received - the real result is the async URC below
       return;
     }
@@ -173,6 +195,15 @@ void ModemNBIoTMqtt::handleLine(const char *line, size_t len) {
     handleUrc(line, len);
     return;
   }
+  if (_cmd.kind == CmdKind::QMTSUB && _cmd.sawOk) {
+    int idx, msgId, result;
+    if (NbiotProtocol::parseQmtsub(line, idx, msgId, result)) {
+      completeCommand(result == 0 ? CmdOutcome::OK : CmdOutcome::ERR);
+      return;
+    }
+    handleUrc(line, len);
+    return;
+  }
 
   // Any other line while a plain command is active is its informational
   // response body (e.g. "+CPIN: READY" or "+CEREG: 1,5" ahead of OK).
@@ -193,12 +224,226 @@ void ModemNBIoTMqtt::handleUrc(const char *line, size_t len) {
     return;
   }
 
+  // Inbound MQTT message - the downlink path from Module A. Arrives as an
+  // unsolicited URC at any time, including in the middle of another command's
+  // response, which is why it's handled here rather than in a command branch.
+  NbiotProtocol::MqttMessage inbound;
+  if (NbiotProtocol::parseQmtrecv(line, inbound)) {
+    _downlinksReceived++;
+    Serial.printf("[nbiot-mqtt] downlink on \"%s\": %s\n", inbound.topic, inbound.payload);
+    handleInboundMqtt(inbound);
+    return;
+  }
+
   if (strstr(line, "RDY") || strstr(line, "QNBIOTEVENT")) {
     _sawBootUrc = true;
     return;
   }
 
   Serial.printf("[nbiot-mqtt] urc: %s\n", line);
+}
+
+// ---------- Downlink: Module A -> Module B (-> Module C) ----------
+
+void ModemNBIoTMqtt::handleInboundMqtt(const NbiotProtocol::MqttMessage &msg) {
+  // The gateway's own RPC topic carries the request id in the topic itself:
+  //   v1/devices/me/rpc/request/<id>
+  if (strncmp(msg.topic, "v1/devices/me/rpc/request/", 26) == 0) {
+    handleOwnRpc(msg);
+    return;
+  }
+  if (strcmp(msg.topic, MQTT_TOPIC_GATEWAY_RPC) == 0) {
+    handleGatewayRpc(msg);
+    return;
+  }
+  Serial.printf("[nbiot-mqtt] downlink on an unhandled topic, ignored: %s\n", msg.topic);
+}
+
+// RPC aimed at the gateway device itself = reconfigure Module B.
+//   {"method":"cfg","params":{"UPLINK":300,"BATCH":6}}
+void ModemNBIoTMqtt::handleOwnRpc(const NbiotProtocol::MqttMessage &msg) {
+  const char *idStr = msg.topic + 26;  // past "v1/devices/me/rpc/request/"
+
+  char method[24] = {0};
+  NbiotProtocol::jsonString(msg.payload, "method", method, sizeof(method));
+
+  char topic[NbiotProtocol::kMqttTopicLen];
+  snprintf(topic, sizeof(topic), "%s%s", MQTT_TOPIC_DEVICE_RPC_RESP, idStr);
+
+  char params[160] = {0};
+  char reply[224];
+
+  if (strcmp(method, "cfg") != 0) {
+    snprintf(reply, sizeof(reply), "{\"error\":\"unknown method '%s', expected 'cfg'\"}", method);
+    queueRpcReply(topic, reply);
+    return;
+  }
+  if (!NbiotProtocol::jsonObject(msg.payload, "params", params, sizeof(params))) {
+    snprintf(reply, sizeof(reply), "{\"error\":\"missing params\"}");
+    queueRpcReply(topic, reply);
+    return;
+  }
+
+  char applied[128] = {0};
+  if (!applyOwnConfig(params, applied, sizeof(applied))) {
+    snprintf(reply, sizeof(reply), "{\"error\":\"no recognized keys (want UPLINK and/or BATCH)\"}");
+    queueRpcReply(topic, reply);
+    return;
+  }
+
+  // Echo back the post-clamp values so a clamped request is visible.
+  snprintf(reply, sizeof(reply), "{\"applied\":{%s}}", applied);
+  queueRpcReply(topic, reply);
+}
+
+// Applies {"UPLINK":300,"BATCH":6} to this module's own runtime config.
+bool ModemNBIoTMqtt::applyOwnConfig(const char *params, char *applied, size_t cap) {
+  const char *cur = params;
+  char key[24], value[24];
+  size_t pos = 0;
+  bool any = false;
+
+  auto appendKv = [&](const char *k, unsigned long v) {
+    int n = snprintf(applied + pos, cap - pos, "%s\"%s\":%lu", pos ? "," : "", k, v);
+    if (n > 0 && (size_t)n < cap - pos) pos += (size_t)n;
+  };
+
+  while (NbiotProtocol::jsonNextPair(cur, key, sizeof(key), value, sizeof(value))) {
+    long v = strtol(value, nullptr, 10);
+    if (strcmp(key, "UPLINK") == 0) {
+      appendKv("UPLINK", setBatchSeconds((uint32_t)(v < 0 ? 0 : v)));
+      any = true;
+    } else if (strcmp(key, "BATCH") == 0) {
+      appendKv("BATCH", setBatchReadings((uint16_t)(v < 0 ? 0 : v)));
+      any = true;
+    } else {
+      Serial.printf("[nbiot-mqtt] rpc: unrecognized own-config key \"%s\", ignored\n", key);
+    }
+  }
+  applied[pos] = '\0';
+  return any;
+}
+
+// RPC aimed at a child device = relay to that node over LoRa.
+//   {"device":"NodoC-1","data":{"id":42,"method":"cfg","params":{"INTERVAL":300}}}
+void ModemNBIoTMqtt::handleGatewayRpc(const NbiotProtocol::MqttMessage &msg) {
+  char device[24] = {0};
+  char data[224] = {0};
+  if (!NbiotProtocol::jsonString(msg.payload, "device", device, sizeof(device)) ||
+      !NbiotProtocol::jsonObject(msg.payload, "data", data, sizeof(data))) {
+    Serial.println("[nbiot-mqtt] gateway rpc missing device/data, ignored");
+    return;
+  }
+
+  long rpcId = 0;
+  NbiotProtocol::jsonInt(data, "id", rpcId);
+
+  char reply[224];
+  auto replyErr = [&](const char *err) {
+    snprintf(reply, sizeof(reply), "{\"device\":\"%s\",\"id\":%ld,\"data\":{\"error\":\"%s\"}}", device, rpcId,
+             err);
+    queueRpcReply(MQTT_TOPIC_GATEWAY_RPC, reply);
+  };
+
+  char method[24] = {0};
+  NbiotProtocol::jsonString(data, "method", method, sizeof(method));
+  if (strcmp(method, "cfg") != 0) {
+    replyErr("unknown method, expected 'cfg'");
+    return;
+  }
+
+  char params[160] = {0};
+  if (!NbiotProtocol::jsonObject(data, "params", params, sizeof(params))) {
+    replyErr("missing params");
+    return;
+  }
+
+  if (_nodeCmd.pending) {
+    // One at a time - see nodeCommandPending() in the header for why this
+    // rejects instead of queueing.
+    replyErr("busy: a command for a node is still in flight");
+    return;
+  }
+
+  // Translate the params object into the "CFG,K=V,..." string Module C's
+  // applyConfigCommand() already parses. Keys aren't validated here - Module C
+  // ignores what it doesn't recognize and ACKs only what it applied, so the
+  // node stays the authority on its own config vocabulary.
+  const char *cur = params;
+  char key[24], value[24];
+  size_t pos = 0;
+  pos += (size_t)snprintf(_nodeCmd.cfg, sizeof(_nodeCmd.cfg), "CFG");
+  bool any = false;
+  while (NbiotProtocol::jsonNextPair(cur, key, sizeof(key), value, sizeof(value))) {
+    int n = snprintf(_nodeCmd.cfg + pos, sizeof(_nodeCmd.cfg) - pos, ",%s=%s", key, value);
+    if (n > 0 && (size_t)n < sizeof(_nodeCmd.cfg) - pos) {
+      pos += (size_t)n;
+      any = true;
+    }
+  }
+  if (!any) {
+    _nodeCmd.cfg[0] = '\0';
+    replyErr("params object was empty");
+    return;
+  }
+
+  strncpy(_nodeCmd.device, device, sizeof(_nodeCmd.device) - 1);
+  _nodeCmd.device[sizeof(_nodeCmd.device) - 1] = '\0';
+  _nodeCmd.rpcId = rpcId;
+  _nodeCmd.queuedMs = millis();
+  _nodeCmd.awaitingAck = false;
+  _nodeCmd.pending = true;
+
+  Serial.printf("[nbiot-mqtt] queued for %s: \"%s\" (waiting for its next uplink window)\n", _nodeCmd.device,
+                _nodeCmd.cfg);
+}
+
+void ModemNBIoTMqtt::onNodeCommandDelivered() {
+  if (!_nodeCmd.pending) return;
+  _nodeCmd.awaitingAck = true;
+  Serial.printf("[nbiot-mqtt] sent to %s over LoRa, awaiting ACK\n", _nodeCmd.device);
+}
+
+void ModemNBIoTMqtt::onNodeCommandAck(const char *ackPayload) {
+  if (!_nodeCmd.pending) return;
+
+  // "ACK,INTERVAL=300,BMV080=0" -> report the applied (post-clamp) values back
+  // as the RPC result, so a clamp on the node is visible in ThingsBoard.
+  const char *body = strncmp(ackPayload, "ACK,", 4) == 0 ? ackPayload + 4 : ackPayload;
+  char reply[224];
+  snprintf(reply, sizeof(reply), "{\"device\":\"%s\",\"id\":%ld,\"data\":{\"applied\":\"%s\"}}",
+           _nodeCmd.device, _nodeCmd.rpcId, body);
+  queueRpcReply(MQTT_TOPIC_GATEWAY_RPC, reply);
+
+  Serial.printf("[nbiot-mqtt] %s acked: %s\n", _nodeCmd.device, body);
+  _nodeCmd = NodeCommand{};
+}
+
+void ModemNBIoTMqtt::tickNodeCommandTimeout() {
+  if (!_nodeCmd.pending) return;
+  if (millis() - _nodeCmd.queuedMs < DOWNLINK_QUEUE_TIMEOUT_MS) return;
+
+  char reply[224];
+  snprintf(reply, sizeof(reply), "{\"device\":\"%s\",\"id\":%ld,\"data\":{\"error\":\"%s\"}}", _nodeCmd.device,
+           _nodeCmd.rpcId,
+           _nodeCmd.awaitingAck ? "delivered but the node never acked" : "node never uplinked - not delivered");
+  queueRpcReply(MQTT_TOPIC_GATEWAY_RPC, reply);
+  Serial.printf("[nbiot-mqtt] command for %s timed out (%s)\n", _nodeCmd.device,
+                _nodeCmd.awaitingAck ? "no ACK" : "never delivered");
+  _nodeCmd = NodeCommand{};
+}
+
+void ModemNBIoTMqtt::queueRpcReply(const char *topic, const char *payload) {
+  if (_rpcReplyPending) {
+    // Only one reply slot. Dropping is better than blocking the state machine;
+    // ThingsBoard times the RPC out on its own side.
+    Serial.println("[nbiot-mqtt] rpc reply slot busy, dropping the older one");
+  }
+  strncpy(_rpcReplyTopic, topic, sizeof(_rpcReplyTopic) - 1);
+  _rpcReplyTopic[sizeof(_rpcReplyTopic) - 1] = '\0';
+  strncpy(_rpcReplyPayload, payload, sizeof(_rpcReplyPayload) - 1);
+  _rpcReplyPayload[sizeof(_rpcReplyPayload) - 1] = '\0';
+  _rpcReplyPending = true;
 }
 
 void ModemNBIoTMqtt::completeCommand(CmdOutcome outcome) {
@@ -233,6 +478,9 @@ void ModemNBIoTMqtt::setState(State s) {
       break;
     case State::PUBLISHING:
       _publishInFlight = false;
+      break;
+    case State::RPC_REPLY:
+      _rpcReplyInFlight = false;
       break;
     default:
       break;
@@ -336,6 +584,7 @@ const char *ModemNBIoTMqtt::stateName() const {
     case State::MQTT_CONNECT: return "MQTT_CONNECT";
     case State::IDLE: return "IDLE";
     case State::PUBLISHING: return "PUBLISHING";
+    case State::RPC_REPLY: return "RPC_REPLY";
     case State::ERROR: return "ERROR";
   }
   return "?";
@@ -640,7 +889,7 @@ void ModemNBIoTMqtt::tickMqttConnect() {
         _mqttConnected = true;
         _mqttConnectRetries = 0;
         _consecutiveFailures = 0;
-        setState(State::IDLE);
+        _mqttConnectSub = MqttConnectSub::SUB_DEVICE;  // bring downlink up before going IDLE
         return;
       }
       // ThingsBoard access-token auth: token as username, no password.
@@ -656,6 +905,39 @@ void ModemNBIoTMqtt::tickMqttConnect() {
       issueCommand(cmd, NBIOT_TIMEOUT_SOCKET_MS, CmdKind::QMTCONN);
       return;
     }
+
+    // Both subscribes are best-effort: losing downlink costs remote control,
+    // but telemetry is this module's actual job and must not be blocked by a
+    // rejected SUBSCRIBE. Failures are logged and we continue to IDLE.
+    case MqttConnectSub::SUB_DEVICE: {
+      if (_cmd.outcome != CmdOutcome::NONE) {
+        if (consumeOutcome() != CmdOutcome::OK)
+          Serial.println("[nbiot-mqtt] subscribe to this device's RPC topic FAILED - no remote config of Module B");
+        _mqttConnectSub = MqttConnectSub::SUB_GATEWAY;
+        return;
+      }
+      char cmd[96];
+      snprintf(cmd, sizeof(cmd), "AT+QMTSUB=%d,%u,\"%s\",%d", MQTT_CLIENT_IDX, _subMsgId++,
+               MQTT_TOPIC_DEVICE_RPC_SUB, MQTT_DOWNLINK_QOS);
+      issueCommand(cmd, NBIOT_TIMEOUT_SOCKET_MS, CmdKind::QMTSUB);
+      return;
+    }
+
+    case MqttConnectSub::SUB_GATEWAY: {
+      if (_cmd.outcome != CmdOutcome::NONE) {
+        if (consumeOutcome() != CmdOutcome::OK)
+          Serial.println("[nbiot-mqtt] subscribe to the gateway RPC topic FAILED - no remote config of the nodes");
+        else
+          Serial.println("[nbiot-mqtt] downlink live - listening for RPC from Module A");
+        setState(State::IDLE);
+        return;
+      }
+      char cmd[96];
+      snprintf(cmd, sizeof(cmd), "AT+QMTSUB=%d,%u,\"%s\",%d", MQTT_CLIENT_IDX, _subMsgId++,
+               MQTT_TOPIC_GATEWAY_RPC, MQTT_DOWNLINK_QOS);
+      issueCommand(cmd, NBIOT_TIMEOUT_SOCKET_MS, CmdKind::QMTSUB);
+      return;
+    }
   }
 }
 
@@ -666,6 +948,14 @@ void ModemNBIoTMqtt::tickIdle() {
   if (outcome == CmdOutcome::OK && _cmd.hasInfoLine) {
     int dbm;
     if (NbiotProtocol::parseCsq(_cmd.infoLine, dbm)) _rssiDbm = dbm;
+  }
+
+  // An RPC response goes out ahead of the telemetry batch - it's what someone
+  // is actively waiting on in the ThingsBoard UI, and the batch loses nothing
+  // by waiting one more pass.
+  if (_rpcReplyPending && _mqttConnected) {
+    setState(State::RPC_REPLY);
+    return;
   }
 
   bool batchDue = _ringCount > 0 && (_ringCount >= _batchReadingsTarget ||
@@ -719,6 +1009,43 @@ void ModemNBIoTMqtt::tickPublishing() {
   } else {
     onPublishFailed();
   }
+}
+
+// Publishes one queued RPC response, then straight back to IDLE. Deliberately
+// simpler than PUBLISHING: no retries, no chunking, no ring to pop. If it
+// fails, the reply is dropped and ThingsBoard times the RPC out on its own -
+// retrying a stale command result is worse than not answering.
+void ModemNBIoTMqtt::tickRpcReply() {
+  if (!_rpcReplyPending) {
+    setState(State::IDLE);
+    return;
+  }
+  if (!_mqttConnected) {
+    _rpcReplyPending = false;  // can't answer; let ThingsBoard time it out
+    setState(State::IDLE);
+    return;
+  }
+  if (_cmd.active) return;
+
+  if (!_rpcReplyInFlight) {
+    _publishPayloadLen = strlen(_rpcReplyPayload);
+    if (_publishPayloadLen >= sizeof(_publishPayload)) _publishPayloadLen = sizeof(_publishPayload) - 1;
+    memcpy(_publishPayload, _rpcReplyPayload, _publishPayloadLen);
+
+    char header[128];
+    snprintf(header, sizeof(header), "AT+QMTPUB=%d,0,0,0,\"%s\"", MQTT_CLIENT_IDX, _rpcReplyTopic);
+    issueCommand(header, NBIOT_TIMEOUT_SEND_MS, CmdKind::QMTPUB, _publishPayload, _publishPayloadLen);
+    _rpcReplyInFlight = true;
+    return;
+  }
+
+  CmdOutcome outcome = consumeOutcome();
+  if (outcome == CmdOutcome::NONE) return;
+
+  if (outcome != CmdOutcome::OK) Serial.println("[nbiot-mqtt] rpc reply publish failed - dropped");
+  _rpcReplyInFlight = false;
+  _rpcReplyPending = false;
+  setState(State::IDLE);
 }
 
 void ModemNBIoTMqtt::tickError() {

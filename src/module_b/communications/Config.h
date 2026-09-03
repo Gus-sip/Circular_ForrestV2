@@ -201,6 +201,42 @@ inline void nbiotResolveNodeName(uint16_t addr, char *outName, size_t outCap) {
 #define MQTT_BATCH_MAX_READINGS 6
 #define MQTT_PUB_CHUNK_READINGS 4
 
+// Both batch targets are runtime-mutable from Module A - see the downlink
+// section below. Clamped so a fat-fingered command can't stop telemetry dead
+// or hammer the SIM's data allowance:
+//   SECONDS floor 60  - below this the uplink costs more in cellular overhead
+//                       than the readings are worth (Module C only produces
+//                       one reading per LORA_TX_PERIOD_MS anyway).
+//   READINGS ceiling  - never above NBIOT_RING_CAPACITY, or the count trigger
+//                       could never fire before the ring wraps and drops.
+#define MQTT_BATCH_SECONDS_MIN 60UL
+#define MQTT_BATCH_SECONDS_MAX 86400UL
+#define MQTT_BATCH_READINGS_MIN 1
+#define MQTT_BATCH_READINGS_MAX NBIOT_RING_CAPACITY
+
+// ---------- Downlink: Module A -> Module B (-> Module C) ----------
+// Two subscriptions, because ThingsBoard addresses the gateway itself and its
+// child devices on different topics:
+//   MQTT_TOPIC_DEVICE_RPC_SUB  - RPC aimed at THIS device (the CON-1 gateway),
+//                                i.e. Module B's own settings. Response goes to
+//                                MQTT_TOPIC_DEVICE_RPC_RESP + the request id.
+//   MQTT_TOPIC_GATEWAY_RPC     - RPC aimed at a child device (NodoC-1 etc).
+//                                Module B translates it into the LoRa
+//                                "CFG,<key>=<value>" grammar Module C already
+//                                speaks, queues it, and sends it during that
+//                                node's next post-TX listen window. The reply
+//                                is published back on this same topic.
+#define MQTT_TOPIC_DEVICE_RPC_SUB "v1/devices/me/rpc/request/+"
+#define MQTT_TOPIC_DEVICE_RPC_RESP "v1/devices/me/rpc/response/"
+#define MQTT_TOPIC_GATEWAY_RPC "v1/gateway/rpc"
+#define MQTT_DOWNLINK_QOS 1
+
+// A node-directed command can only be delivered during the target node's
+// ~2s post-TX listen window, which comes round once per its send period
+// (5 min by default). Give up and answer the RPC with a timeout after this
+// long rather than holding a command queued forever against a dead node.
+#define DOWNLINK_QUEUE_TIMEOUT_MS 900000UL  // 15 min = 3 missed windows at 5 min
+
 // Per-reading timestamps: without a "ts" ThingsBoard stamps every reading in
 // a batch at receipt time, collapsing a 2-min batch to one instant. Module B
 // has no RTC, so it reads network time once per attach via AT+CCLK? (needs

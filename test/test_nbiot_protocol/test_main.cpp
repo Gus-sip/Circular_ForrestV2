@@ -118,6 +118,96 @@ void test_parseQirdHeader() {
   TEST_ASSERT_EQUAL(17, len);
 }
 
+// ---------- Inbound MQTT (downlink from Module A) ----------
+
+void test_parseQmtsub_success() {
+  int idx, msgId, result;
+  TEST_ASSERT_TRUE(parseQmtsub("+QMTSUB: 0,1,0,1", idx, msgId, result));
+  TEST_ASSERT_EQUAL(0, idx);
+  TEST_ASSERT_EQUAL(1, msgId);
+  TEST_ASSERT_EQUAL(0, result);
+}
+
+// The module does NOT escape the quotes inside the payload, so the line is
+// full of them - parseQmtrecv has to take the payload from the first quote
+// after the topic to the LAST quote on the line.
+void test_parseQmtrecv_gateway_rpc_no_length() {
+  MqttMessage m;
+  const char *line =
+      "+QMTRECV: 0,0,\"v1/gateway/rpc\",\"{\"device\":\"NodoC-1\",\"data\":{\"id\":42,"
+      "\"method\":\"cfg\",\"params\":{\"INTERVAL\":300}}}\"";
+  TEST_ASSERT_TRUE(parseQmtrecv(line, m));
+  TEST_ASSERT_EQUAL(0, m.clientIdx);
+  TEST_ASSERT_EQUAL_STRING("v1/gateway/rpc", m.topic);
+  TEST_ASSERT_EQUAL_STRING(
+      "{\"device\":\"NodoC-1\",\"data\":{\"id\":42,\"method\":\"cfg\",\"params\":{\"INTERVAL\":300}}}",
+      m.payload);
+}
+
+void test_parseQmtrecv_device_rpc_with_length() {
+  MqttMessage m;
+  const char *line =
+      "+QMTRECV: 0,1,\"v1/devices/me/rpc/request/7\",41,\"{\"method\":\"cfg\",\"params\":{\"UPLINK\":300}}\"";
+  TEST_ASSERT_TRUE(parseQmtrecv(line, m));
+  TEST_ASSERT_EQUAL(1, m.msgId);
+  TEST_ASSERT_EQUAL_STRING("v1/devices/me/rpc/request/7", m.topic);
+  TEST_ASSERT_EQUAL_STRING("{\"method\":\"cfg\",\"params\":{\"UPLINK\":300}}", m.payload);
+}
+
+void test_parseQmtrecv_rejects_other_urc() {
+  MqttMessage m;
+  TEST_ASSERT_FALSE(parseQmtrecv("+QMTSTAT: 0,7", m));
+}
+
+void test_json_string_int_object() {
+  const char *p =
+      "{\"device\":\"NodoC-1\",\"data\":{\"id\":42,\"method\":\"cfg\",\"params\":{\"INTERVAL\":300,\"BMV080\":0}}}";
+  char buf[64];
+  TEST_ASSERT_TRUE(jsonString(p, "device", buf, sizeof(buf)));
+  TEST_ASSERT_EQUAL_STRING("NodoC-1", buf);
+
+  char data[160];
+  TEST_ASSERT_TRUE(jsonObject(p, "data", data, sizeof(data)));
+  long id = 0;
+  TEST_ASSERT_TRUE(jsonInt(data, "id", id));
+  TEST_ASSERT_EQUAL(42, id);
+  TEST_ASSERT_TRUE(jsonString(data, "method", buf, sizeof(buf)));
+  TEST_ASSERT_EQUAL_STRING("cfg", buf);
+
+  char params[96];
+  TEST_ASSERT_TRUE(jsonObject(data, "params", params, sizeof(params)));
+  TEST_ASSERT_EQUAL_STRING("{\"INTERVAL\":300,\"BMV080\":0}", params);
+}
+
+void test_json_missing_key_is_false() {
+  char buf[32];
+  long v;
+  TEST_ASSERT_FALSE(jsonString("{\"a\":\"b\"}", "zzz", buf, sizeof(buf)));
+  TEST_ASSERT_FALSE(jsonInt("{\"a\":\"b\"}", "zzz", v));
+  TEST_ASSERT_FALSE(jsonObject("{\"a\":\"b\"}", "zzz", buf, sizeof(buf)));
+}
+
+void test_jsonNextPair_iterates_params() {
+  const char *params = "{\"INTERVAL\":300,\"BMV080\":0,\"NAME\":\"x1\"}";
+  const char *cur = params;
+  char k[24], v[24];
+
+  TEST_ASSERT_TRUE(jsonNextPair(cur, k, sizeof(k), v, sizeof(v)));
+  TEST_ASSERT_EQUAL_STRING("INTERVAL", k);
+  TEST_ASSERT_EQUAL_STRING("300", v);
+
+  TEST_ASSERT_TRUE(jsonNextPair(cur, k, sizeof(k), v, sizeof(v)));
+  TEST_ASSERT_EQUAL_STRING("BMV080", k);
+  TEST_ASSERT_EQUAL_STRING("0", v);
+
+  // a quoted value comes back with the quotes stripped
+  TEST_ASSERT_TRUE(jsonNextPair(cur, k, sizeof(k), v, sizeof(v)));
+  TEST_ASSERT_EQUAL_STRING("NAME", k);
+  TEST_ASSERT_EQUAL_STRING("x1", v);
+
+  TEST_ASSERT_FALSE(jsonNextPair(cur, k, sizeof(k), v, sizeof(v)));
+}
+
 // ---------- Downlink grammar ----------
 
 void test_parseDownlink_bare_ack() {
@@ -273,6 +363,14 @@ int main(int argc, char **argv) {
   RUN_TEST(test_parseQiurcRecv);
   RUN_TEST(test_parseQiurcRecv_rejects_other_urc);
   RUN_TEST(test_parseQirdHeader);
+
+  RUN_TEST(test_parseQmtsub_success);
+  RUN_TEST(test_parseQmtrecv_gateway_rpc_no_length);
+  RUN_TEST(test_parseQmtrecv_device_rpc_with_length);
+  RUN_TEST(test_parseQmtrecv_rejects_other_urc);
+  RUN_TEST(test_json_string_int_object);
+  RUN_TEST(test_json_missing_key_is_false);
+  RUN_TEST(test_jsonNextPair_iterates_params);
 
   RUN_TEST(test_parseDownlink_bare_ack);
   RUN_TEST(test_parseDownlink_with_cfg);
