@@ -35,12 +35,21 @@ SET_LOOP_TASK_STACK_SIZE(60 * 1024);
 //   CS low,  SDO high -> 0x55
 //   CS low,  SDO low  -> 0x54
 // One-line edit when the jumpers change.
+// The fabbed PCB straps CS high / SDO high -> 0x57 (I2C scan, 6/6 boots, 2026-09-04).
 #define BMV080_I2C_ADDR 0x57
 
 // Sensor runs HW init, laser preheat, and an optical self-test after power-up.
 // Not yet confirmed against the datasheet's exact spec (open question) - this is a
 // conservative starting point, not a magic number.
 #define BMV080_STARTUP_DELAY_MS 5000
+
+// PCB power-rail enables. Each drives a high-side transistor closing the circuit
+// into the 5V / 3V3 rail; LOW = rail on. Kept in sync with pins.h (this probe
+// deliberately declares its own pins rather than including the production map).
+// Without these the whole I2C bus is unpowered and the scan below finds nothing.
+#define PCB_EN_A_PIN 10
+#define PCB_EN_B_PIN 11
+#define PCB_EN_SETTLE_MS 300
 
 sfTkArdI2C bmvBus;
 bmv080_handle_t bmvHandle = nullptr;
@@ -137,6 +146,15 @@ void setup() {
 
   Serial.println();
   Serial.println("=== BMV080 raw-SDK isolation probe ===");
+
+  // Rails first - nothing on the bus is powered until these are asserted.
+  pinMode(PCB_EN_A_PIN, OUTPUT);
+  digitalWrite(PCB_EN_A_PIN, LOW);
+  pinMode(PCB_EN_B_PIN, OUTPUT);
+  digitalWrite(PCB_EN_B_PIN, LOW);
+  Serial.printf("PCB rails: GPIO%d + GPIO%d LOW, settling %dms\n", PCB_EN_A_PIN,
+                PCB_EN_B_PIN, PCB_EN_SETTLE_MS);
+  delay(PCB_EN_SETTLE_MS);
 
   Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
   scanI2C();

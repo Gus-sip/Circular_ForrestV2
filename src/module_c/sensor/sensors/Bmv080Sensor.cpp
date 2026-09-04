@@ -49,6 +49,24 @@ bool Bmv080Sensor::begin() {
   bmv080_set_parameter(_handle, "do_obstruction_detection", (void *)&doObstructionDetection);
 
   rc = bmv080_start_continuous_measurement(_handle);
+  _measuring = (rc == E_BMV080_OK);
+  return _measuring;
+}
+
+bool Bmv080Sensor::startMeasurement() {
+  if (_handle == nullptr) return false;
+  if (_measuring) return true;
+  bmv080_status_code_t rc = bmv080_start_continuous_measurement(_handle);
+  _measuring = (rc == E_BMV080_OK);
+  _dataReady = false;
+  return _measuring;
+}
+
+bool Bmv080Sensor::stopMeasurement() {
+  if (_handle == nullptr || !_measuring) return true;
+  bmv080_status_code_t rc = bmv080_stop_measurement(_handle);
+  _measuring = false;  // treat as off regardless - never leave the laser believed-on
+  _dataReady = false;
   return rc == E_BMV080_OK;
 }
 
@@ -78,7 +96,5 @@ Reading Bmv080Sensor::read() {
 }
 
 void Bmv080Sensor::sleep() {
-  if (_handle != nullptr) {
-    bmv080_stop_measurement(_handle);
-  }
+  stopMeasurement();
 }

@@ -26,3 +26,35 @@
 
 // Spare pin, unused for now (reserved for a future CM1106 RDY line).
 #define PIN_SPARE 12
+
+// ---------- Module C PCB enable lines (GPIO10/11) ----------
+// The real PCB (as opposed to the bench harness this file originally described)
+// gates BOTH sensor supply rails behind these: each drives a high-side switching
+// transistor that closes the circuit into the 5V rail and the 3V3 rail
+// respectively (confirmed 2026-09-04). LOW = transistor on = rail up, the same
+// convention as Module B's LORA_EN_PIN. They were unused by every other pin
+// above, so nothing on this board contends for them.
+//
+// These MUST be asserted at the very top of setup(), before Wire.begin() and
+// every sensor begin(): with them deasserted the sensors have no power at all,
+// so an I2C scan or a UART probe would find nothing and look like dead hardware.
+// The Calypso wind sensor and the CM1106 both need the 5V rail specifically.
+//
+// Which of the two is 5V and which is 3V3 isn't pinned down yet - rename A/B to
+// PIN_PCB_EN_5V / PIN_PCB_EN_3V3 once that's confirmed against the schematic.
+#define PIN_PCB_EN_A 10
+#define PIN_PCB_EN_B 11
+#define PIN_PCB_EN_ACTIVE LOW
+#define PIN_PCB_EN_SETTLE_MS 300
+
+// ---------- RYLR998 LoRa power gate (GPIO13) ----------
+// Third rail gate, separate from the two above: a P-FET on the LoRa supply,
+// LOW = on. Same pin and same convention as Module B's LORA_EN_PIN (Q4 gate,
+// found by pin-scan 2026-08-19) - this PCB reuses that design. Module C's
+// firmware never drove it, which is why the RYLR998 was silent to a bare AT at
+// every baud: the module simply had no power. Confirmed by the user 2026-09-04.
+// The radio's UART is RXD=GPIO5 (ESP TX) / TXD=GPIO4 (ESP RX) - nets are named
+// from the MCU's point of view, so that crossover is correct as written.
+#define PIN_LORA_EN 13
+#define PIN_LORA_EN_ACTIVE LOW
+#define PIN_LORA_EN_SETTLE_MS 200

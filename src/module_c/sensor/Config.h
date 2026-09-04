@@ -9,7 +9,11 @@
 // its address as a constructor argument rather than hardcoding it internally.
 #define BME690_I2C_ADDR 0x76   // SDO strap; alternate 0x77 tried automatically as fallback
 #define SEN0466_I2C_ADDR 0x74
-#define BMV080_I2C_ADDR 0x57   // CS=high, SDO=high strap on the shuttle board's P4 header
+#define BMV080_I2C_ADDR 0x57   // CS=high, SDO=high. Confirmed on the fabbed PCB by I2C scan
+                               // 2026-09-04: 6/6 boots ACK at 0x57, alongside 0x74 (SEN0466)
+                               // and 0x77 (BME690). One earlier scan - the first after the
+                               // rails had been off - showed 0x56 instead; treat a 0x56 sighting
+                               // as the sensor caught mid-power-up, not as a strap change.
 
 // Warm-up / startup timing. Values marked UNCONFIRMED are not sourced from a
 // datasheet page - they're conservative placeholders that worked empirically during

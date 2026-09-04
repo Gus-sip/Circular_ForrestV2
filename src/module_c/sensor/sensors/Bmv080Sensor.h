@@ -32,11 +32,22 @@ public:
   void sleep() override;
   const char *name() const override { return "BMV080"; }
 
+  // Duty-cycling. This part draws ~68mA with the laser running - by an order of
+  // magnitude the largest load in the system, and notes/power_budget.md budgets it
+  // for 20s every 30 min, not continuous operation. begin() leaves it measuring so
+  // presence is proven; the caller is expected to stopMeasurement() straight after
+  // and only start it again around an actual sample. Start/stop reuse the open
+  // handle, so neither pays the open/reset/self-test cost again.
+  bool startMeasurement();
+  bool stopMeasurement();
+  bool isMeasuring() const { return _measuring; }
+
 private:
   uint8_t _addr;
   TwoWire &_wire;
   sfTkArdI2C _bus;
   bmv080_handle_t _handle = nullptr;
+  bool _measuring = false;
 
   volatile bool _dataReady = false;
   bmv080_output_t _lastOutput{};

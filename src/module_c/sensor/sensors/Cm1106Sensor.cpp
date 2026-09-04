@@ -25,6 +25,13 @@ Reading Cm1106Sensor::read() {
     if (_serial.available()) resp[len++] = _serial.read();
   }
 
+  // Record the wire bytes before any verdict is reached, so a caller can tell a
+  // frozen-but-fresh frame from a recycled value regardless of how this read ends.
+  memcpy(_prevRaw, _lastRaw, sizeof(_prevRaw));
+  _prevRawLen = _lastRawLen;
+  memcpy(_lastRaw, resp, sizeof(_lastRaw));
+  _lastRawLen = len;
+
   if (len < 8) {
     r.status = ReadingStatus::Timeout;
     return r;
@@ -43,11 +50,36 @@ Reading Cm1106Sensor::read() {
   }
 
   r.status = ReadingStatus::Ok;
-  r.values[0] = resp[3] * 256 + resp[4];
+  const uint16_t value = (uint16_t)resp[3] * 256 + resp[4];
+
+  // Track staleness of the MEASUREMENT, not of the frame - see frozenValueRun().
+  if (_haveValue && value == _lastValue) {
+    if (_frozenRun < 0xFFFF) _frozenRun++;
+  } else {
+    _frozenRun = 0;
+  }
+  _lastValue = value;
+  _haveValue = true;
+
+  r.values[0] = value;
   r.count = 1;
   return r;
 }
 
 void Cm1106Sensor::sleep() {
   if (_enPin != kNoEnPin) digitalWrite(_enPin, LOW);
+}
+
+void Cm1106Sensor::powerCycle(uint32_t offMs) {
+  if (_enPin == kNoEnPin) return;
+  digitalWrite(_enPin, LOW);
+  delay(offMs);
+  digitalWrite(_enPin, HIGH);
+  if (_warmupMs > 0) delay(_warmupMs);
+  // Frames from before the cycle say nothing about the sensor after it.
+  _frozenRun = 0;
+  _lastRawLen = 0;
+  _prevRawLen = 0;
+  _haveValue = false;
+  while (_serial.available()) _serial.read();
 }

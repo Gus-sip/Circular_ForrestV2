@@ -1,4 +1,118 @@
-# CHIP FOREST — Session Status
+# CHIP FOREST - Session Status
+
+## 2026-09-04 - Fabbed Module C PCB bring-up: two hardware faults found, one open
+
+First session on the **real Module C PCB** (not the bench harness). New board:
+COM13, MAC `ac:27:6e:cb:8d:a8`, arrived with blank flash. The old COM5
+error-31 USB fault does not apply to this unit.
+
+### Two hardware faults found and fixed
+
+- **Floating ground.** The single biggest cause. With no shared reference the
+  RYLR998 was silent to a bare `AT` at every baud and in both crossover
+  orientations, and the BMV080 initialised only intermittently. It also made
+  every meter reading misleading: continuity passed (probing within a net) and
+  voltages looked fine (measured against the same floating reference). A GPIO
+  line-probe reported BOTH UART pins as "driven high", which is impossible for
+  a pin wired to a module input - that impossibility was the tell, but it was
+  misread as external pull-ups at the time. Connecting a real ground fixed the
+  radio and the BMV080 together.
+- **Unpowered LoRa rail gate.** `GPIO13` is a P-FET gate on the RYLR998 supply,
+  LOW = on - the same pin and convention as Module B's `LORA_EN_PIN` (Q4 gate,
+  pin-scan 2026-08-19). Module C's firmware never drove it. Now `PIN_LORA_EN`
+  in `pins.h`, asserted at the top of setup().
+
+Also confirmed: `GPIO10`/`GPIO11` are high-side transistor gates for the 5V and
+3V3 sensor rails (LOW = on). They must be asserted before `Wire.begin()` and any
+sensor `begin()`, or every sensor reads as dead hardware.
+
+### Sensor state
+
+| Sensor | State |
+|---|---|
+| BME690 | Working - T/H/P/gas all live |
+| SEN0466 CO | Working |
+| BMV080 PM | Working, now duty-cycled (laser on ~3.6s per sample, not continuous) |
+| CM1106 CO2 | **Device alive, measurement field frozen** - see below |
+| RYLR998 | Initialises and accepts config; **has never completed a transmit** |
+| Calypso wind | Not connected - untested |
+
+**CM1106 diagnosis (from raw wire bytes, not the parsed ppm):** the frames are
+NOT byte-identical - `resp[6]` is a counter that increments every read with the
+checksum tracking it, while `resp[3..4]` (the CO2 value) stays pegged for a whole
+boot and changes only across power cycles. So the device is not hung and the
+driver is not serving cache; only the measurement is dead. A freeze detector
+therefore MUST compare the value bytes - whole-frame equality can never fire
+against an incrementing counter. `Cm1106Sensor::frozenValueRun()` does this, and
+past `CM1106_FREEZE_LIMIT` the firmware power-cycles EN (GPIO3).
+
+### Open: the board browns out during LoRa transmit
+
+Pinpointed to inside `radio.send()`:
+
+```
+[tx] payload 73 bytes, calling radio.send ...
+ESP-ROM:esp32s3-20210327        <- never reaches "radio.send returned"
+```
+
+A boot counter in `RTC_NOINIT_ATTR` re-initialises on every one of these, so the
+**RTC power domain is being lost** - a genuine power collapse, not a soft reset
+and not a firmware panic (a panic keeps the RTC domain and prints a backtrace).
+Note `RTC_DATA_ATTR` is useless for this test: `.rtc.data` is reloaded from the
+image on every reset, so a counter there reads 1 forever.
+
+Dropping TX power 22 -> 14 dBm (`AT+CRFOP`, accepted by the module) changed
+nothing, so the supply is not marginally short - it collapses on any transmit.
+
+**Leading suspect: the VDD bypass wire.** The RYLR998's VDD was bridged straight
+to 3V3 to rule out the GPIO13 gate, back when the real fault was the floating
+ground. That leaves a ~120mA pulsed load hanging directly on the ESP32's own 3V3
+node, bypassing the PCB's gating and local decoupling. **Next step: remove the
+bypass and let the radio run on its designed GPIO13-gated rail.** If it still
+browns out, it is bulk capacitance at the module's VDD - as
+`rylr998_bridge.cpp`'s header has warned from the start ("add capacitance, don't
+add retry/backoff to paper over it").
+
+### Firmware changes this session
+
+- **Transmit is now readiness-gated, not timer-driven.** A packet goes out when
+  every *expected* sensor has a fresh reading since the last TX. "Expected"
+  means enabled AND present - a sensor that failed to init is never waited on,
+  or the gate would never open, and the Calypso joins only once it has ever
+  produced a reading. Guarded by `LORA_TX_MIN_GAP_MS` (15s floor - sampling runs
+  every 2s, so without it the radio would transmit almost continuously) and by a
+  deadline (`CFG,INTERVAL`, default 5 min) that sends anyway and names the stale
+  sensors. Confirmed working: `[tx] all sensors fresh after 18s - sending`.
+- **BMV080 duty-cycled.** It draws ~68mA - the largest load in the system by an
+  order of magnitude, and `power_budget.md` allows it 20s per 30 min. The
+  firmware had it running continuously (~90x its allowance). Now started only
+  around a sample and stopped as soon as a frame lands.
+- Payload length clamp in `transmitSnapshot()` - `snprintf`'s return was passed
+  to `send()` even when truncated, which would read past the 96-byte buffer.
+- New `env:rylr998-bench` + `rylr998_bench_probe.cpp`: interrogates an RYLR998
+  on a breadboard, and **self-checks its own pads before judging the module**
+  (a verdict from an unverified rig is worthless). This is what proved the
+  module healthy while the PCB was at fault.
+- `RYLR998::setTxPower()` added to the shared driver - deliberately not folded
+  into `begin()`, since Module B shares the file and has no reason to lose range.
+
+### Still diagnostic, not fixes
+
+- **Init order is swapped** (CM1106 before BMV080) in `chip_forest_lora_tx.cpp`,
+  labelled as a probe. It was the test for cumulative-load-vs-inrush; with the
+  BMV080 now duty-cycled it should be safe to revert, but that has not been
+  retested.
+- `[step]` markers and the reset-reason print in setup(), and the `[cm1106 raw]`
+  per-cycle dump. Noisy in normal operation; kept because they are what
+  localised each fault.
+
+### Known-bad measurement techniques (recorded so they are not repeated)
+
+- A serial capture loop must catch `TimeoutException` *inside* its read loop. An
+  earlier version let it escape, reopening the port constantly, and reported
+  "127 USB re-enumerations" that were entirely self-inflicted.
+- `RTC_DATA_ATTR` does not survive a chip reset. Use `RTC_NOINIT_ATTR` with a
+  magic word.
 
 ## 2026-08-28 — Fast cadence live, Calypso wind sensor confirmed dead on the wire
 

@@ -56,6 +56,14 @@ public:
   // back to the sensor node.
   bool send(uint16_t destAddr, const char *data, uint8_t len);
 
+  // Blocking: AT+CRFOP=<dbm>, 0..22. The module defaults to 22 dBm, whose TX
+  // burst pulls ~120mA - enough to brown out a supply that cannot source a step
+  // load, which is exactly what Module C's PCB does (it reset on every transmit).
+  // Lower power trades range for a smaller burst. Deliberately NOT folded into
+  // begin(): this file is shared with Module B, which is mains-adjacent and has
+  // no reason to give up range.
+  bool setTxPower(uint8_t dbm, Print *debug = nullptr);
+
   // Non-blocking: drains whatever's already buffered, returns true (with
   // outMsg populated) the moment a complete, well-formed +RCV= line is found.
   // Anything else seen along the way (bare +OK echoes, garbage) is dropped.

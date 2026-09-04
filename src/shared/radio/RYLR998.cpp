@@ -3,6 +3,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+bool RYLR998::setTxPower(uint8_t dbm, Print *debug) {
+  if (dbm > 22) dbm = 22;
+  char cmd[24];
+  snprintf(cmd, sizeof(cmd), "AT+CRFOP=%u", dbm);
+  return sendATCommand(cmd, debug);
+}
+
 bool RYLR998::begin(uint16_t addr, uint16_t networkId, uint32_t bandHz, const RYLR998Params &params,
                      Print *debug) {
   _serial.begin(_baud, SERIAL_8N1, _rxPin, _txPin);

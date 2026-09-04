@@ -89,6 +89,7 @@
 #include "../sensor/sensors/CalypsoSensor.h"
 #include "../sensor/sensors/Bmv080Sensor.h"
 #include "radio/RYLR998.h"
+#include <esp_system.h>
 
 // ---------- RYLR998 wiring - GPIO4/5 are unused by pins.h's sensor map ----------
 #define LORA_RX_PIN 4  // module TXD -> ESP RX
@@ -107,6 +108,14 @@
 #define LORA_PARAM_BW 7
 #define LORA_PARAM_CR 1
 #define LORA_PARAM_PREAMBLE 12
+// Transmit power, dBm (AT+CRFOP, 0..22). The module's 22 dBm default draws
+// ~120mA in the TX burst, and this PCB's supply cannot source that step - the
+// board reset on every single transmit, 3 for 3, immediately after "[tx] sending".
+// 14 dBm cuts the burst substantially while staying a normal LoRa link budget.
+// This is a mitigation, not a cure: the real fix is bulk capacitance on the rail
+// (see the note in rylr998_bridge.cpp). Raise it once the supply can take it.
+#define LORA_TX_POWER_DBM 14
+
 #define LORA_MY_ADDR 1  // this node's AT+ADDRESS
 #define LORA_RX_ADDR 2  // pp1-lora-receiver's AT+ADDRESS
 
@@ -114,10 +123,43 @@
 // (SAMPLE_GAP_MS); this is only how often the cached snapshot is transmitted.
 // Runtime-tunable via CFG,INTERVAL=<seconds>. At this cadence the EU868 duty
 // cycle is a non-issue (see file header); the MIN floor is just a sanity guard.
-#define LORA_TX_PERIOD_MS 300000UL      // 5 min
+#define LORA_TX_PERIOD_MS 300000UL      // 5 min - now the FALLBACK deadline, not the cadence
 #define LORA_TX_PERIOD_MIN_MS 15000UL   // sanity floor - CFG,INTERVAL can't go below this
 #define LORA_TX_PERIOD_MAX_MS 86400000UL  // 24h ceiling - guards a fat-fingered CFG
-#define FIRST_TX_DELAY_MS 30000UL       // first packet this soon after boot, then every LORA_TX_PERIOD_MS
+#define FIRST_TX_DELAY_MS 30000UL       // retained for reference; the readiness gate supersedes it
+
+// ---------- Readiness-gated transmit ----------
+// A packet goes out when every ENABLED and PRESENT sensor has produced at least
+// one fresh reading since the previous packet - so Module B receives a genuinely
+// coherent snapshot rather than a mix of new values and stale cache. Two guards
+// bound that, and both are load-bearing:
+//
+//   MIN_GAP  - sampling runs every SAMPLE_GAP_MS, so "all fresh" can be satisfied
+//              within seconds. Without a floor the radio would transmit almost
+//              continuously, blowing both the EU868 duty cycle and the power
+//              budget. Nothing is ever sent sooner than this after the last TX.
+//   MAX_WAIT - a sensor that never returns (disconnected Calypso, a sensor that
+//              fails mid-deployment) must not silence the node forever. On this
+//              deadline we transmit whatever we have and name the missing sensors
+//              in the log, so a stalled sensor degrades the data instead of
+//              stopping it. This is what g_txPeriodMs / CFG,INTERVAL now sets.
+#define LORA_TX_MIN_GAP_MS 15000UL      // never transmit more often than this
+
+// ---------- BMV080 duty cycling ----------
+// The laser draws ~68mA - the largest load in the system by an order of magnitude,
+// and notes/power_budget.md budgets it at 20s per 30 min, not continuously. This
+// firmware ran it continuously (roughly 90x its energy allowance), and the board
+// reset on every boot where it was measuring. It is now started only around an
+// actual sample and stopped the moment a frame lands.
+#define BMV080_MEASURE_TIMEOUT_MS 30000UL  // give up waiting for a frame after this
+#define BMV080_SETTLE_MS 2000UL            // laser preheat before frames are meaningful
+
+// ---------- CM1106 freeze recovery ----------
+// This unit keeps answering with valid frames whose counter byte increments while
+// the CO2 value stays pegged (see Cm1106Sensor::frozenValueRun). It has only ever
+// recovered from a full power cycle, so past this many consecutive identical
+// values, cycle EN rather than keep publishing a dead number.
+#define CM1106_FREEZE_LIMIT 20
 
 #define SAMPLE_GAP_MS 2000UL   // re-read every sensor into its cache this often
 #define READ_LOG_GAP_MS 10000UL  // throttle the [read] diagnostic line to at most this rate
@@ -139,6 +181,26 @@ Cm1106Sensor cm1106(Serial2, PIN_CM1106_RX, PIN_CM1106_TX, PIN_CM1106_EN, CM1106
 CalypsoSensor calypso(Serial1, PIN_CALYPSO_RX, PIN_CALYPSO_TX, CALYPSO_BAUD);
 RYLR998 radio(Serial0, LORA_RX_PIN, LORA_TX_PIN);  // UART0 is free - UART1/UART2 taken above
 
+// Survives resets and is cleared only by true power loss. A count > 1 after
+// leaving the board completely alone proves it resets on its own, rather than
+// being reset by a host touching DTR/RTS over USB - a distinction this project
+// could not measure before, and one that decides whether the resets are a power
+// fault or a tooling artefact.
+// RTC_NOINIT_ATTR, deliberately NOT RTC_DATA_ATTR: the latter lives in
+// .rtc.data, which is reloaded from the flash image on every reset, so a counter
+// there reads 1 forever and proves nothing. NOINIT survives any reset that keeps
+// the RTC domain powered, and is only lost on genuine power loss - which is
+// exactly the distinction being measured. It starts as garbage at true power-on,
+// hence the magic word.
+#define BOOTCOUNT_MAGIC 0xC0FFEE01UL
+RTC_NOINIT_ATTR uint32_t g_bootMagic;
+RTC_NOINIT_ATTR uint32_t g_bootCount;
+
+// BMV080 duty-cycle state - see BMV080_MEASURE_TIMEOUT_MS.
+enum class BmvPhase { Idle, Measuring };
+BmvPhase g_bmvPhase = BmvPhase::Idle;
+uint32_t g_bmvPhaseStartedMs = 0;
+
 bool bmeReady = false;
 bool sen0466Ready = false;
 bool bmvReady = false;
@@ -153,6 +215,14 @@ float g_co2 = 0;
 float g_co = 0, g_coTemp = 0;
 float g_windAngle = 0, g_windSpeed = 0;
 bool g_windValid = false;
+
+// Set when a sensor returns a good reading; cleared for all sensors immediately
+// after each transmit. These - not a timer - decide when the next packet goes out.
+bool g_bmeFresh = false;
+bool g_bmvFresh = false;
+bool g_co2Fresh = false;
+bool g_coFresh = false;
+bool g_calFresh = false;
 
 // Status of each sensor's most recent read attempt - for the [read] diag line.
 ReadingStatus g_bmeSt = ReadingStatus::NotInitialized;
@@ -294,6 +364,16 @@ static void handleInboundMessage(const LoRaMessage &msg) {
   Serial.printf("[cfg] applied, ACK sent: %s (%s)\n", ack, sent ? "ok" : "FAILED");
 }
 
+// Bring-up instrumentation. Each begin() below is a candidate for the reset seen
+// on 2026-09-04 (board reboots right after "BMV080: OK"), so every step is
+// announced BEFORE it runs and flushed - USB CDC buffers, and anything still
+// queued is lost when the chip drops, which is exactly the case we're chasing.
+static void step(const char *what) {
+  Serial.printf("[step] %s ...\n", what);
+  Serial.flush();
+  delay(20);
+}
+
 void setup() {
   Serial.begin(115200);
   uint32_t waitStart = millis();
@@ -302,6 +382,37 @@ void setup() {
 
   Serial.println();
   Serial.println("=== CHIP FOREST + LoRa TX: sensors -> RYLR998 -> ground station ===");
+  esp_reset_reason_t rr = esp_reset_reason();
+  const char *rrName = rr == ESP_RST_POWERON    ? "POWERON"
+                       : rr == ESP_RST_EXT      ? "EXT"
+                       : rr == ESP_RST_SW       ? "SW"
+                       : rr == ESP_RST_PANIC    ? "PANIC (crash)"
+                       : rr == ESP_RST_INT_WDT  ? "INT_WDT"
+                       : rr == ESP_RST_TASK_WDT ? "TASK_WDT"
+                       : rr == ESP_RST_WDT      ? "WDT"
+                       : rr == ESP_RST_BROWNOUT ? "BROWNOUT (rail collapsed)"
+                       : rr == ESP_RST_DEEPSLEEP ? "DEEPSLEEP"
+                                                 : "OTHER";
+  if (g_bootMagic != BOOTCOUNT_MAGIC) {
+    g_bootMagic = BOOTCOUNT_MAGIC;
+    g_bootCount = 0;
+    Serial.println("Boot counter initialised (true power-on, or RTC domain lost)");
+  }
+  g_bootCount++;
+  Serial.printf("Boot #%lu since last power loss\n", (unsigned long)g_bootCount);
+  Serial.printf("Last reset reason: %d = %s\n", (int)rr, rrName);
+  Serial.flush();
+
+  // PCB enable lines first - before Wire.begin() and every sensor begin().
+  // If these gate sensor power rails, nothing downstream can be probed until
+  // they're asserted. See pins.h.
+  pinMode(PIN_PCB_EN_A, OUTPUT);
+  digitalWrite(PIN_PCB_EN_A, PIN_PCB_EN_ACTIVE);
+  pinMode(PIN_PCB_EN_B, OUTPUT);
+  digitalWrite(PIN_PCB_EN_B, PIN_PCB_EN_ACTIVE);
+  Serial.printf("PCB enable: GPIO%d + GPIO%d driven %s, settling %dms\n", PIN_PCB_EN_A, PIN_PCB_EN_B,
+                PIN_PCB_EN_ACTIVE == LOW ? "LOW" : "HIGH", PIN_PCB_EN_SETTLE_MS);
+  delay(PIN_PCB_EN_SETTLE_MS);
 
   power.enable3V3Sensors();
   Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
@@ -309,21 +420,47 @@ void setup() {
   Serial.printf("Waiting %dms for BMV080 startup...\n", BMV080_STARTUP_DELAY_MS);
   delay(BMV080_STARTUP_DELAY_MS);
 
+  step("bme690.begin");
   bmeReady = bme690.begin();
   Serial.println(bmeReady ? "BME690: OK" : "BME690: NOT FOUND");
 
+  step("sen0466.begin");
   sen0466Ready = sen0466.begin();
   Serial.println(sen0466Ready ? "SEN0466: OK" : "SEN0466: NOT FOUND");
 
+  // ---- INIT ORDER SWAPPED (diagnostic, 2026-09-04) ----
+  // Original order was bmv080 then cm1106, and the board reset at cm1106.begin()
+  // on every boot where the BMV080 came up - never when it didn't. Swapping tells
+  // us which kind of fault that is:
+  //   reset moves to bmv080.begin()  -> cumulative load, both together exceed the supply
+  //   reset disappears entirely      -> an inrush/settling timing bug in the sequencing
+  // Revert this once the answer is in; it is a probe, not a fix.
+  step("cm1106.begin (SWAPPED: now before bmv080)");
+  cm1106.begin();
+  step("cm1106.begin returned");
+
+  step("bmv080.begin (SWAPPED: now after cm1106)");
   bmvReady = bmv080.begin();
   Serial.println(bmvReady ? "BMV080: OK" : "BMV080: NOT FOUND");
+  // begin() leaves it measuring in order to prove presence; park it straight away
+  // so the laser stays off until a sample is actually wanted.
+  if (bmvReady) {
+    bmv080.stopMeasurement();
+    g_bmvPhase = BmvPhase::Idle;
+  }
 
-  cm1106.begin();
+  step("calypso.begin next");
   calypso.begin();
+  step("calypso.begin returned - radio next");
 
   Serial.println("Configuring RYLR998 (link parameters must match pp1-lora-receiver):");
   radioReady = radio.begin(LORA_MY_ADDR, LORA_NETWORK_ID, LORA_BAND_HZ,
                             {LORA_PARAM_SF, LORA_PARAM_BW, LORA_PARAM_CR, LORA_PARAM_PREAMBLE}, &Serial);
+  if (radioReady) {
+    bool powerSet = radio.setTxPower(LORA_TX_POWER_DBM, &Serial);
+    Serial.printf("LoRa TX power -> %d dBm: %s\n", LORA_TX_POWER_DBM,
+                  powerSet ? "OK" : "REJECTED (still at module default, likely 22)");
+  }
   Serial.println(radioReady ? "Radio init OK"
                              : "Radio init FAILED - not transmitting until this is fixed "
                                "(see the AT exchange above for which step was rejected)");
@@ -333,6 +470,40 @@ void setup() {
 
 // One pass over every enabled sensor, updating its cached g_* value on a
 // successful read and its g_*St status either way. Called every SAMPLE_GAP_MS.
+// A sensor is "expected" only if it is enabled AND actually present. A sensor
+// that failed to initialise (bmvReady == false) or is switched off by downlink
+// must never be waited on, or the readiness gate below would never open and the
+// node would go permanently silent. The Calypso has no ready-flag of its own, so
+// it counts as expected only once it has EVER produced a reading - an unplugged
+// wind sensor must not hold up every other sensor's data.
+static bool calypsoEverSeen = false;
+
+static uint8_t pendingSensors(char *out, size_t outCap) {
+  uint8_t pending = 0;
+  if (out && outCap) out[0] = 0;
+  struct { bool expected; bool fresh; const char *name; } checks[] = {
+      {bmeReady && g_bmeEnabled, g_bmeFresh, "BME690"},
+      {bmvReady && g_bmvEnabled, g_bmvFresh, "BMV080"},
+      {sen0466Ready && g_sen0466Enabled, g_coFresh, "SEN0466"},
+      {g_cm1106Enabled, g_co2Fresh, "CM1106"},
+      {g_calypsoEnabled && calypsoEverSeen, g_calFresh, "Calypso"},
+  };
+  for (size_t i = 0; i < sizeof(checks) / sizeof(checks[0]); i++) {
+    if (checks[i].expected && !checks[i].fresh) {
+      pending++;
+      if (out && outCap) {
+        if (out[0]) strncat(out, ",", outCap - strlen(out) - 1);
+        strncat(out, checks[i].name, outCap - strlen(out) - 1);
+      }
+    }
+  }
+  return pending;
+}
+
+static void clearFreshFlags() {
+  g_bmeFresh = g_bmvFresh = g_co2Fresh = g_coFresh = g_calFresh = false;
+}
+
 static void sampleSensors() {
   if (g_calypsoEnabled) {
     // Calypso streams NMEA - drop the stale buffer, then poll briefly for a
@@ -347,19 +518,50 @@ static void sampleSensors() {
     } while (millis() - t0 < CALYPSO_READ_WINDOW_MS);
     g_calSt = wind.status;
     if (wind.ok()) {
+      g_calFresh = true;
+      calypsoEverSeen = true;  // only now does it join the readiness gate
       g_windAngle = wind.values[0];
       g_windSpeed = wind.values[1];
       g_windValid = wind.values[2] > 0.5f;
     }
   }
 
+  // BMV080: laser on only around an actual sample, never continuously. Idle ->
+  // Measuring when a fresh PM value is wanted, back to Idle as soon as a frame
+  // lands or the timeout expires. Non-blocking - one read() attempt per loop pass,
+  // so every other sensor keeps being sampled while this one warms up.
   if (bmvReady && g_bmvEnabled) {
-    Reading pm = bmv080.read();
-    g_bmvSt = pm.status;
-    if (pm.ok()) {
-      g_pm1 = pm.values[0];
-      g_pm25 = pm.values[1];
-      g_pm10 = pm.values[2];
+    if (g_bmvPhase == BmvPhase::Idle) {
+      if (!g_bmvFresh) {
+        if (bmv080.startMeasurement()) {
+          g_bmvPhase = BmvPhase::Measuring;
+          g_bmvPhaseStartedMs = millis();
+        } else {
+          g_bmvSt = ReadingStatus::NoAck;
+        }
+      }
+    } else {
+      uint32_t elapsed = millis() - g_bmvPhaseStartedMs;
+      if (elapsed >= BMV080_SETTLE_MS) {
+        Reading pm = bmv080.read();
+        g_bmvSt = pm.status;
+        if (pm.ok()) {
+          g_bmvFresh = true;
+          g_pm1 = pm.values[0];
+          g_pm25 = pm.values[1];
+          g_pm10 = pm.values[2];
+          bmv080.stopMeasurement();
+          g_bmvPhase = BmvPhase::Idle;
+          Serial.printf("[bmv080] frame after %lums, laser off (pm2.5=%.1f)\n",
+                        (unsigned long)elapsed, g_pm25);
+        }
+      }
+      if (g_bmvPhase == BmvPhase::Measuring && elapsed >= BMV080_MEASURE_TIMEOUT_MS) {
+        bmv080.stopMeasurement();
+        g_bmvPhase = BmvPhase::Idle;
+        Serial.printf("[bmv080] no frame in %lums - laser off, will retry\n",
+                      (unsigned long)elapsed);
+      }
     }
   }
 
@@ -367,6 +569,7 @@ static void sampleSensors() {
     Reading env = bme690.read();
     g_bmeSt = env.status;
     if (env.ok()) {
+      g_bmeFresh = true;
       g_temp = env.values[0];
       g_hum = env.values[1];
       g_pres = env.values[2];
@@ -378,6 +581,7 @@ static void sampleSensors() {
     Reading co = sen0466.read();
     g_coSt = co.status;
     if (co.ok()) {
+      g_coFresh = true;
       g_co = co.values[0];
       g_coTemp = co.values[1];
     }
@@ -386,7 +590,33 @@ static void sampleSensors() {
   if (g_cm1106Enabled) {
     Reading co2 = cm1106.read();
     g_co2St = co2.status;
-    if (co2.ok()) g_co2 = co2.values[0];
+    if (co2.ok()) {
+      g_co2Fresh = true;
+      g_co2 = co2.values[0];
+    }
+
+    // Dump the wire bytes, not the parsed ppm. A ppm that never moves is
+    // ambiguous; byte-identical frames are not. identicalRun counts consecutive
+    // identical responses - a nonzero run means the sensor is repeating itself.
+    Serial.print("[cm1106 raw] ");
+    if (cm1106.lastRawLen() == 0) {
+      Serial.print("(nothing received)");
+    } else {
+      for (uint8_t i = 0; i < cm1106.lastRawLen(); i++) Serial.printf("%02X ", cm1106.lastRaw()[i]);
+    }
+    Serial.printf("| status=%s frozenValueRun=%u\n", statusName(co2.status),
+                  (unsigned)cm1106.frozenValueRun());
+
+    // Pegged measurement behind a healthy link - only a power cycle has ever
+    // cleared it. Drop the fresh flag too: a frozen number must not be published
+    // as though it were a live reading.
+    if (cm1106.frozenValueRun() >= CM1106_FREEZE_LIMIT) {
+      Serial.printf("[cm1106] value frozen for %u reads - power-cycling via EN\n",
+                    (unsigned)cm1106.frozenValueRun());
+      cm1106.powerCycle();
+      g_co2St = ReadingStatus::NotReady;
+      g_co2Fresh = false;
+    }
   }
 }
 
@@ -404,10 +634,27 @@ static void transmitSnapshot() {
     return;
   }
 
+  // snprintf returns the length it WOULD have written; passing that straight to
+  // send() after truncation would walk off the end of payload[]. Clamp it.
+  if (len < 0) len = 0;
+  if (len >= (int)sizeof(payload)) len = (int)sizeof(payload) - 1;
+
+  Serial.printf("[tx] payload %d bytes, calling radio.send ...\n", len);
+  Serial.flush();
+  delay(20);
+
   bool sent = radio.send(LORA_RX_ADDR, payload, (uint8_t)len);
+
+  Serial.printf("[tx] radio.send returned %s\n", sent ? "true" : "false");
+  Serial.flush();
+  delay(20);
+
   Serial.printf("TX: %s  (%s)\n", payload, sent ? "sent" : "send FAILED");
+  Serial.flush();
 
   // Post-TX listen window: the only moment Module B can push a CFG downlink.
+  Serial.println("[tx] entering post-TX listen window");
+  Serial.flush();
   LoRaMessage msg;
   uint32_t t0 = millis();
   while (millis() - t0 < LORA_POST_TX_LISTEN_MS) {
@@ -416,6 +663,8 @@ static void transmitSnapshot() {
       break;  // one command per window
     }
   }
+  Serial.println("[tx] transmit complete");
+  Serial.flush();
 }
 
 void loop() {
@@ -432,15 +681,27 @@ void loop() {
                   g_temp, g_hum, g_gas, g_pm25);
   }
 
-  // Transmit the cached snapshot every g_txPeriodMs (first one FIRST_TX_DELAY_MS
-  // after boot so it doesn't wait a full period for the first packet).
+  // ---- Readiness-gated transmit ----
+  // Send once every expected sensor has a fresh reading, subject to the two
+  // guards described at LORA_TX_MIN_GAP_MS. The deadline path still sends, so a
+  // stalled sensor degrades the payload rather than silencing the node.
   static uint32_t lastTxMs = 0;
-  static bool firstTxDone = false;
-  uint32_t txDue = firstTxDone ? g_txPeriodMs : FIRST_TX_DELAY_MS;
-  if (now - lastTxMs >= txDue) {
+  char pendingNames[64];
+  uint8_t pending = pendingSensors(pendingNames, sizeof(pendingNames));
+  bool minGapMet = (now - lastTxMs) >= LORA_TX_MIN_GAP_MS;
+  bool deadlinePassed = (now - lastTxMs) >= g_txPeriodMs;
+
+  if (minGapMet && (pending == 0 || deadlinePassed)) {
+    if (pending == 0) {
+      Serial.printf("[tx] all sensors fresh after %lus - sending\n",
+                    (unsigned long)((now - lastTxMs) / 1000));
+    } else {
+      Serial.printf("[tx] deadline %lus reached with %u sensor(s) still stale (%s) - sending anyway\n",
+                    (unsigned long)(g_txPeriodMs / 1000), (unsigned)pending, pendingNames);
+    }
     lastTxMs = now;
-    firstTxDone = true;
     transmitSnapshot();
+    clearFreshFlags();
   }
 
   // NOT sleep - see file header. Just paces the sample loop.
