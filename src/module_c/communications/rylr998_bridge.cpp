@@ -72,7 +72,7 @@ void setup() {
   pinMode(PCB_EN_A_PIN, OUTPUT);
   digitalWrite(PCB_EN_A_PIN, LOW);
   pinMode(PCB_EN_B_PIN, OUTPUT);
-  digitalWrite(PCB_EN_B_PIN, LOW);
+  digitalWrite(PCB_EN_B_PIN, HIGH);  // 5V gate is ACTIVE-HIGH - see pins.h
   Serial.printf("PCB rails: GPIO%d + GPIO%d LOW, settling %dms\n", PCB_EN_A_PIN,
                 PCB_EN_B_PIN, PCB_EN_SETTLE_MS);
   delay(PCB_EN_SETTLE_MS);

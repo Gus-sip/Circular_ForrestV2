@@ -90,6 +90,8 @@
 #include "../sensor/sensors/Bmv080Sensor.h"
 #include "radio/RYLR998.h"
 #include <esp_system.h>
+#include <esp_sleep.h>
+#include <driver/gpio.h>
 
 // ---------- RYLR998 wiring - GPIO4/5 are unused by pins.h's sensor map ----------
 #define LORA_RX_PIN 4  // module TXD -> ESP RX
@@ -154,6 +156,105 @@
 #define BMV080_MEASURE_TIMEOUT_MS 30000UL  // give up waiting for a frame after this
 #define BMV080_SETTLE_MS 2000UL            // laser preheat before frames are meaningful
 
+// ---------- Fire detection thresholds ----------
+// PLACEHOLDER VALUES - these are NOT from the project's alarma/prealarma
+// spreadsheet, which was never transcribed into this repo. They are deliberately
+// conservative starting points so the state machine can be exercised; replace
+// them with the real figures before this means anything in the field.
+//
+// The CM1106 is deliberately NOT a trigger: its CO2 field freezes within a boot
+// and only changes across power cycles (see Cm1106Sensor::frozenValueRun), so a
+// fire trigger hung on it would be worthless in both directions - blind to a real
+// fire and liable to latch on a stale number.
+#define ALARM_PM25_UGM3 50.0f        // smoke: BMV080 PM2.5
+#define ALARM_TEMP_C 50.0f           // BME690 temperature
+#define ALARM_GAS_DROP_FRAC 0.50f    // BME690 gas resistance falling this far below baseline
+#define ALARM_CO_PPM 50.0f           // SEN0466, only while it is in the cycle
+
+// Consecutive all-sensor reads below every threshold before pre-alarm auto-clears.
+// More than one, so a single dip does not end an alarm during a real fire.
+#define ALARM_CLEAR_CONSECUTIVE 5
+
+// ---------- Deep sleep ----------
+// The ESP keeps its own 3V3 rail and sleeps itself on a timer (~10-15uA),
+// retaining RTC memory; the power MCU is not involved in waking it. Each wake is
+// a complete cycle: rails on -> init -> sample until every expected sensor is
+// fresh -> transmit -> rails off -> sleep.
+//
+// SEN0466 is deliberately left OUT of the sleeping cycle for now. It needs a 210s
+// settle per notes/power_budget.md, which would dominate every wake; sleeping
+// through that window is a later change (it needs a multi-phase wake). Until then
+// including it would simply stall each cycle for three and a half minutes.
+#define SLEEP_ENABLED 1
+#define SLEEP_CYCLE_SECONDS 10UL        // one tick; work is scheduled in ticks, not seconds
+
+// ---------- Tick scheduling ----------
+// Every wake is one tick. Two counters advance on EVERY tick and each resets when
+// it reaches its own threshold, so the two schedules are independent:
+//
+//   sensor_read -> read the FAST sensors (BME690, CM1106, BMV080) and store the
+//                  reading. Default 3 ticks = 30s.
+//   lora_trans  -> transmit everything stored since the last transmit, then clear
+//                  the store. Default 3 ticks = 30s.
+//
+// Both thresholds are settable from Module A (CFG,SENSOR_READ / CFG,LORA_TRANS).
+// A tick where neither is due does no sensor or radio initialisation at all and
+// goes straight back to sleep - that is what makes a 10s tick affordable, since
+// the BMV080's startup alone would otherwise cost 5s of every 10s tick.
+#define SENSOR_READ_EVERY_DEFAULT 3
+#define LORA_TRANS_EVERY_DEFAULT 3
+#define COUNTER_EVERY_MIN 1
+#define COUNTER_EVERY_MAX 360           // 1 hour at a 10s tick
+
+// The RYLR998 accepts at most 240 bytes per packet. One reading in the compact
+// batch format runs ~56 bytes typically and up to ~70 in the worst case (every
+// field wide and negative), so three readings plus the "B,n," header is the most
+// that reliably fits. Rather than split a batch across packets, LORA_TRANS is
+// limited so a batch always fits in one - which is why the ratio, not LORA_TRANS
+// alone, is what gets validated:
+//
+//     readings per packet = ceil(LORA_TRANS / SENSOR_READ)
+//
+// So with SENSOR_READ=3, LORA_TRANS may go up to 9 (3 readings). Raising
+// SENSOR_READ raises the permitted LORA_TRANS in step.
+#define READINGS_PER_PACKET_MAX 3
+#define BATCH_READING_WORST_BYTES 70
+
+// One more than the packet maximum, purely as headroom so a mid-cycle change to
+// the counters cannot overrun the array before the next transmit drains it.
+#define READING_STORE_MAX (READINGS_PER_PACKET_MAX + 1)
+
+// Readings a given counter pair would accumulate between transmits.
+static uint16_t readingsPerPacket(uint16_t sensorReadEvery, uint16_t loraTransEvery) {
+  if (sensorReadEvery == 0) return 0xFFFF;
+  return (uint16_t)((loraTransEvery + sensorReadEvery - 1) / sensorReadEvery);
+}
+
+
+// Longest a single scheduled read may spend waiting for every fast sensor to go
+// fresh. Bounds the awake time of a reading tick; whatever is still stale is sent
+// as its last known value and named in the log.
+#define SENSOR_READ_WINDOW_MS 20000UL
+#define SLEEP_SKIP_SEN0466 1            // 210s settle: out of the cycle until we sleep through it
+
+// A power-cycled board must always give a window to reflash in. Deep sleep drops
+// the USB-Serial/JTAG, so without this the port would vanish seconds after boot
+// and reappear only briefly each cycle - the same class of problem that got light
+// sleep removed from this firmware once before. On a COLD boot (power-on or
+// reset, i.e. not a timer wake) the node refuses to sleep for this long.
+#define SLEEP_COLD_BOOT_AWAKE_MS 30000UL
+
+// Safety net: never stay awake indefinitely because one sensor never goes fresh
+// and the TX deadline is long. Bounds the worst-case energy of a single wake.
+#define SLEEP_MAX_AWAKE_MS 120000UL
+
+// Rail gates are held through deep sleep. Left un-held they go Hi-Z, and a
+// floating P-FET gate can drift back to conducting - leaving the sensor rails
+// powered for the whole sleep and wasting exactly what sleeping was meant to
+// save. These are all GPIO<=21, so they are RTC-capable and can be held.
+static const gpio_num_t kHeldGates[] = {(gpio_num_t)PIN_PCB_EN_A, (gpio_num_t)PIN_PCB_EN_B,
+                                        (gpio_num_t)PIN_LORA_EN};
+
 // ---------- CM1106 freeze recovery ----------
 // This unit keeps answering with valid frames whose counter byte increments while
 // the CO2 value stays pegged (see Cm1106Sensor::frozenValueRun). It has only ever
@@ -195,6 +296,46 @@ RYLR998 radio(Serial0, LORA_RX_PIN, LORA_TX_PIN);  // UART0 is free - UART1/UART
 #define BOOTCOUNT_MAGIC 0xC0FFEE01UL
 RTC_NOINIT_ATTR uint32_t g_bootMagic;
 RTC_NOINIT_ATTR uint32_t g_bootCount;
+
+// Survives deep sleep (and any reset that keeps the RTC domain). Lets each wake
+// report where it sits in the run, and carries the downlink-tuned send period
+// across sleeps - without this, CFG,INTERVAL would silently revert to the
+// compiled-in default on every single wake, which would look like the downlink
+// being ignored.
+RTC_NOINIT_ATTR uint32_t g_wakeCount;
+RTC_NOINIT_ATTR uint32_t g_txPeriodMsPersist;
+
+// Tick counters and their end-user thresholds. Counters advance every tick and
+// reset on reaching their threshold; thresholds arrive by downlink from Module A.
+RTC_NOINIT_ATTR uint16_t g_sensorReadCount;
+RTC_NOINIT_ATTR uint16_t g_loraTransCount;
+RTC_NOINIT_ATTR uint16_t g_sensorReadEvery;
+RTC_NOINIT_ATTR uint16_t g_loraTransEvery;
+
+// One stored reading. Kept in RTC memory so the batch survives deep sleep between
+// the tick that recorded it and the tick that finally transmits it.
+struct StoredReading {
+  float temp, hum, pres, gas;
+  float pm1, pm25, pm10;
+  float co2, co, coTemp;
+  float windAngle, windSpeed;
+  uint8_t windValid;
+  uint32_t tickAge;  // ticks before the transmit that this was taken - lets the
+                     // receiver reconstruct when, since the node has no clock
+};
+RTC_NOINIT_ATTR StoredReading g_store[READING_STORE_MAX];
+RTC_NOINIT_ATTR uint16_t g_storeCount;
+RTC_NOINIT_ATTR uint32_t g_storeDropped;  // readings lost to a full store
+
+// Pre-alarm. Continuous all-sensor operation until the readings settle or Module A
+// clears it. Held in RTC so an alarm survives the sleeps it will mostly prevent.
+enum AlarmState : uint8_t { ALARM_NORMAL = 0, ALARM_PREALARM = 1 };
+RTC_NOINIT_ATTR uint8_t g_alarmState;
+RTC_NOINIT_ATTR uint16_t g_alarmClearRun;   // consecutive clean reads while in pre-alarm
+RTC_NOINIT_ATTR float g_gasBaseline;        // BME690 gas resistance in clean air
+
+bool g_wokeFromTimer = false;   // this boot was a deep-sleep wake, not a cold boot
+uint32_t g_setupDoneMs = 0;
 
 // BMV080 duty-cycle state - see BMV080_MEASURE_TIMEOUT_MS.
 enum class BmvPhase { Idle, Measuring };
@@ -274,6 +415,7 @@ static bool applyConfigCommand(const char *payload, uint8_t len, char *ackPayloa
 
       if (strcmp(key, "INTERVAL") == 0) {
         long seconds = atol(valueStr);
+        // Also persisted to RTC at sleep, so a downlink-set period survives.
         const long minSeconds = LORA_TX_PERIOD_MIN_MS / 1000;
         const long maxSeconds = LORA_TX_PERIOD_MAX_MS / 1000;
         if (seconds < minSeconds) {
@@ -285,6 +427,57 @@ static bool applyConfigCommand(const char *payload, uint8_t len, char *ackPayloa
         }
         g_txPeriodMs = (uint32_t)seconds * 1000UL;
         snprintf(appliedKv, sizeof(appliedKv), "INTERVAL=%ld", seconds);
+      } else if (strcmp(key, "SENSOR_READ") == 0) {
+        long n = atol(valueStr);
+        if (n < COUNTER_EVERY_MIN || n > COUNTER_EVERY_MAX) {
+          Serial.printf("[downlink] SENSOR_READ=%ld out of range [%d..%d] - ignored\n", n,
+                        COUNTER_EVERY_MIN, COUNTER_EVERY_MAX);
+          matched = false;
+        } else if (readingsPerPacket((uint16_t)n, g_loraTransEvery) > READINGS_PER_PACKET_MAX) {
+          // Lowering SENSOR_READ raises the readings per packet just as surely as
+          // raising LORA_TRANS does, so it has to pass the same check.
+          Serial.printf("[downlink] SENSOR_READ=%ld would put %u readings in one packet\n"
+                        "           (max %d with LORA_TRANS=%u) - ignored\n",
+                        n, (unsigned)readingsPerPacket((uint16_t)n, g_loraTransEvery),
+                        READINGS_PER_PACKET_MAX, (unsigned)g_loraTransEvery);
+          matched = false;
+        } else {
+          g_sensorReadEvery = (uint16_t)n;
+          // Reset the counter too: leaving it above a newly lowered threshold would
+          // fire immediately and then look like the setting was ignored.
+          g_sensorReadCount = 0;
+          snprintf(appliedKv, sizeof(appliedKv), "SENSOR_READ=%ld", n);
+        }
+      } else if (strcmp(key, "LORA_TRANS") == 0) {
+        long n = atol(valueStr);
+        if (n < COUNTER_EVERY_MIN || n > COUNTER_EVERY_MAX) {
+          Serial.printf("[downlink] LORA_TRANS=%ld out of range [%d..%d] - ignored\n", n,
+                        COUNTER_EVERY_MIN, COUNTER_EVERY_MAX);
+          matched = false;
+        } else if (readingsPerPacket(g_sensorReadEvery, (uint16_t)n) > READINGS_PER_PACKET_MAX) {
+          Serial.printf("[downlink] LORA_TRANS=%ld would put %u readings in one packet\n"
+                        "           (max %d; with SENSOR_READ=%u the limit is %u) - ignored\n",
+                        n, (unsigned)readingsPerPacket(g_sensorReadEvery, (uint16_t)n),
+                        READINGS_PER_PACKET_MAX, (unsigned)g_sensorReadEvery,
+                        (unsigned)(g_sensorReadEvery * READINGS_PER_PACKET_MAX));
+          matched = false;
+        } else {
+          g_loraTransEvery = (uint16_t)n;
+          g_loraTransCount = 0;
+          snprintf(appliedKv, sizeof(appliedKv), "LORA_TRANS=%ld", n);
+        }
+      } else if (strcmp(key, "ALARM") == 0) {
+        // Force-clear from Module A. Setting it is deliberately NOT supported:
+        // an alarm should be raised by the sensors, not asserted remotely.
+        if (atoi(valueStr) == 0) {
+          g_alarmState = ALARM_NORMAL;
+          g_alarmClearRun = 0;
+          Serial.println("[downlink] pre-alarm force-cleared by Module A");
+          snprintf(appliedKv, sizeof(appliedKv), "ALARM=0");
+        } else {
+          Serial.println("[downlink] ALARM can only be cleared (ALARM=0), not set - ignored");
+          matched = false;
+        }
       } else if (strcmp(key, "BME690") == 0) {
         g_bmeEnabled = atoi(valueStr) != 0;
         snprintf(appliedKv, sizeof(appliedKv), "BME690=%d", g_bmeEnabled ? 1 : 0);
@@ -393,26 +586,69 @@ void setup() {
                        : rr == ESP_RST_BROWNOUT ? "BROWNOUT (rail collapsed)"
                        : rr == ESP_RST_DEEPSLEEP ? "DEEPSLEEP"
                                                  : "OTHER";
+  esp_sleep_wakeup_cause_t wakeCause = esp_sleep_get_wakeup_cause();
+  g_wokeFromTimer = (wakeCause == ESP_SLEEP_WAKEUP_TIMER);
+
   if (g_bootMagic != BOOTCOUNT_MAGIC) {
     g_bootMagic = BOOTCOUNT_MAGIC;
     g_bootCount = 0;
+    g_wakeCount = 0;
+    g_txPeriodMsPersist = LORA_TX_PERIOD_MS;
+    g_sensorReadCount = 0;
+    g_loraTransCount = 0;
+    g_sensorReadEvery = SENSOR_READ_EVERY_DEFAULT;
+    g_loraTransEvery = LORA_TRANS_EVERY_DEFAULT;
+    g_storeCount = 0;
+    g_storeDropped = 0;
+    g_alarmState = ALARM_NORMAL;
+    g_alarmClearRun = 0;
+    g_gasBaseline = 0.0f;
     Serial.println("Boot counter initialised (true power-on, or RTC domain lost)");
   }
+  if (g_wokeFromTimer) {
+    g_wakeCount++;
+    Serial.printf("Deep-sleep wake #%lu (timer)\n", (unsigned long)g_wakeCount);
+  } else {
+    Serial.printf("COLD boot (cause=%d) - staying awake at least %lums so the port\n"
+                  "  stays open long enough to reflash\n",
+                  (int)wakeCause, (unsigned long)SLEEP_COLD_BOOT_AWAKE_MS);
+  }
+  // Carry the downlink-tuned send period across sleeps.
+  g_txPeriodMs = g_txPeriodMsPersist;
   g_bootCount++;
   Serial.printf("Boot #%lu since last power loss\n", (unsigned long)g_bootCount);
   Serial.printf("Last reset reason: %d = %s\n", (int)rr, rrName);
   Serial.flush();
 
+  // Deep sleep left these pads latched (see kHeldGates). Nothing can drive them
+  // until the hold is released, so this must happen before the pinMode calls
+  // below - otherwise the writes are silently ignored and the rails stay off.
+  for (size_t i = 0; i < sizeof(kHeldGates) / sizeof(kHeldGates[0]); i++) {
+    gpio_hold_dis(kHeldGates[i]);
+  }
+  gpio_deep_sleep_hold_dis();
+
   // PCB enable lines first - before Wire.begin() and every sensor begin().
   // If these gate sensor power rails, nothing downstream can be probed until
   // they're asserted. See pins.h.
   pinMode(PIN_PCB_EN_A, OUTPUT);
-  digitalWrite(PIN_PCB_EN_A, PIN_PCB_EN_ACTIVE);
+  digitalWrite(PIN_PCB_EN_A, PIN_PCB_EN_A_ACTIVE);
   pinMode(PIN_PCB_EN_B, OUTPUT);
-  digitalWrite(PIN_PCB_EN_B, PIN_PCB_EN_ACTIVE);
+  digitalWrite(PIN_PCB_EN_B, PIN_PCB_EN_B_ACTIVE);
   Serial.printf("PCB enable: GPIO%d + GPIO%d driven %s, settling %dms\n", PIN_PCB_EN_A, PIN_PCB_EN_B,
-                PIN_PCB_EN_ACTIVE == LOW ? "LOW" : "HIGH", PIN_PCB_EN_SETTLE_MS);
+                PIN_PCB_EN_A_ACTIVE == LOW ? "LOW" : "HIGH", PIN_PCB_EN_SETTLE_MS);
   delay(PIN_PCB_EN_SETTLE_MS);
+
+  // LoRa rail gate. Nothing in this firmware drove GPIO13 before - the radio only
+  // ever worked because its VDD was bridged to 3V3 by hand while diagnosing the
+  // floating-ground fault. Pull that bypass wire without this and the radio goes
+  // silent again, looking like a fresh fault. Also required before enterDeepSleep()
+  // can write this pin at all.
+  pinMode(PIN_LORA_EN, OUTPUT);
+  digitalWrite(PIN_LORA_EN, PIN_LORA_EN_ACTIVE);
+  Serial.printf("LoRa rail: GPIO%d driven %s, settling %dms\n", PIN_LORA_EN,
+                PIN_LORA_EN_ACTIVE == LOW ? "LOW" : "HIGH", PIN_LORA_EN_SETTLE_MS);
+  delay(PIN_LORA_EN_SETTLE_MS);
 
   power.enable3V3Sensors();
   Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
@@ -424,9 +660,17 @@ void setup() {
   bmeReady = bme690.begin();
   Serial.println(bmeReady ? "BME690: OK" : "BME690: NOT FOUND");
 
+#if SLEEP_ENABLED && SLEEP_SKIP_SEN0466
+  // Out of the cycle for now: its 210s settle would dominate every wake. Disabled
+  // rather than merely unread, so the readiness gate does not wait on it.
+  g_sen0466Enabled = false;
+  sen0466Ready = false;
+  Serial.println("SEN0466: SKIPPED (210s settle - excluded from the sleeping cycle)");
+#else
   step("sen0466.begin");
   sen0466Ready = sen0466.begin();
   Serial.println(sen0466Ready ? "SEN0466: OK" : "SEN0466: NOT FOUND");
+#endif
 
   // ---- INIT ORDER SWAPPED (diagnostic, 2026-09-04) ----
   // Original order was bmv080 then cm1106, and the board reset at cm1106.begin()
@@ -466,6 +710,66 @@ void setup() {
                                "(see the AT exchange above for which step was rejected)");
 
   Serial.println("Setup complete.\n");
+  g_setupDoneMs = millis();
+}
+
+// Powers everything down and sleeps. Rails are switched OFF and their gates
+// latched, so nothing downstream draws during the sleep - that gating, not the
+// MCU's own ~10uA, is where the saving actually comes from.
+static void enterDeepSleep(const char *why) {
+#if !SLEEP_ENABLED
+  (void)why;
+  return;
+#else
+  Serial.printf("\n[sleep] %s - sleeping %lus\n", why, (unsigned long)SLEEP_CYCLE_SECONDS);
+
+  // Quiesce each device before its rail disappears, rather than yanking power
+  // from underneath a laser or a warming heater.
+  if (bmvReady) bmv080.stopMeasurement();
+  cm1106.sleep();
+
+  // Persist anything a wake needs, while RAM still exists.
+  g_txPeriodMsPersist = g_txPeriodMs;
+
+  // Rails off. The two gates have OPPOSITE polarity, so each needs the inverse of
+  // its own active level - a single shared offLevel would switch one rail off and
+  // the other ON, powering a rail for the whole sleep.
+  digitalWrite(PIN_PCB_EN_A, (PIN_PCB_EN_A_ACTIVE == LOW) ? HIGH : LOW);
+  digitalWrite(PIN_PCB_EN_B, (PIN_PCB_EN_B_ACTIVE == LOW) ? HIGH : LOW);
+  digitalWrite(PIN_LORA_EN, (PIN_LORA_EN_ACTIVE == LOW) ? HIGH : LOW);
+
+  // Latch those levels for the duration of the sleep - see kHeldGates.
+  for (size_t i = 0; i < sizeof(kHeldGates) / sizeof(kHeldGates[0]); i++) {
+    gpio_hold_en(kHeldGates[i]);
+  }
+  gpio_deep_sleep_hold_en();
+
+  Serial.flush();
+  delay(50);  // let the USB CDC drain before the peripheral dies with the sleep
+
+  esp_sleep_enable_timer_wakeup((uint64_t)SLEEP_CYCLE_SECONDS * 1000000ULL);
+  esp_deep_sleep_start();
+  // never returns
+#endif
+}
+
+// A cold-booted node must stay awake long enough to be reflashed. Deep sleep drops
+// the USB-Serial/JTAG, and at a 10s tick the port would otherwise be present for
+// only a second or two at a time - practically impossible to catch. So after a
+// power-on or reset (as opposed to a timer wake) the node refuses to sleep until
+// this window has passed. A timer wake skips it entirely and sleeps as soon as its
+// tick work is done.
+static bool coldBootWindowOpen() {
+  if (g_wokeFromTimer) return false;
+  uint32_t awake = millis() - g_setupDoneMs;
+  if (awake >= SLEEP_COLD_BOOT_AWAKE_MS) return false;
+  static uint32_t lastNoticeMs = 0;
+  if (millis() - lastNoticeMs >= 5000) {
+    lastNoticeMs = millis();
+    Serial.printf("[boot] holding awake %lus more for reflashing (cold boot)\n",
+                  (unsigned long)((SLEEP_COLD_BOOT_AWAKE_MS - awake) / 1000));
+  }
+  return true;
 }
 
 // One pass over every enabled sensor, updating its cached g_* value on a
@@ -622,88 +926,224 @@ static void sampleSensors() {
 
 // Builds the CSV payload from the cache and transmits it to Module B, then
 // holds a short window open for a CFG downlink.
-static void transmitSnapshot() {
-  char payload[96];
-  int len = snprintf(payload, sizeof(payload), "%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d",
-                     g_temp, g_hum, g_pres, g_gas, g_pm1, g_pm25, g_pm10, g_co2, g_co, g_coTemp, g_windAngle,
-                     g_windSpeed, g_windValid ? 1 : 0);
+// Copies the current cached values into the RTC store. Oldest is dropped when
+// full, and the loss is counted - a batch that silently covered less time than it
+// claims would be worse than one that admits the gap.
+static void storeCurrentReading() {
+  if (g_storeCount >= READING_STORE_MAX) {
+    for (uint16_t i = 1; i < READING_STORE_MAX; i++) g_store[i - 1] = g_store[i];
+    g_storeCount = READING_STORE_MAX - 1;
+    g_storeDropped++;
+  }
+  StoredReading &r = g_store[g_storeCount++];
+  r.temp = g_temp; r.hum = g_hum; r.pres = g_pres; r.gas = g_gas;
+  r.pm1 = g_pm1; r.pm25 = g_pm25; r.pm10 = g_pm10;
+  r.co2 = g_co2; r.co = g_co; r.coTemp = g_coTemp;
+  r.windAngle = g_windAngle; r.windSpeed = g_windSpeed;
+  r.windValid = g_windValid ? 1 : 0;
+  r.tickAge = g_wakeCount;  // absolute tick; converted to an age at transmit time
+  Serial.printf("[store] reading %u/%u kept (tick %lu)\n", (unsigned)g_storeCount,
+                (unsigned)READING_STORE_MAX, (unsigned long)g_wakeCount);
+}
 
+// Does the newest reading look like fire? Kept separate from the state machine so
+// the criteria stay readable and in one place.
+static bool readingsIndicateFire(const char **whyOut) {
+  if (bmvReady && g_bmvEnabled && g_pm25 >= ALARM_PM25_UGM3) { *whyOut = "PM2.5"; return true; }
+  if (bmeReady && g_bmeEnabled) {
+    if (g_temp >= ALARM_TEMP_C) { *whyOut = "temperature"; return true; }
+    // Gas RESISTANCE falls as VOCs rise, so a drop below a fraction of the clean-air
+    // baseline is the smoke signal. Needs a baseline first, hence the guard.
+    if (g_gasBaseline > 0.0f && g_gas > 0.0f &&
+        g_gas < g_gasBaseline * (1.0f - ALARM_GAS_DROP_FRAC)) {
+      *whyOut = "BME690 gas resistance drop";
+      return true;
+    }
+  }
+  if (sen0466Ready && g_sen0466Enabled && g_co >= ALARM_CO_PPM) { *whyOut = "CO"; return true; }
+  return false;
+}
+
+// Runs after every sensor read. Enters pre-alarm on a trip; leaves it only after
+// ALARM_CLEAR_CONSECUTIVE consecutive clean reads, so one dip mid-fire cannot end
+// it. Module A can also force-clear via CFG,ALARM=0.
+static void updateAlarmState() {
+  const char *why = "";
+  bool fire = readingsIndicateFire(&why);
+
+  if (g_alarmState == ALARM_NORMAL) {
+    // Learn the clean-air gas baseline only while nothing looks wrong, or a fire
+    // would teach the node that smoke is normal.
+    if (!fire && bmeReady && g_gas > 0.0f) {
+      g_gasBaseline = (g_gasBaseline <= 0.0f) ? g_gas : (g_gasBaseline * 0.9f + g_gas * 0.1f);
+    }
+    if (fire) {
+      g_alarmState = ALARM_PREALARM;
+      g_alarmClearRun = 0;
+      Serial.printf("\n*** PRE-ALARM: %s ***  staying awake, all sensors continuous\n", why);
+    }
+  } else {
+    if (fire) {
+      g_alarmClearRun = 0;
+    } else if (++g_alarmClearRun >= ALARM_CLEAR_CONSECUTIVE) {
+      g_alarmState = ALARM_NORMAL;
+      g_alarmClearRun = 0;
+      Serial.printf("\n*** PRE-ALARM CLEARED after %d clean reads - back to the tick cycle ***\n",
+                    ALARM_CLEAR_CONSECUTIVE);
+    } else {
+      Serial.printf("[alarm] clean read %u/%d\n", (unsigned)g_alarmClearRun, ALARM_CLEAR_CONSECUTIVE);
+    }
+  }
+}
+
+// Sends everything in the store, then empties it. One stored reading emits the
+// EXACT legacy single-reading format, so the default 3/3 configuration needs no
+// change on Module B at all; the batch format only appears once the user actually
+// raises LORA_TRANS above SENSOR_READ. A batch is split across packets when it
+// exceeds the RYLR998's 240-byte limit rather than being truncated.
+static void transmitStore() {
   if (!radioReady) {
-    // Never claim "sent" under parameters the module didn't accept.
-    Serial.printf("TX skipped (radio not initialized): %s\n", payload);
+    Serial.printf("TX skipped (radio not initialized): %u stored reading(s) held\n",
+                  (unsigned)g_storeCount);
+    return;
+  }
+  if (g_storeCount == 0) {
+    Serial.println("[tx] nothing stored this cycle - not transmitting");
     return;
   }
 
-  // snprintf returns the length it WOULD have written; passing that straight to
-  // send() after truncation would walk off the end of payload[]. Clamp it.
-  if (len < 0) len = 0;
-  if (len >= (int)sizeof(payload)) len = (int)sizeof(payload) - 1;
+  if (g_storeDropped > 0) {
+    Serial.printf("[tx] WARNING %lu reading(s) were dropped - store too small for the\n"
+                  "     configured LORA_TRANS/SENSOR_READ ratio\n",
+                  (unsigned long)g_storeDropped);
+  }
 
-  Serial.printf("[tx] payload %d bytes, calling radio.send ...\n", len);
-  Serial.flush();
-  delay(20);
+  char packet[241];
+  uint16_t sent = 0;
+  while (sent < g_storeCount) {
+    int len = 0;
+    packet[0] = 0;
+    uint16_t first = sent;
 
-  bool sent = radio.send(LORA_RX_ADDR, payload, (uint8_t)len);
+    if (g_storeCount == 1) {
+      const StoredReading &r = g_store[0];
+      len = snprintf(packet, sizeof(packet),
+                     "%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d",
+                     r.temp, r.hum, r.pres, r.gas, r.pm1, r.pm25, r.pm10, r.co2, r.co,
+                     r.coTemp, r.windAngle, r.windSpeed, (int)r.windValid);
+      sent = 1;
+    } else {
+      // Batch: "B,<count>," then readings separated by ';', each ending in the age
+      // in ticks so the receiver can place them in time without a clock here.
+      len = snprintf(packet, sizeof(packet), "B,%u,", (unsigned)(g_storeCount - first));
+      while (sent < g_storeCount) {
+        const StoredReading &r = g_store[sent];
+        char one[176];
+        uint32_t age = (g_wakeCount >= r.tickAge) ? (g_wakeCount - r.tickAge) : 0;
+        int oneLen = snprintf(one, sizeof(one),
+                              "%.1f,%.1f,%.1f,%.0f,%.1f,%.1f,%.1f,%.0f,%.1f,%.1f,%.0f,%.1f,%d,%lu;",
+                              r.temp, r.hum, r.pres, r.gas, r.pm1, r.pm25, r.pm10, r.co2, r.co,
+                              r.coTemp, r.windAngle, r.windSpeed, (int)r.windValid,
+                              (unsigned long)age);
+        if (oneLen < 0) break;
+        if (len + oneLen >= (int)sizeof(packet) - 1) break;  // this packet is full
+        memcpy(packet + len, one, oneLen + 1);
+        len += oneLen;
+        sent++;
+      }
+      if (sent == first) {  // a single reading could not fit even alone
+        Serial.println("[tx] ERROR one reading exceeds the packet size - dropping it");
+        sent++;
+        continue;
+      }
+    }
 
-  Serial.printf("[tx] radio.send returned %s\n", sent ? "true" : "false");
-  Serial.flush();
-  delay(20);
+    if (len < 0) len = 0;
+    if (len >= (int)sizeof(packet)) len = (int)sizeof(packet) - 1;
 
-  Serial.printf("TX: %s  (%s)\n", payload, sent ? "sent" : "send FAILED");
-  Serial.flush();
+    bool ok = radio.send(LORA_RX_ADDR, packet, (uint8_t)len);
+    Serial.printf("TX [%u..%u/%u] %d bytes: %s  (%s)\n", (unsigned)first, (unsigned)(sent - 1),
+                  (unsigned)g_storeCount, len, packet, ok ? "sent" : "send FAILED");
+  }
 
-  // Post-TX listen window: the only moment Module B can push a CFG downlink.
-  Serial.println("[tx] entering post-TX listen window");
-  Serial.flush();
+  // Sent means done: clear the store and start accumulating again.
+  g_storeCount = 0;
+  g_storeDropped = 0;
+
+  // Post-TX listen window - the only moment Module A's CFG can reach this node.
   LoRaMessage msg;
   uint32_t t0 = millis();
   while (millis() - t0 < LORA_POST_TX_LISTEN_MS) {
     if (radio.poll(msg)) {
       handleInboundMessage(msg);
-      break;  // one command per window
+      break;
     }
   }
-  Serial.println("[tx] transmit complete");
-  Serial.flush();
+}
+
+
+// Samples the fast sensors repeatedly until each has gone fresh, bounded in time.
+// Used for one scheduled read - not the old continuous sampling.
+static void readFastSensorsOnce() {
+  uint32_t t0 = millis();
+  char pending[64];
+  while (millis() - t0 < SENSOR_READ_WINDOW_MS) {
+    sampleSensors();
+    if (pendingSensors(pending, sizeof(pending)) == 0) break;
+    delay(SAMPLE_GAP_MS);
+  }
+  uint8_t stillPending = pendingSensors(pending, sizeof(pending));
+  Serial.printf("[read] co2=%.1f co=%.2f T%.1f H%.1f gas%.0f pm2.5=%.1f%s%s\n", g_co2, g_co,
+                g_temp, g_hum, g_gas, g_pm25, stillPending ? "  STALE: " : "",
+                stillPending ? pending : "");
 }
 
 void loop() {
-  uint32_t now = millis();
+  // ---- PRE-ALARM: no sleeping, every sensor, continuously ----
+  // The node stays awake and keeps reading until the readings settle or Module A
+  // clears it. Transmits still follow the lora_trans schedule so the link is not
+  // flooded, but each transmit's listen window is also how a clear arrives.
+  if (g_alarmState == ALARM_PREALARM) {
+    readFastSensorsOnce();
+    updateAlarmState();
+    storeCurrentReading();
 
-  sampleSensors();
-
-  static uint32_t lastReadLogMs = 0;
-  if (now - lastReadLogMs >= READ_LOG_GAP_MS) {
-    lastReadLogMs = now;
-    Serial.printf("[read] co2=%.1f(%s) co=%.2f(%s) | bme=%s bmv=%s calypso=%s(rx=%u) | T%.1f H%.1f gas%.0f pm2.5=%.1f\n",
-                  g_co2, statusName(g_co2St), g_co, statusName(g_coSt), statusName(g_bmeSt), statusName(g_bmvSt),
-                  g_calypsoEnabled ? (g_windValid ? "OK" : "silent") : "off", calypso.lastReadBytes(),
-                  g_temp, g_hum, g_gas, g_pm25);
-  }
-
-  // ---- Readiness-gated transmit ----
-  // Send once every expected sensor has a fresh reading, subject to the two
-  // guards described at LORA_TX_MIN_GAP_MS. The deadline path still sends, so a
-  // stalled sensor degrades the payload rather than silencing the node.
-  static uint32_t lastTxMs = 0;
-  char pendingNames[64];
-  uint8_t pending = pendingSensors(pendingNames, sizeof(pendingNames));
-  bool minGapMet = (now - lastTxMs) >= LORA_TX_MIN_GAP_MS;
-  bool deadlinePassed = (now - lastTxMs) >= g_txPeriodMs;
-
-  if (minGapMet && (pending == 0 || deadlinePassed)) {
-    if (pending == 0) {
-      Serial.printf("[tx] all sensors fresh after %lus - sending\n",
-                    (unsigned long)((now - lastTxMs) / 1000));
-    } else {
-      Serial.printf("[tx] deadline %lus reached with %u sensor(s) still stale (%s) - sending anyway\n",
-                    (unsigned long)(g_txPeriodMs / 1000), (unsigned)pending, pendingNames);
+    static uint32_t lastAlarmTxMs = 0;
+    if (millis() - lastAlarmTxMs >= LORA_TX_MIN_GAP_MS) {
+      lastAlarmTxMs = millis();
+      transmitStore();
     }
-    lastTxMs = now;
-    transmitSnapshot();
-    clearFreshFlags();
+    delay(SAMPLE_GAP_MS);
+    return;  // never falls through to the sleep path while in pre-alarm
   }
 
-  // NOT sleep - see file header. Just paces the sample loop.
+  // ---- NORMAL: one tick of work, then sleep ----
+  // Both counters were advanced in setup(); this decides what this tick owes.
+  bool readDue = (g_sensorReadCount >= g_sensorReadEvery);
+  bool txDue = (g_loraTransCount >= g_loraTransEvery);
+
+  if (readDue) {
+    g_sensorReadCount = 0;
+    readFastSensorsOnce();
+    updateAlarmState();
+    storeCurrentReading();
+    if (g_alarmState == ALARM_PREALARM) return;  // just tripped - stay awake
+  }
+
+  if (txDue) {
+    g_loraTransCount = 0;
+    transmitStore();
+  }
+
+  if (coldBootWindowOpen()) {
+    delay(SAMPLE_GAP_MS);
+    return;  // still inside the reflash window - do not sleep yet
+  }
+
+  enterDeepSleep(readDue || txDue ? "tick work done" : "nothing due");
+
+  // Only reachable when SLEEP_ENABLED is 0.
   delay(SAMPLE_GAP_MS);
 }
+
+

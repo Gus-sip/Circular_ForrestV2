@@ -40,12 +40,33 @@
 // so an I2C scan or a UART probe would find nothing and look like dead hardware.
 // The Calypso wind sensor and the CM1106 both need the 5V rail specifically.
 //
-// Which of the two is 5V and which is 3V3 isn't pinned down yet - rename A/B to
-// PIN_PCB_EN_5V / PIN_PCB_EN_3V3 once that's confirmed against the schematic.
-#define PIN_PCB_EN_A 10
-#define PIN_PCB_EN_B 11
-#define PIN_PCB_EN_ACTIVE LOW
+// THE TWO GATES HAVE OPPOSITE POLARITY. Established 2026-09-08 by sweeping all
+// four GPIO10/11 combinations and reading the CM1106 (the only connected 5V device)
+// in each:
+//
+//     GPIO10=LOW  GPIO11=LOW   -> silent
+//     GPIO10=LOW  GPIO11=HIGH  -> answers      <- 5V rail up
+//     GPIO10=HIGH GPIO11=LOW   -> silent
+//     GPIO10=HIGH GPIO11=HIGH  -> answers      <- 5V rail up
+//
+// So GPIO11 gates the 5V rail and is ACTIVE-HIGH, while GPIO10 (3V3) is active-low
+// as originally assumed - the 3V3 sensors have always worked with it LOW.
+//
+// This was masked for days by the floating-ground fault: with no solid reference,
+// driving GPIO11 "LOW" was not a true low at the transistor, so the 5V rail stayed
+// up by accident. Repairing the ground made LOW a real low and switched the 5V rail
+// properly OFF, which read as the CM1106 dying. It had not; it was unpowered.
+//
+// Anything on the 5V rail - CM1106 and the Calypso wind sensor - depends on this.
+#define PIN_PCB_EN_A 10          // 3V3 sensor rail
+#define PIN_PCB_EN_A_ACTIVE LOW
+#define PIN_PCB_EN_B 11          // 5V sensor rail
+#define PIN_PCB_EN_B_ACTIVE HIGH
 #define PIN_PCB_EN_SETTLE_MS 300
+
+// Retained so older sketches still compile, but it is only correct for gate A.
+// Prefer the per-gate macros above.
+#define PIN_PCB_EN_ACTIVE PIN_PCB_EN_A_ACTIVE
 
 // ---------- RYLR998 LoRa power gate (GPIO13) ----------
 // Third rail gate, separate from the two above: a P-FET on the LoRa supply,

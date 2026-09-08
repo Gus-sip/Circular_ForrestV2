@@ -1,5 +1,73 @@
 # CHIP FOREST - Session Status
 
+## 2026-09-08 - Rail gate polarity found; CM1106 was never faulty
+
+Two long-standing mysteries resolved, and they turned out to be one bug and one
+misreading of a datasheet behaviour.
+
+### GPIO11 is ACTIVE-HIGH and gates the 5V rail
+
+Swept all four GPIO10/11 combinations while reading the CM1106 - the only
+connected 5V device - in each:
+
+```
+GPIO10=LOW  GPIO11=LOW   -> silent
+GPIO10=LOW  GPIO11=HIGH  -> answers, CO2=793     <- 5V rail up
+GPIO10=HIGH GPIO11=LOW   -> silent
+GPIO10=HIGH GPIO11=HIGH  -> answers              <- 5V rail up
+```
+
+The firmware drove BOTH gates LOW from a single shared `PIN_PCB_EN_ACTIVE`, so
+the **5V rail was switched off every time it believed it was turning the rails
+on**. Everything on 5V - the CM1106 and the Calypso - was unpowered.
+
+The floating-ground fault masked this for days: with no solid reference, driving
+GPIO11 "LOW" was not a true low at the transistor, so the 5V rail stayed up by
+accident. Repairing the ground made LOW a real low and switched 5V properly off,
+which read as the CM1106 dying overnight. **A fix revealing a second, older bug
+is the pattern to expect on this board.**
+
+`pins.h` now carries per-gate macros: `PIN_PCB_EN_A_ACTIVE LOW` (GPIO10, 3V3)
+and `PIN_PCB_EN_B_ACTIVE HIGH` (GPIO11, 5V). Note especially the sleep path -
+computing one shared `offLevel` for both gates would switch one rail off and the
+other ON, powering a rail for the entire sleep.
+
+### The CM1106 is single-shot, not broken
+
+`0x11 0x01 0x01` only reads back the LAST measurement; it never triggers a new
+one. The part measures on power-up, so the value is fixed for a whole boot and
+fresh after a power cycle - exactly the "frozen value" symptom chased for weeks.
+Proven by cycling EN: `before cycle: CO2=793` -> `after cycle: CO2=671`.
+
+`power_budget.md` had said so all along ("BASE_ESCALADA - single-shot"), but only
+one command had ever been sent to this part. Sweeping `0x00-0x2F` with computed
+checksums mapped the real command set: `0x01` the 8-byte CO2 frame, `0x04` a
+14-byte extended frame containing the CO2, `0x0D` an 11-byte frame carrying
+`0x1388` = 5000 (the range ceiling), `0x06`/`0x0F` short status frames, and
+`06 01 02 F7` as the NAK for everything else.
+
+To read it correctly: power-cycle EN, wait the warm-up, then read. Reading
+without cycling returns a stale value that looks perfectly healthy - checksum
+passes, the counter byte advances, nothing signals staleness.
+
+### New this session
+
+- `env:module-c-rail-gate` (`rail_gate_set.cpp`) - parks GPIO10/11 at chosen
+  levels and holds, so the rails can be metered. No sensors, no sleep.
+- `env:module-c-cm1106-probe` (`cm1106_probe.cpp`) - gate sweep, line-state and
+  pad self-check, passive listen, orientation x baud sweep, command discovery,
+  EN power-cycle test.
+- `notes/module_c_REFERENCE.md` - consolidated reference for the whole node.
+
+### Still open
+
+- **The transmit brownout.** Unchanged: the board loses power inside
+  `radio.send()`, confirmed via `RTC_NOINIT_ATTR`. Next step is still to remove
+  the RYLR998 VDD bypass wire and let the radio run on its GPIO13-gated rail.
+- **The sleep cycle is written and building but not yet flashed.**
+- Fire thresholds are still placeholders; the `alarma`/`prealarma` spreadsheet
+  tabs were never transcribed.
+
 ## 2026-09-04 - Fabbed Module C PCB bring-up: two hardware faults found, one open
 
 First session on the **real Module C PCB** (not the bench harness). New board:
