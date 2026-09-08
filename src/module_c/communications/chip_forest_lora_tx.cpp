@@ -630,6 +630,17 @@ void setup() {
   }
   // Carry the downlink-tuned send period across sleeps.
   g_txPeriodMs = g_txPeriodMsPersist;
+
+  // Every boot is one tick, so both counters advance here - this is the only place
+  // they do. loop() then compares each against its own threshold to decide what
+  // this tick owes. Counting in setup() rather than loop() matters: loop() runs
+  // many times per wake, so incrementing there would race through the thresholds
+  // in milliseconds instead of once per 10s tick.
+  if (g_sensorReadCount < 0xFFFF) g_sensorReadCount++;
+  if (g_loraTransCount < 0xFFFF) g_loraTransCount++;
+  Serial.printf("Tick: sensor_read %u/%u, lora_trans %u/%u\n",
+                (unsigned)g_sensorReadCount, (unsigned)g_sensorReadEvery,
+                (unsigned)g_loraTransCount, (unsigned)g_loraTransEvery);
   g_bootCount++;
   Serial.printf("Boot #%lu since last power loss\n", (unsigned long)g_bootCount);
   Serial.printf("Last reset reason: %d = %s\n", (int)rr, rrName);
