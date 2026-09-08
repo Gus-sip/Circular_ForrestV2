@@ -303,6 +303,16 @@ RTC_NOINIT_ATTR uint32_t g_bootCount;
 // compiled-in default on every single wake, which would look like the downlink
 // being ignored.
 RTC_NOINIT_ATTR uint32_t g_wakeCount;
+
+// Set immediately before esp_deep_sleep_start(), cleared on the next boot. This is
+// what identifies a wake, NOT esp_sleep_get_wakeup_cause(): a chip reset clears the
+// wakeup cause, and on the bench a reset is routine - waking drops USB, the host
+// re-enumerates and opening the port resets the ESP32-S3. Relying on the cause made
+// every wake look like a cold boot, so the node held awake 30s each time and never
+// really slept. Observed on node C2, 2026-09-08. This flag survives that reset
+// because RTC_NOINIT does.
+RTC_NOINIT_ATTR uint32_t g_sleepFlag;
+#define SLEEP_FLAG_MAGIC 0x5EEDBEEFUL
 RTC_NOINIT_ATTR uint32_t g_txPeriodMsPersist;
 
 // Tick counters and their end-user thresholds. Counters advance every tick and
@@ -587,12 +597,16 @@ void setup() {
                        : rr == ESP_RST_DEEPSLEEP ? "DEEPSLEEP"
                                                  : "OTHER";
   esp_sleep_wakeup_cause_t wakeCause = esp_sleep_get_wakeup_cause();
-  g_wokeFromTimer = (wakeCause == ESP_SLEEP_WAKEUP_TIMER);
+
+  // The flag is authoritative; the cause is only reported for diagnosis.
+  g_wokeFromTimer = (g_sleepFlag == SLEEP_FLAG_MAGIC);
+  g_sleepFlag = 0;
 
   if (g_bootMagic != BOOTCOUNT_MAGIC) {
     g_bootMagic = BOOTCOUNT_MAGIC;
     g_bootCount = 0;
     g_wakeCount = 0;
+    g_sleepFlag = 0;
     g_txPeriodMsPersist = LORA_TX_PERIOD_MS;
     g_sensorReadCount = 0;
     g_loraTransCount = 0;
@@ -607,7 +621,8 @@ void setup() {
   }
   if (g_wokeFromTimer) {
     g_wakeCount++;
-    Serial.printf("Deep-sleep wake #%lu (timer)\n", (unsigned long)g_wakeCount);
+    Serial.printf("Deep-sleep wake #%lu (cause=%d)\n", (unsigned long)g_wakeCount,
+                  (int)wakeCause);
   } else {
     Serial.printf("COLD boot (cause=%d) - staying awake at least %lums so the port\n"
                   "  stays open long enough to reflash\n",
@@ -747,6 +762,7 @@ static void enterDeepSleep(const char *why) {
   Serial.flush();
   delay(50);  // let the USB CDC drain before the peripheral dies with the sleep
 
+  g_sleepFlag = SLEEP_FLAG_MAGIC;  // so the next boot knows it came from sleep
   esp_sleep_enable_timer_wakeup((uint64_t)SLEEP_CYCLE_SECONDS * 1000000ULL);
   esp_deep_sleep_start();
   // never returns

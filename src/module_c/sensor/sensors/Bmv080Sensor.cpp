@@ -35,12 +35,35 @@ void Bmv080Sensor::onDataReady(bmv080_output_t output, void *callbackParameters)
 }
 
 bool Bmv080Sensor::begin() {
-  _bus.init(_wire, _addr);
-  _bus.setByteOrder(SFTK_MSBFIRST);
+  // The I2C address is set by the CS/SDO straps, and it genuinely differs between
+  // boards: node C1 answers at 0x57, node C2 at 0x56. Rather than require a
+  // per-board build - unworkable across a 200-node deployment - try the configured
+  // address first and then the rest of the strap range, exactly as Bme690Sensor
+  // already does for its 0x76/0x77 pair.
+  //
+  //   CS high, SDO high -> 0x57      CS low,  SDO high -> 0x55
+  //   CS high, SDO low  -> 0x56      CS low,  SDO low  -> 0x54
+  static const uint8_t kStrapAddrs[4] = {0x57, 0x56, 0x55, 0x54};
 
-  bmv080_status_code_t rc =
-      bmv080_open(&_handle, (bmv080_sercom_handle_t)&_bus, (bmv080_callback_read_t)readCB,
-                  (bmv080_callback_write_t)writeCB, (bmv080_callback_delay_t)delayCB);
+  bmv080_status_code_t rc = E_BMV080_ERROR_HW_WRITE;
+  for (uint8_t attempt = 0; attempt < 5; attempt++) {
+    // Attempt 0 uses whatever was configured; later attempts walk the strap range
+    // and skip the one already tried.
+    uint8_t tryAddr = (attempt == 0) ? _addr : kStrapAddrs[attempt - 1];
+    if (attempt > 0 && tryAddr == _addr) continue;
+
+    _bus.init(_wire, tryAddr);
+    _bus.setByteOrder(SFTK_MSBFIRST);
+
+    rc = bmv080_open(&_handle, (bmv080_sercom_handle_t)&_bus, (bmv080_callback_read_t)readCB,
+                     (bmv080_callback_write_t)writeCB, (bmv080_callback_delay_t)delayCB);
+    if (rc == E_BMV080_OK) {
+      _addr = tryAddr;  // remember it, so read() and any retry use the live address
+      break;
+    }
+    // bmv080_open leaves no handle behind on failure, so nothing to close here.
+    _handle = nullptr;
+  }
   if (rc != E_BMV080_OK) return false;
 
   bmv080_reset(_handle);
