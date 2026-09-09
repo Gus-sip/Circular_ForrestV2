@@ -21,10 +21,12 @@
 
 #define GATE_A_PIN 10
 #define GATE_B_PIN 11
+#define GATE_C_PIN 13  // RYLR998 LoRa supply gate
 
 // What each gate is driven to. Change, reflash, measure.
 #define GATE_A_LEVEL LOW   // GPIO10 - left at the documented "on" level
-#define GATE_B_LEVEL HIGH  // GPIO11 - driven HIGH as requested
+#define GATE_B_LEVEL LOW   // GPIO11 - 5V rail OFF (safe: this rail is shorted on node C1)
+#define GATE_C_LEVEL LOW   // GPIO13 - LoRa rail ON (this gate is active-low)
 
 static const char *lvl(int v) { return v == HIGH ? "HIGH (3.3V)" : "LOW (0V)"; }
 
@@ -38,11 +40,14 @@ void setup() {
   digitalWrite(GATE_A_PIN, GATE_A_LEVEL);
   pinMode(GATE_B_PIN, OUTPUT);
   digitalWrite(GATE_B_PIN, GATE_B_LEVEL);
+  pinMode(GATE_C_PIN, OUTPUT);
+  digitalWrite(GATE_C_PIN, GATE_C_LEVEL);
 
   Serial.println();
   Serial.println("=== Rail gate manual set ===");
   Serial.printf("  GPIO%d = %s\n", GATE_A_PIN, lvl(GATE_A_LEVEL));
   Serial.printf("  GPIO%d = %s\n", GATE_B_PIN, lvl(GATE_B_LEVEL));
+  Serial.printf("  GPIO%d = %s\n", GATE_C_PIN, lvl(GATE_C_LEVEL));
   Serial.println();
   Serial.println("Held indefinitely - no sleep, no sensor init, nothing else driven.");
   Serial.println("Meter the 5V and 3V3 rails now.");
@@ -60,10 +65,12 @@ void loop() {
 
   digitalWrite(GATE_A_PIN, GATE_A_LEVEL);
   digitalWrite(GATE_B_PIN, GATE_B_LEVEL);
+  digitalWrite(GATE_C_PIN, GATE_C_LEVEL);
 
   static uint32_t secs = 0;
   if (++secs % 10 == 0) {
-    Serial.printf("[hold] t=%lus  GPIO%d=%s  GPIO%d=%s\n", (unsigned long)secs, GATE_A_PIN,
-                  lvl(GATE_A_LEVEL), GATE_B_PIN, lvl(GATE_B_LEVEL));
+    Serial.printf("[hold] t=%lus  GPIO%d=%s  GPIO%d=%s  GPIO%d=%s\n", (unsigned long)secs,
+                  GATE_A_PIN, lvl(GATE_A_LEVEL), GATE_B_PIN, lvl(GATE_B_LEVEL), GATE_C_PIN,
+                  lvl(GATE_C_LEVEL));
   }
 }

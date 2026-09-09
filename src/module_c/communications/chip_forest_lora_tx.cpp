@@ -175,6 +175,84 @@
 // More than one, so a single dip does not end an alarm during a real fire.
 #define ALARM_CLEAR_CONSECUTIVE 5
 
+// ---------- Activity LED ----------
+// The ESP32-S3 module's own RGB LED (WS2812 on GPIO48, PIN_NEOPIXEL in the
+// esp32s3 variant). Lit only while the node is actually doing something: from the
+// moment a tick decides it has work, through rail bring-up, sensor reads and the
+// transmit, and switched off immediately before deep sleep.
+//
+// Idle ticks never light it, which makes it a useful health indicator at a glance:
+//   brief flash every third tick  -> healthy, cycle running
+//   solid on                      -> stuck awake, something is blocking
+//   never lights                  -> not completing ticks at all
+//
+// Deliberately DIM. A WS2812 at full white draws ~60mA - comparable to the BMV080
+// laser and more than the ESP32 itself - which would undo the power work this
+// firmware exists to do. The values below are a few percent of full scale, still
+// clearly visible indoors, and cost on the order of a milliamp.
+// Status LED: addressable WS2812 on PIN_STATUS_LED (GPIO21) - see pins.h for why
+// it is that pin and not the variant's PIN_NEOPIXEL 48.
+//
+// Three states, so the node's behaviour is readable from across the room:
+//
+//   GREEN flash   every wake from deep sleep, including idle ticks. Proof the
+//                 timer fired and the node came back - a missing green flash is
+//                 the node failing to wake at all.
+//   YELLOW        held while actually working: rails up, sensors reading, radio
+//                 transmitting. Its duration shows how long a working tick takes.
+//   OFF           asleep.
+//
+// So a healthy node at the default 3/3 counters reads as: green blink, dark,
+// green blink, dark, green blink then a yellow stretch - repeating. Green with no
+// yellow every third tick means ticks are being counted but work is not
+// happening; yellow that never goes out means it is stuck awake.
+//
+// Brightness is moderate and single-to-dual channel. Full white on a WS2812 is
+// ~60mA, rivalling the BMV080 laser; this costs a fraction of that, and the green
+// flash is brief by design because it fires on every tick including idle ones.
+#define LED_GREEN_R 0
+#define LED_GREEN_G 120
+#define LED_GREEN_B 0
+#define LED_YELLOW_R 120
+#define LED_YELLOW_G 80
+#define LED_YELLOW_B 0
+#define LED_FLASH_MS 120
+
+// Each state is driven BOTH ways, because we know the pin (GPIO21) but not the
+// type. neopixelWrite() first - which lights a WS2812 and leaves a plain LED dark
+// - then a millisecond for a WS2812 to latch its colour, then a plain level. A
+// WS2812 holds what it latched and ignores the steady level that follows; a plain
+// LED responds to that level. Whichever is fitted, one of the two lights it and
+// the other does nothing.
+//
+// Consequence worth knowing: on a plain single-colour LED the green/yellow
+// distinction collapses to on/off, so the wake flash and the working state look
+// the same. The timing still distinguishes them - a 120ms blink versus a hold of
+// several seconds.
+static void ledWrite(uint8_t r, uint8_t g, uint8_t b, bool level) {
+  neopixelWrite(PIN_STATUS_LED, r, g, b);
+  delay(1);
+  pinMode(PIN_STATUS_LED, OUTPUT);
+  digitalWrite(PIN_STATUS_LED, level ? HIGH : LOW);
+}
+
+static void ledOff() {
+  ledWrite(0, 0, 0, false);
+}
+
+// Brief green blink: "I woke up". Fires on every wake, so it is kept short - it
+// is the one LED cost paid by idle ticks, which are otherwise nearly free.
+static void ledFlashWake() {
+  ledWrite(LED_GREEN_R, LED_GREEN_G, LED_GREEN_B, true);
+  delay(LED_FLASH_MS);
+  ledOff();
+}
+
+// Held for the whole of a working tick, not blinked, so its length is meaningful.
+static void ledWorking() {
+  ledWrite(LED_YELLOW_R, LED_YELLOW_G, LED_YELLOW_B, true);
+}
+
 // ---------- Deep sleep ----------
 // The ESP keeps its own 3V3 rail and sleeps itself on a timer (~10-15uA),
 // retaining RTC memory; the power MCU is not involved in waking it. Each wake is
@@ -185,7 +263,15 @@
 // settle per notes/power_budget.md, which would dominate every wake; sleeping
 // through that window is a later change (it needs a multi-phase wake). Until then
 // including it would simply stall each cycle for three and a half minutes.
-#define SLEEP_ENABLED 1
+// Set to 0 for bench testing: the node stays awake, samples continuously and
+// transmits on a plain timer. Useful when you need the serial port to stay put and
+// the LED to be watchable, rather than the port vanishing every 10 seconds.
+#define SLEEP_ENABLED 0
+
+// Transmit cadence when SLEEP_ENABLED is 0. The tick counters cannot drive it in
+// this mode - they advance once per boot, and without sleep there are no reboots,
+// so they would sit at 1/3 forever and nothing would ever be sent.
+#define NOSLEEP_TX_GAP_MS 15000UL
 #define SLEEP_CYCLE_SECONDS 10UL        // one tick; work is scheduled in ticks, not seconds
 
 // ---------- Tick scheduling ----------
@@ -577,6 +663,19 @@ static void step(const char *what) {
   delay(20);
 }
 
+// Defined below, but setup() must be able to sleep before it ever powers a rail.
+static void enterDeepSleep(const char *why);
+
+// A cold boot always initialises fully and stays awake, whatever the counters say:
+// that is the window in which the board can be reflashed, and skipping init there
+// would leave a freshly powered node looking dead for its first few ticks.
+static bool isColdBoot();
+
+// What this tick owes. Decided BEFORE anything is powered, so an idle tick can
+// return to sleep without bringing up a single rail.
+static bool g_readDue = false;
+static bool g_txDue = false;
+
 void setup() {
   Serial.begin(115200);
   uint32_t waitStart = millis();
@@ -641,6 +740,40 @@ void setup() {
   Serial.printf("Tick: sensor_read %u/%u, lora_trans %u/%u\n",
                 (unsigned)g_sensorReadCount, (unsigned)g_sensorReadEvery,
                 (unsigned)g_loraTransCount, (unsigned)g_loraTransEvery);
+
+  // Green: woke up. Before the idle bail-out below, so every wake flashes -
+  // including the two ticks in three that go straight back to sleep.
+  ledFlashWake();
+
+  g_readDue = (g_sensorReadCount >= g_sensorReadEvery);
+  g_txDue = (g_loraTransCount >= g_loraTransEvery);
+
+  // ---- Idle tick: power nothing, go straight back to sleep ----
+  // This decision used to live in loop(), which meant every wake first switched on
+  // all three rails, paid the BMV080's 5s preheat and initialised the radio - only
+  // to discover it had nothing to do. Two ticks in three were pure waste, and the
+  // measured cadence was 76s instead of the configured 30s because of it.
+  //
+  // It matters for more than energy. Bringing up three rails and a laser is a large
+  // simultaneous load step, and doing it three times more often than necessary is
+  // three times the opportunity to brown out on a supply with little headroom.
+  //
+  // The rails are still off here (deep sleep latched them off and nothing has
+  // driven them since), so there is nothing to undo - just sleep again.
+#if SLEEP_ENABLED
+  if (!g_readDue && !g_txDue && !isColdBoot()) {
+    enterDeepSleep("nothing due - no rails powered");
+    return;  // unreachable: enterDeepSleep does not return
+  }
+#else
+  // Continuous mode initialises everything every time - there is no idle tick to
+  // skip, and bailing out here would leave setup() half-done.
+  g_readDue = true;
+  g_txDue = true;
+#endif
+
+  // Yellow: this tick has real work - rails, sensors, radio. Held until sleep.
+  ledWorking();
   g_bootCount++;
   Serial.printf("Boot #%lu since last power loss\n", (unsigned long)g_bootCount);
   Serial.printf("Last reset reason: %d = %s\n", (int)rr, rrName);
@@ -661,8 +794,12 @@ void setup() {
   digitalWrite(PIN_PCB_EN_A, PIN_PCB_EN_A_ACTIVE);
   pinMode(PIN_PCB_EN_B, OUTPUT);
   digitalWrite(PIN_PCB_EN_B, PIN_PCB_EN_B_ACTIVE);
-  Serial.printf("PCB enable: GPIO%d + GPIO%d driven %s, settling %dms\n", PIN_PCB_EN_A, PIN_PCB_EN_B,
-                PIN_PCB_EN_A_ACTIVE == LOW ? "LOW" : "HIGH", PIN_PCB_EN_SETTLE_MS);
+  // The two gates have OPPOSITE polarity - printing one level for both claimed
+  // GPIO11 was LOW when it is in fact driven HIGH, which is exactly the sort of
+  // log that sends someone chasing the wrong thing.
+  Serial.printf("PCB enable: GPIO%d=%s (3V3), GPIO%d=%s (5V), settling %dms\n", PIN_PCB_EN_A,
+                PIN_PCB_EN_A_ACTIVE == LOW ? "LOW" : "HIGH", PIN_PCB_EN_B,
+                PIN_PCB_EN_B_ACTIVE == LOW ? "LOW" : "HIGH", PIN_PCB_EN_SETTLE_MS);
   delay(PIN_PCB_EN_SETTLE_MS);
 
   // LoRa rail gate. Nothing in this firmware drove GPIO13 before - the radio only
@@ -747,6 +884,11 @@ static void enterDeepSleep(const char *why) {
   (void)why;
   return;
 #else
+  // Off before sleeping. A WS2812 latches its last value, so without this it would
+  // stay lit through the entire sleep - burning current and making the indicator
+  // meaningless.
+  ledOff();
+
   Serial.printf("\n[sleep] %s - sleeping %lus\n", why, (unsigned long)SLEEP_CYCLE_SECONDS);
 
   // Quiesce each device before its rail disappears, rather than yanking power
@@ -786,6 +928,11 @@ static void enterDeepSleep(const char *why) {
 // power-on or reset (as opposed to a timer wake) the node refuses to sleep until
 // this window has passed. A timer wake skips it entirely and sleeps as soon as its
 // tick work is done.
+// A cold boot is any start that did not come from our own deep sleep - power-on,
+// or a reset. g_wokeFromTimer is set from the RTC flag, not the wakeup cause,
+// because a chip reset clears the cause (see the flag's declaration).
+static bool isColdBoot() { return !g_wokeFromTimer; }
+
 static bool coldBootWindowOpen() {
   if (g_wokeFromTimer) return false;
   uint32_t awake = millis() - g_setupDoneMs;
@@ -1120,9 +1267,19 @@ static void readFastSensorsOnce() {
     delay(SAMPLE_GAP_MS);
   }
   uint8_t stillPending = pendingSensors(pending, sizeof(pending));
-  Serial.printf("[read] co2=%.1f co=%.2f T%.1f H%.1f gas%.0f pm2.5=%.1f%s%s\n", g_co2, g_co,
-                g_temp, g_hum, g_gas, g_pm25, stillPending ? "  STALE: " : "",
+  // Calypso status belongs here explicitly. Without it the only evidence about
+  // the wind sensor is three zeros in the payload, which cannot distinguish "no
+  // bytes arriving at all" from "bytes arriving but failing the checksum" - and
+  // those point at completely different faults. rx counts raw bytes seen.
+  Serial.printf("[read] co2=%.1f co=%.2f T%.1f H%.1f gas%.0f pm2.5=%.1f | wind=%s(rx=%u)"
+                "%s%s\n",
+                g_co2, g_co, g_temp, g_hum, g_gas, g_pm25,
+                !g_calypsoEnabled ? "off" : (g_windValid ? "OK" : "silent"),
+                calypso.lastReadBytes(), stillPending ? "  STALE: " : "",
                 stillPending ? pending : "");
+  if (g_windValid) {
+    Serial.printf("[wind] angle=%.1f deg  speed=%.2f\n", g_windAngle, g_windSpeed);
+  }
 }
 
 void loop() {
@@ -1144,10 +1301,30 @@ void loop() {
     return;  // never falls through to the sleep path while in pre-alarm
   }
 
+#if !SLEEP_ENABLED
+  // ---- CONTINUOUS (bench) ----
+  // Sample every pass, transmit on a timer. No sleeping, so the USB port stays up
+  // and the LED stays watchable for as long as you need.
+  readFastSensorsOnce();
+  updateAlarmState();
+  storeCurrentReading();
+
+  static uint32_t lastTxMs = 0;
+  if (millis() - lastTxMs >= NOSLEEP_TX_GAP_MS) {
+    lastTxMs = millis();
+    ledWorking();
+    transmitStore();
+    ledOff();
+  }
+  delay(SAMPLE_GAP_MS);
+  return;
+#endif
+
   // ---- NORMAL: one tick of work, then sleep ----
   // Both counters were advanced in setup(); this decides what this tick owes.
-  bool readDue = (g_sensorReadCount >= g_sensorReadEvery);
-  bool txDue = (g_loraTransCount >= g_loraTransEvery);
+  // Decided in setup(), before anything was powered - see the idle-tick bail-out.
+  bool readDue = g_readDue;
+  bool txDue = g_txDue;
 
   if (readDue) {
     g_sensorReadCount = 0;

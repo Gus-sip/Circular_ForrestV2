@@ -79,3 +79,14 @@
 #define PIN_LORA_EN 13
 #define PIN_LORA_EN_ACTIVE LOW
 #define PIN_LORA_EN_SETTLE_MS 200
+
+// ---------- Status LED (GPIO21) ----------
+// Addressable WS2812 on the module, driven with neopixelWrite(). Confirmed 21 by
+// sweeping every safe GPIO - it is NOT the esp32s3 variant's PIN_NEOPIXEL 48, and
+// not the GPIO38 some boards use.
+//
+// Never drive it via RGB_BUILTIN: the variant defines that as
+// SOC_GPIO_PIN_COUNT + PIN_NEOPIXEL = 97, a sentinel digitalWrite() special-cases.
+// neopixelWrite() wants a real GPIO, so 97 addresses a pin that does not exist and
+// lights nothing, silently.
+#define PIN_STATUS_LED 21

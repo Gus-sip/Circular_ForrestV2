@@ -1,5 +1,130 @@
 # CHIP FOREST - Session Status
 
+## 2026-09-09 - Sleep cycle causes the brownouts, not a short; LED found; Calypso silent
+
+### THE BOARD IS SHIPPED WITH SLEEP DISABLED
+
+`SLEEP_ENABLED 0` in `chip_forest_lora_tx.cpp`. In that mode the node stays awake,
+samples continuously and transmits every `NOSLEEP_TX_GAP_MS` (15s) - the tick
+counters cannot drive it without reboots, so they would sit at 1/3 forever. Set it
+back to 1 to re-enable the tick cycle. **Do not forget this is off.**
+
+### The brownouts are the sleep cycle, not a hardware short
+
+This corrects yesterday's diagnosis. Node C1 was recorded as having a shorted 5V
+rail on the strength of a gate sweep: every combination with GPIO11 HIGH browned
+out, every one with it LOW survived. That reading was wrong.
+
+With `SLEEP_ENABLED 0`, node C1 - same board, same rails, GPIO11 held HIGH
+throughout - runs cleanly:
+
+```
+TX attempts:  7      (all "sent")
+sensor reads: 23
+resets:       1      (the reflash)
+```
+
+With the sleep cycle running, the same board: 11 resets and 3 true power losses in
+four minutes, and **zero** transmits - it died at `Tick: 3/3`, the working tick,
+every time.
+
+So the fault is the sleep cycle's rail handling. Every wake latches all three rails
+off, then releases and re-asserts them together, which is an inrush event on every
+working tick. Steady-state the supply is fine, which is what the user's voltage
+measurements found. A surge the supply cannot absorb and a short look identical
+from firmware; they are not the same thing.
+
+**Next step:** stagger the rail bring-up - 3V3, settle, 5V, settle, LoRa, settle -
+instead of asserting GPIO10 and GPIO11 together. If that is not enough, test
+keeping the rails powered through sleep, which sacrifices most of the saving but
+would confirm inrush as the whole story.
+
+### Node C2 will not run on the bench supply
+
+Reproduced in four minutes what the overnight test showed in twenty hours: C2
+transmits every ~76s on USB, and stops dead the moment USB is removed. The
+overnight run captured **zero** packets; C2's RTC counters had been wiped, so it
+had lost power entirely and its record of the night with it.
+
+Bench supply: ~6V injected ahead of two **step-down** converters (5V and 3V3).
+Initially it read 5.25V at 0.150A - the voltage sag was the supply in
+constant-current mode against a 150mA limit, and at 5.25V in, the 5V buck has only
+250mV of headroom, below dropout. Raising the limit did not fix it, and the board
+still draws a flat 150mA with no pulsing - meaning it never reaches the sleep call
+at all. Unresolved.
+
+### LED found on GPIO21, and the trap that hid it
+
+`PIN_STATUS_LED 21` in pins.h. Three wrong answers first, all of which compiled
+cleanly and failed silently:
+
+- `RGB_BUILTIN` is **97**, not a pin. The esp32s3 variant defines it as
+  `SOC_GPIO_PIN_COUNT + PIN_NEOPIXEL`, a sentinel `digitalWrite()` special-cases.
+  `neopixelWrite()` wants a real GPIO, so 97 addressed a pin that does not exist.
+- The variant's `PIN_NEOPIXEL 48` is wrong for these modules. Some boards
+  (Waveshare ESP32-S3-DEV-KIT-N8R8) use GPIO38; ours is 21.
+- An `#ifdef RGB_BUILTIN` guard added "for safety" made a wrong-pin bug look like
+  a missing-macro bug.
+
+The indicator now has three states: **green flash** on every wake (including idle
+ticks), **yellow** held for the whole of a working tick, **off** asleep. Each state
+is driven both as WS2812 and as a plain level, since the pin is known but the type
+is not.
+
+### Idle ticks no longer power anything
+
+The tick decision moved from `loop()` into `setup()`, before any rail is touched.
+Previously every wake brought up all three rails, paid the BMV080's 5s preheat and
+initialised the radio, then discovered it had nothing to do - two ticks in three
+were pure waste, and the measured cadence was 76s against a configured 30s.
+
+Also fixed: **the tick counters were never incremented at all.** They were
+declared, reset in five places and compared against their thresholds, but nothing
+advanced them, so the node would have slept forever without ever reading or
+transmitting. It failed silently and looked like healthy low-power behaviour.
+
+### Confirmed working
+
+- **CM1106 self-recovery.** Detected 20 consecutive frozen values, power-cycled EN,
+  and the reading genuinely moved: 622 -> 500.
+- **Batch transmit.** `TX [0..3/4] 228 bytes: B,4,...` - four readings in one
+  packet, inside the 240-byte cap.
+
+### Calypso: silent, and it is physical
+
+Twelve combinations - GPIO8 and GPIO9 x six baud rates - all **0 bytes**. Not bad
+checksums, not garbled framing: nothing arrives at all. Our own pads self-echo, so
+the UART is good, and the user measured 5V present at the sensor itself.
+
+It worked on the old setup - the CSV from 2026-09-03 has `windAngle=336.00,
+windSpeed=0.50, windValid=1` - so the sensor was good then. That points at the
+wiring on this PCB rather than a dead part.
+
+Remaining checks are continuity: sensor TX pad to GPIO8, and sensor GND to board
+GND. A missing shared ground has faked a dead peripheral twice on this project.
+
+### Hardware inventory
+
+| | MAC | Notes |
+|---|---|---|
+| node C1 | `AC:27:6E:CB:8D:A8` | Calypso soldered. Runs with sleep off; brownouts with it on |
+| node C2 | `28:84:85:6F:8F:CC` | Works on USB, will not run on the bench supply |
+| node C3 | `28:84:85:6F:92:A4` | New this session, blank flash on arrival |
+| Module B | `28:84:85:6F:8F:DC` | Healthy. Now on its own supply, so not observable over USB |
+
+### New tools
+
+- `env:module-c-rail-sweep` - walks all 8 GPIO10/11/13 combinations, recording
+  verdicts to **NVS** rather than RTC, because the brownout being measured wipes
+  the RTC domain.
+- `env:module-c-led-hunt` - drives each PCB-free GPIO HIGH/LOW then as WS2812.
+  Restricted to pins the design does not use, so it is safe on a populated board.
+- `env:module-c-led-test` - reports what the build defines for the LED, then sweeps
+  candidate pins.
+- `logs/overnight_summary.py` - digests the Module B CSV into ~15 lines: packet
+  count, span, mean gap, gaps over 2 minutes with timestamps, and min/max/last per
+  field with a FLAT marker on anything that never changed.
+
 ## 2026-09-08 - Rail gate polarity found; CM1106 was never faulty
 
 Two long-standing mysteries resolved, and they turned out to be one bug and one
