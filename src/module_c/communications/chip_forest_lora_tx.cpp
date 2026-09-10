@@ -91,6 +91,7 @@
 #include "radio/RYLR998.h"
 #include <esp_system.h>
 #include <esp_sleep.h>
+#include <Preferences.h>
 #include <driver/gpio.h>
 
 // ---------- RYLR998 wiring - GPIO4/5 are unused by pins.h's sensor map ----------
@@ -663,6 +664,146 @@ static void step(const char *what) {
   delay(20);
 }
 
+// ---------------- Boot guard (NVS) ----------------
+// The RTC boot counter reports "true power-on" on EVERY reset, which means the RTC
+// domain is being lost - the supply is actually collapsing, not a task crashing.
+// RTC RAM cannot measure that, because the event being measured destroys it.
+//
+// NVS lives in flash and survives a power loss, so it can. If the NVS count climbs
+// 1, 2, 3, 4 while the RTC counter reads 1 every boot, the supply theory is
+// confirmed outright - two counters, same resets, only one of them survives.
+//
+// It also drives safe mode: after three consecutive boots with no run long enough
+// to be called good, the rails are left OFF so the port stays usable for
+// reflashing instead of the board looping forever.
+static Preferences bootStore;
+static uint32_t nvsBoots = 0;
+
+static void bootGuardBegin() {
+  bootStore.begin("boot", false);
+  nvsBoots = bootStore.getUInt("n", 0) + 1;
+  bootStore.putUInt("n", nvsBoots);
+  Serial.printf("NVS boot count (survives power loss): %lu\n", (unsigned long)nvsBoots);
+  Serial.flush();
+}
+
+// Called once a run has lasted long enough to count as healthy.
+static void bootGuardMarkGood() {
+  bootStore.putUInt("n", 0);
+  Serial.println("Boot guard: run marked good, NVS counter cleared");
+  Serial.flush();
+}
+
+// Rails brought up one at a time, with USB given time to enumerate first.
+// Switching both rails at the same instant draws enough inrush to pull VBUS down
+// through the FETs - the Calypso on 5V plus the bulk caps on both rails is close
+// to a short for the first few milliseconds.
+//
+// The delays are DEBUG values. Once it boots reliably, walk them down to find
+// where it breaks: that number is how much soft-start the deployment firmware
+// needs, and it matters because on solar plus supercaps there is no USB port
+// propping the rail up.
+// Soft-start a rail gate by ramping it with PWM instead of switching it hard.
+//
+// Switching a FET fully on in one step makes the rail's bulk capacitance look
+// like a short for the first few milliseconds - the inrush is limited only by
+// ESR and trace resistance. The board survives WRITING GPIO11 high and dies in
+// the settle window straight after, which is that inrush, not the instruction.
+//
+// Ramping the gate keeps the FET partly on during the ramp, so it acts as a
+// current limiter while the caps charge. The cost is that the FET spends the ramp
+// in its linear region dissipating power, which is why the ramp is kept short -
+// this is a soft-start, not a regulator.
+//
+// SOFTSTART_MS is a DEBUG value. Once it boots reliably, walk it down to find
+// where it breaks; that number is the soft-start the deployment firmware needs,
+// and it matters because on solar plus supercaps nothing else is propping the
+// rail up.
+#define SOFTSTART_CHANNEL 0
+#define SOFTSTART_FREQ_HZ 20000
+#define SOFTSTART_RES_BITS 8
+#define SOFTSTART_STEPS 64
+#define SOFTSTART_MS 400
+
+static void softStartRail(int pin, int activeLevel, const char *name) {
+  Serial.printf("%s: soft-start ramp over %dms\n", name, SOFTSTART_MS);
+  Serial.flush();
+
+  ledcSetup(SOFTSTART_CHANNEL, SOFTSTART_FREQ_HZ, SOFTSTART_RES_BITS);
+  ledcAttachPin(pin, SOFTSTART_CHANNEL);
+
+  const int maxDuty = (1 << SOFTSTART_RES_BITS) - 1;
+  for (int i = 0; i <= SOFTSTART_STEPS; i++) {
+    int duty = (maxDuty * i) / SOFTSTART_STEPS;
+    // An active-LOW gate turns on as duty falls, so the ramp runs the other way.
+    ledcWrite(SOFTSTART_CHANNEL, (activeLevel == LOW) ? (maxDuty - duty) : duty);
+    delay(SOFTSTART_MS / SOFTSTART_STEPS);
+  }
+
+  // Hand the pin back to plain GPIO, fully on. Leaving it on PWM would keep the
+  // FET switching forever and put ripple on the rail.
+  ledcDetachPin(pin);
+  pinMode(pin, OUTPUT);
+  digitalWrite(pin, activeLevel);
+
+  Serial.printf("%s: ramp complete, gate held %s\n", name, activeLevel == LOW ? "LOW" : "HIGH");
+  Serial.flush();
+}
+
+static void enableRails(bool safeMode) {
+  pinMode(PIN_PCB_EN_A, OUTPUT);
+  pinMode(PIN_PCB_EN_B, OUTPUT);
+  // Both OFF first - each gate's own inactive level, since the two are opposite.
+  digitalWrite(PIN_PCB_EN_A, (PIN_PCB_EN_A_ACTIVE == LOW) ? HIGH : LOW);
+  digitalWrite(PIN_PCB_EN_B, (PIN_PCB_EN_B_ACTIVE == LOW) ? HIGH : LOW);
+
+  if (safeMode) {
+    Serial.println("SAFE MODE: rails stay off, port is yours");
+    Serial.println("  (3 boots without a good run - clear it by flashing again)");
+    Serial.flush();
+    return;
+  }
+
+  delay(2000);  // let USB enumerate before anything loads VBUS
+  // A print before AND after each write. "about to" surviving but "asserted" not
+  // means it dies in the write itself; both surviving but not "settled" means it
+  // dies during the delay that follows. Those are different faults.
+  Serial.println("3V3: about to assert");
+  Serial.flush();
+  digitalWrite(PIN_PCB_EN_A, PIN_PCB_EN_A_ACTIVE);
+  Serial.println("3V3: asserted");
+  Serial.flush();
+  delay(500);
+  Serial.println("3V3: settled");
+  Serial.flush();
+
+  // Plain write, exactly as the minimal rail sketch does it - that sketch holds
+  // this same rail for 80+ seconds with zero resets, so making this identical
+  // removes soft-start as a variable. (Soft-start made it die EARLIER, mid-ramp,
+  // which argued against inrush being the cause anyway.)
+  Serial.println("5V: about to assert (plain write)");
+  Serial.flush();
+  digitalWrite(PIN_PCB_EN_B, PIN_PCB_EN_B_ACTIVE);
+  Serial.println("5V: asserted");
+  Serial.flush();
+  delay(500);
+  Serial.println("5V: settled");
+  Serial.flush();
+
+  Serial.println("LoRa: about to assert");
+  Serial.flush();
+  pinMode(PIN_LORA_EN, OUTPUT);
+  digitalWrite(PIN_LORA_EN, PIN_LORA_EN_ACTIVE);
+  Serial.println("LoRa: asserted");
+  Serial.flush();
+  delay(500);
+
+  Serial.println("rails up");
+  Serial.flush();
+}
+
+static bool g_safeMode = false;
+
 // Defined below, but setup() must be able to sleep before it ever powers a rail.
 static void enterDeepSleep(const char *why);
 
@@ -684,6 +825,10 @@ void setup() {
 
   Serial.println();
   Serial.println("=== CHIP FOREST + LoRa TX: sensors -> RYLR998 -> ground station ===");
+  Serial.flush();
+
+  // First, before any rail is touched: the NVS counter that survives a power loss.
+  bootGuardBegin();
   esp_reset_reason_t rr = esp_reset_reason();
   const char *rrName = rr == ESP_RST_POWERON    ? "POWERON"
                        : rr == ESP_RST_EXT      ? "EXT"
@@ -782,36 +927,45 @@ void setup() {
   // Deep sleep left these pads latched (see kHeldGates). Nothing can drive them
   // until the hold is released, so this must happen before the pinMode calls
   // below - otherwise the writes are silently ignored and the rails stay off.
+  // BISECT: gpio_hold is the one thing the minimal rail sketch never touches, and
+  // that sketch holds these same rails for 80+ seconds. If a previous deep-sleep
+  // run latched these pads, releasing the hold here is a candidate for the rail
+  // misbehaving on assert. Disabled to test that.
+#if 0
   for (size_t i = 0; i < sizeof(kHeldGates) / sizeof(kHeldGates[0]); i++) {
     gpio_hold_dis(kHeldGates[i]);
   }
   gpio_deep_sleep_hold_dis();
+#endif
 
-  // PCB enable lines first - before Wire.begin() and every sensor begin().
-  // If these gate sensor power rails, nothing downstream can be probed until
-  // they're asserted. See pins.h.
-  pinMode(PIN_PCB_EN_A, OUTPUT);
-  digitalWrite(PIN_PCB_EN_A, PIN_PCB_EN_A_ACTIVE);
-  pinMode(PIN_PCB_EN_B, OUTPUT);
-  digitalWrite(PIN_PCB_EN_B, PIN_PCB_EN_B_ACTIVE);
-  // The two gates have OPPOSITE polarity - printing one level for both claimed
-  // GPIO11 was LOW when it is in fact driven HIGH, which is exactly the sort of
-  // log that sends someone chasing the wrong thing.
-  Serial.printf("PCB enable: GPIO%d=%s (3V3), GPIO%d=%s (5V), settling %dms\n", PIN_PCB_EN_A,
-                PIN_PCB_EN_A_ACTIVE == LOW ? "LOW" : "HIGH", PIN_PCB_EN_B,
-                PIN_PCB_EN_B_ACTIVE == LOW ? "LOW" : "HIGH", PIN_PCB_EN_SETTLE_MS);
-  delay(PIN_PCB_EN_SETTLE_MS);
+  // Rails one at a time, with USB given time to enumerate first - see enableRails().
+  // Safe mode after three boots without a good run leaves them off entirely, so a
+  // board that cannot hold its supply still gives back a usable serial port.
+  // Threshold raised from 3: while the failure is being reproduced deliberately,
+  // a 3-boot trigger hijacks every test run before the interesting output appears.
+  g_safeMode = (nvsBoots >= 12);
+  enableRails(g_safeMode);
 
-  // LoRa rail gate. Nothing in this firmware drove GPIO13 before - the radio only
-  // ever worked because its VDD was bridged to 3V3 by hand while diagnosing the
-  // floating-ground fault. Pull that bypass wire without this and the radio goes
-  // silent again, looking like a fresh fault. Also required before enterDeepSleep()
-  // can write this pin at all.
-  pinMode(PIN_LORA_EN, OUTPUT);
-  digitalWrite(PIN_LORA_EN, PIN_LORA_EN_ACTIVE);
-  Serial.printf("LoRa rail: GPIO%d driven %s, settling %dms\n", PIN_LORA_EN,
-                PIN_LORA_EN_ACTIVE == LOW ? "LOW" : "HIGH", PIN_LORA_EN_SETTLE_MS);
-  delay(PIN_LORA_EN_SETTLE_MS);
+  // ---- BISECT (temporary) ----
+  // The minimal rail sketch holds all three rails for 80+ seconds with zero
+  // resets, while this firmware dies at the same pin write - so the hardware is
+  // fine and something here is at fault. The failure point has also moved every
+  // time the code changed, which points at corruption rather than a fixed bug.
+  //
+  // This stops setup() right after the rails: no sensors, no radio, no I2C, no
+  // UARTs. If it survives, the fault is in what comes AFTER; if it still dies,
+  // the fault is in what comes BEFORE. Remove once that is known.
+#if 1
+  Serial.println("[bisect] stopping after rails - no sensor or radio init");
+  Serial.flush();
+  g_safeMode = true;  // makes loop() idle instead of trying to read
+  return;
+#endif
+  if (g_safeMode) {
+    Serial.println("Rails off - skipping sensor and radio init this boot.");
+    Serial.flush();
+    return;  // nothing below can work without power
+  }
 
   power.enable3V3Sensors();
   Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
@@ -1283,6 +1437,28 @@ static void readFastSensorsOnce() {
 }
 
 void loop() {
+  // A run that lasts this long counts as healthy, so the NVS counter is cleared and
+  // the next boot starts from zero. Without this every reflash would eventually
+  // trip safe mode. 15s comfortably exceeds the time the board has been surviving.
+  static bool markedGood = false;
+  if (!markedGood && millis() > 15000) {
+    markedGood = true;
+    bootGuardMarkGood();
+  }
+
+  // Safe mode: rails are off, so there is nothing to read or transmit. Hold the
+  // port open and say so, rather than looping through code that cannot work.
+  if (g_safeMode) {
+    static uint32_t lastSaid = 0;
+    if (millis() - lastSaid > 5000) {
+      lastSaid = millis();
+      Serial.println("[safe mode] rails off, waiting - reflash to clear");
+      Serial.flush();
+    }
+    delay(200);
+    return;
+  }
+
   // ---- PRE-ALARM: no sleeping, every sensor, continuously ----
   // The node stays awake and keeps reading until the readings settle or Module A
   // clears it. Transmits still follow the lora_trans schedule so the link is not

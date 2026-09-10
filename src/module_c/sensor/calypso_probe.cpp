@@ -35,7 +35,7 @@
 static const uint32_t kBaudSweep[] = {38400, 9600, 4800, 19200, 57600, 115200};
 
 // Long enough to catch several sentences at this sensor's output rate.
-#define LISTEN_MS 4000UL
+#define LISTEN_MS 8000UL
 
 // Counts printable NMEA-looking content, so a run of framing garbage at the wrong
 // baud is not mistaken for a working link.
@@ -94,7 +94,48 @@ void setup() {
                 PIN_PCB_EN_A_ACTIVE == LOW ? "LOW" : "HIGH", PIN_PCB_EN_B,
                 PIN_PCB_EN_B_ACTIVE == LOW ? "LOW" : "HIGH");
   delay(PIN_PCB_EN_SETTLE_MS);
-  delay(1500);  // let the sensor boot and start streaming
+  // Long boot wait. Power and wiring are confirmed, so the untested variable is
+  // TIME: an ultrasonic anemometer may run a self-test for several seconds before
+  // it streams anything. The previous 1.5s wait plus a 4s listen would have closed
+  // every window before such a sensor said its first word - producing exactly the
+  // zero-byte result we saw, with nothing actually wrong.
+  Serial.println("Waiting 20s for the sensor to boot before listening...");
+  for (int i = 20; i > 0; i -= 5) {
+    Serial.printf("  %ds\n", i);
+    Serial.flush();
+    delay(5000);
+  }
+
+  // Straight listen at the documented baud, long and uninterrupted, printing bytes
+  // as they arrive. If the sensor is alive but slow, this catches it.
+  Serial.println("\n--- long listen: GPIO8 @ 38400, 20s, printing as it arrives ---");
+  {
+    windSerial.begin(CALYPSO_BAUD, SERIAL_8N1, PIN_CALYPSO_RX, PIN_CALYPSO_TX);
+    size_t n = 0;
+    uint32_t start = millis();
+    while (millis() - start < 20000) {  // 20s - the 3-minute silence is already established
+      if (windSerial.available()) {
+        char ch = (char)windSerial.read();
+        if (n == 0) Serial.print("  ");
+        if (ch >= 32 && ch < 127) Serial.write(ch);
+        else if (ch == 10) Serial.print("<LF>\n  ");
+        else if (ch == 13) Serial.print("<CR>");
+        else Serial.printf("<%02X>", (uint8_t)ch);
+        n++;
+      }
+      // A heartbeat every 30s, so three silent minutes is visibly a silent sensor
+      // rather than a hung probe.
+      static uint32_t lastTick = 0;
+      if (millis() - lastTick >= 30000) {
+        lastTick = millis();
+        Serial.printf("    [%lus elapsed, %u bytes so far]\n",
+                      (unsigned long)((millis() - start) / 1000), (unsigned)n);
+      }
+    }
+    Serial.printf("\n  -> %u bytes%s\n", (unsigned)n,
+                  n == 0 ? "  (still nothing)" : "");
+    windSerial.end();
+  }
 
   // ---- Phase A: prove our own pad before judging the sensor ----
   // RX and TX muxed onto one pad: the ESP reads back what it drove. A verdict from
@@ -147,6 +188,48 @@ void setup() {
         liveRx = rxCandidates[p];
         liveBaud = kBaudSweep[i];
         break;
+      }
+    }
+  }
+
+  // ---- Phase C: is the sensor's TX on some OTHER pin entirely? ----
+  // Power, ground and wiring are all confirmed, and GPIO8/GPIO9 are silent at every
+  // baud - so the last firmware-testable possibility is that its TX lands somewhere
+  // we have not looked. This is not idle doubt: the schematic names LoRa nets from
+  // the MCU's point of view but sensor nets from the sensor's, and that
+  // inconsistency already produced one wrong pin map for this exact sensor.
+  //
+  // Listening only ever configures a pin as an input, so this is safe even on pins
+  // the PCB uses for other things - it cannot drive a rail, corrupt the I2C bus or
+  // talk over another sensor's UART.
+  //
+  // 38400 only. The sensor streams unprompted, so if it is alive on any of these we
+  // will see bytes; even at a wrong baud we would see framing garbage, which the
+  // byte count catches.
+  if (liveRx < 0) {
+    Serial.println("\n--- phase C: listening on every other pin @ 38400 ---");
+    const int otherPins[] = {1,  2,  3,  4,  5,  6,  7,  12, 14, 15, 16,
+                             17, 18, 21, 38, 39, 40, 41, 42, 45, 46, 47, 48};
+    for (size_t i = 0; i < sizeof(otherPins) / sizeof(otherPins[0]); i++) {
+      int pin = otherPins[i];
+      windSerial.end();
+      windSerial.begin(CALYPSO_BAUD, SERIAL_8N1, pin, PIN_CALYPSO_TX);
+      delay(60);
+      while (windSerial.available()) windSerial.read();
+
+      ListenResult r = listen(2000);
+      if (r.bytes > 0) {
+        Serial.printf("  GPIO%-2d: %u bytes, %u dollar%s  |  %s\n", pin, (unsigned)r.bytes,
+                      (unsigned)r.dollarSigns, r.sawMWV ? ", MWV seen" : "", r.sample);
+        if (r.sawMWV || r.dollarSigns >= 2) {
+          Serial.printf("\n  *** SENSOR FOUND ON GPIO%d - pins.h says %d ***\n", pin,
+                        PIN_CALYPSO_RX);
+          liveRx = pin;
+          liveBaud = CALYPSO_BAUD;
+          break;
+        }
+      } else {
+        Serial.printf("  GPIO%-2d: silent\n", pin);
       }
     }
   }
