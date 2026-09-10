@@ -77,6 +77,7 @@
  */
 
 #include <Arduino.h>
+#include <Adafruit_NeoPixel.h>
 #include <Wire.h>
 #include <string.h>
 #include <stdlib.h>
@@ -203,50 +204,111 @@
 //                 transmitting. Its duration shows how long a working tick takes.
 //   OFF           asleep.
 //
-// So a healthy node at the default 3/3 counters reads as: green blink, dark,
-// green blink, dark, green blink then a yellow stretch - repeating. Green with no
-// yellow every third tick means ticks are being counted but work is not
-// happening; yellow that never goes out means it is stuck awake.
+// At the default 3 read / 4 transmit counters a healthy node reads as: green wave,
+// dark, green wave, dark, green wave then a yellow stretch (the read), then next
+// tick a green wave and a shorter yellow stretch (the transmit). Green with no
+// yellow ever means ticks are being counted but work is not happening; yellow that
+// never goes out means it is stuck awake.
 //
-// Brightness is moderate and single-to-dual channel. Full white on a WS2812 is
-// ~60mA, rivalling the BMV080 laser; this costs a fraction of that, and the green
-// flash is brief by design because it fires on every tick including idle ones.
+// Note the read and transmit schedules are INDEPENDENT counters, each resetting on
+// its own threshold - 3 and 4 share no common factor below 12, so which tick of a
+// frame carries the transmit drifts, and every 12th tick does both at once.
+//
+// BRIGHTNESS IS A POWER DECISION HERE, not a cosmetic one.
+//
+// These were 120 and 120/80, described in a comment as "a few percent of full
+// scale". That was simply wrong - 120/255 is nearly half, on two channels at once.
+// It went unnoticed for as long as it did because the LED was not lighting AT ALL:
+// the colour order was wrong (see ledWrite), so the pixel was being driven with a
+// frame it never accepted and drew almost nothing.
+//
+// The moment the colour order was fixed and the LED actually lit, the board began
+// taking POWERON resets - a true supply collapse, not a software fault. A WS2812
+// at full white is ~60mA, rivalling the BMV080 laser, and the yellow state is HELD
+// for the whole working tick including the radio's ~120mA transmit burst. That is
+// precisely the concurrent-load pattern that this firmware's sequential slots exist
+// to avoid.
+//
+// So: low enough to be cheap, high enough to see across a room. A WS2812 is very
+// bright - 30/255 is comfortably visible indoors and costs single-digit mA.
 #define LED_GREEN_R 0
-#define LED_GREEN_G 120
+#define LED_GREEN_G 30
 #define LED_GREEN_B 0
-#define LED_YELLOW_R 120
-#define LED_YELLOW_G 80
+#define LED_YELLOW_R 30
+#define LED_YELLOW_G 18
 #define LED_YELLOW_B 0
 #define LED_FLASH_MS 120
 
-// Each state is driven BOTH ways, because we know the pin (GPIO21) but not the
-// type. neopixelWrite() first - which lights a WS2812 and leaves a plain LED dark
-// - then a millisecond for a WS2812 to latch its colour, then a plain level. A
-// WS2812 holds what it latched and ignores the steady level that follows; a plain
-// LED responds to that level. Whichever is fitted, one of the two lights it and
-// the other does nothing.
+// Wake indicator shape: a smooth ramp up and back down rather than a hard blink.
 //
-// Consequence worth knowing: on a plain single-colour LED the green/yellow
-// distinction collapses to on/off, so the wake flash and the working state look
-// the same. The timing still distinguishes them - a 120ms blink versus a hold of
-// several seconds.
+// Only the WS2812 path actually fades - the brightness is carried in the RGB
+// values sent to it. The plain-level fallback in ledWrite() is a bare digital pin
+// with no PWM behind it, so on a plain LED this still reads as a flash, just a
+// longer one. GPIO21 on these boards is a WS2812, so the wave is what shows.
+//
+// COST, because this fires on EVERY wake including idle ticks: an idle tick was
+// otherwise almost free - a few hundred milliseconds awake at ~40mA. A 500ms wave
+// roughly doubles that, which on solar is a real number, not a rounding error.
+// Worth it on the bench where the point is to SEE the node working; turn
+// LED_WAVE_MS down (or back to ledFlashWake) for deployment.
+#define LED_WAVE_MS 500
+#define LED_WAVE_STEPS 24
+
+// This LED is NEO_RGB, NOT the WS2812B-standard NEO_GRB that neopixelWrite()
+// hardcodes. Established on node C2 by sweeping all six colour orders and asking
+// each for pure green - only NEO_RGB actually showed green.
+//
+// That mismatch is why every colour was wrong, and why it could not be fixed by
+// swapping channels: neopixelWrite() puts the green byte first on the wire, this
+// part reads the first byte as red, so the error is in the FRAME rather than in
+// the arguments. Single-channel probing gave results no permutation could explain
+// (one channel producing teal) and two runs contradicted each other. A driver with
+// an explicit colour order settles it; do not "simplify" this back to
+// neopixelWrite().
+//
+// The old implementation also did a plain digitalWrite() after the pixel write, to
+// cover the LED being a plain one rather than addressable. That is gone: the type
+// is now known, and holding the data line HIGH between frames corrupts the timing
+// of the next frame.
+static Adafruit_NeoPixel g_statusLed(1, PIN_STATUS_LED, NEO_RGB + NEO_KHZ800);
+static bool g_ledBegun = false;
+
 static void ledWrite(uint8_t r, uint8_t g, uint8_t b, bool level) {
-  neopixelWrite(PIN_STATUS_LED, r, g, b);
-  delay(1);
-  pinMode(PIN_STATUS_LED, OUTPUT);
-  digitalWrite(PIN_STATUS_LED, level ? HIGH : LOW);
+  (void)level;  // legacy plain-LED argument, no longer meaningful
+  if (!g_ledBegun) {
+    g_statusLed.begin();
+    g_ledBegun = true;
+  }
+  g_statusLed.setPixelColor(0, g_statusLed.Color(r, g, b));
+  g_statusLed.show();
 }
 
 static void ledOff() {
   ledWrite(0, 0, 0, false);
 }
 
-// Brief green blink: "I woke up". Fires on every wake, so it is kept short - it
-// is the one LED cost paid by idle ticks, which are otherwise nearly free.
-static void ledFlashWake() {
-  ledWrite(LED_GREEN_R, LED_GREEN_G, LED_GREEN_B, true);
-  delay(LED_FLASH_MS);
+// One wave: fade up to full colour and back down. Blocking, like everything else
+// on the wake path.
+//
+// The triangle is computed as a level 0..half..0 and scaled into each channel, so
+// a colour with a zero channel (green is 0,120,0) stays that colour throughout
+// rather than drifting hue as it fades.
+static void ledWave(uint8_t r, uint8_t g, uint8_t b) {
+  const int half = LED_WAVE_STEPS / 2;
+  const int stepMs = LED_WAVE_MS / LED_WAVE_STEPS;
+  for (int i = 0; i <= LED_WAVE_STEPS; i++) {
+    int level = (i <= half) ? i : (LED_WAVE_STEPS - i);  // 0 -> half -> 0
+    ledWrite((uint8_t)((int)r * level / half), (uint8_t)((int)g * level / half),
+             (uint8_t)((int)b * level / half), level > 0);
+    delay(stepMs);
+  }
   ledOff();
+}
+
+// Green wave: "I woke up". Fires on every wake, idle ticks included, so a missing
+// wave is the node failing to wake at all.
+static void ledFlashWake() {
+  ledWave(LED_GREEN_R, LED_GREEN_G, LED_GREEN_B);
 }
 
 // Held for the whole of a working tick, not blinked, so its length is meaningful.
@@ -303,7 +365,7 @@ static void ledWorking() {
 // goes straight back to sleep - that is what makes a 10s tick affordable, since
 // the BMV080's startup alone would otherwise cost 5s of every 10s tick.
 #define SENSOR_READ_EVERY_DEFAULT 3
-#define LORA_TRANS_EVERY_DEFAULT 3
+#define LORA_TRANS_EVERY_DEFAULT 4
 #define COUNTER_EVERY_MIN 1
 #define COUNTER_EVERY_MAX 360           // 1 hour at a 10s tick
 
@@ -394,7 +456,7 @@ RYLR998 radio(Serial0, LORA_RX_PIN, LORA_TX_PIN);  // UART0 is free - UART1/UART
 // the RTC domain powered, and is only lost on genuine power loss - which is
 // exactly the distinction being measured. It starts as garbage at true power-on,
 // hence the magic word.
-#define BOOTCOUNT_MAGIC 0xC0FFEE01UL
+#define BOOTCOUNT_MAGIC 0xC0FFEE02UL  // bumped: re-seeds thresholds + re-syncs counters
 RTC_NOINIT_ATTR uint32_t g_bootMagic;
 RTC_NOINIT_ATTR uint32_t g_bootCount;
 
@@ -1149,6 +1211,34 @@ enum Slot {
 // starts rather than the two meeting at the changeover.
 #define SLOT_GAP_MS 250UL
 
+// Settling time after the sensor rails are cut and before the radio transmits.
+// Long enough for the rails to actually discharge their loads and for whatever
+// bulk capacitance is on the supply to recover before the burst.
+#define TX_RAIL_SETTLE_MS 400UL
+
+// Sensor RAILS off - not merely the sensors idled.
+//
+// quiesceAll() stops the BMV080 measuring and drops the CM1106's EN line, but
+// leaves both sensor rails powered, so every part on them keeps drawing its idle
+// current through the transmit. Measured consequence: the board takes a POWERON
+// reset - a true supply collapse - immediately after "Setup complete." on a
+// transmit tick, i.e. exactly at radio.send().
+//
+// The radio needs neither rail. So the transmit gets a genuinely exclusive slot:
+// 3V3 and 5V off, LoRa rail left up, settle, then send. This is the same principle
+// that fixed the sensor resets, applied to the one load that was still sharing.
+//
+// The rails are NOT brought back afterwards - a transmit is the last thing a tick
+// does before sleeping, and enterDeepSleep() switches them off anyway. On a tick
+// that both reads and transmits, the read has already finished by this point.
+static void powerDownSensorRails() {
+  digitalWrite(PIN_PCB_EN_A, (PIN_PCB_EN_A_ACTIVE == LOW) ? HIGH : LOW);
+  digitalWrite(PIN_PCB_EN_B, (PIN_PCB_EN_B_ACTIVE == LOW) ? HIGH : LOW);
+  Serial.println("[tx] sensor rails off for the transmit");
+  Serial.flush();
+  delay(TX_RAIL_SETTLE_MS);
+}
+
 // Everything off. Called between slots and before every transmit, so the radio's
 // ~120mA burst never lands on top of a laser or a warming heater.
 static void quiesceAll() {
@@ -1371,10 +1461,12 @@ static void transmitStore() {
                   (unsigned long)g_storeDropped);
   }
 
-  // Every sensor off before the radio transmits. The RYLR998 pulls ~120mA on a
-  // send; that burst must not land on top of a laser or a warming heater.
+  // Every sensor off before the radio transmits, then the rails they sit on. The
+  // RYLR998 pulls ~120mA on a send and this board cannot supply that on top of the
+  // sensor rails' idle draw - it browns out at radio.send() if they are left up.
   quiesceAll();
   delay(SLOT_GAP_MS);
+  powerDownSensorRails();
 
   char packet[241];
   uint16_t sent = 0;
@@ -1419,7 +1511,13 @@ static void transmitStore() {
     if (len < 0) len = 0;
     if (len >= (int)sizeof(packet)) len = (int)sizeof(packet) - 1;
 
+    // LED off across the send itself. The transmit burst is the tightest moment
+    // in the whole cycle, and the indicator must not be one of the loads competing
+    // with it - the same reasoning that quiesces the sensors just above. Yellow is
+    // restored immediately after, so it still reads as "working" to the eye.
+    ledOff();
     bool ok = radio.send(LORA_RX_ADDR, packet, (uint8_t)len);
+    ledWorking();
     Serial.printf("TX [%u..%u/%u] %d bytes: %s  (%s)\n", (unsigned)first, (unsigned)(sent - 1),
                   (unsigned)g_storeCount, len, packet, ok ? "sent" : "send FAILED");
   }
