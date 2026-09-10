@@ -1,5 +1,101 @@
 # CHIP FOREST - Session Status
 
+## 2026-09-10 (later) - SLEEP CYCLE WORKING END TO END ON C2
+
+Node C2 sleeps, wakes on schedule, reads, transmits, and Module B receives it.
+`env:module-c-lora-tx`, `SLEEP_ENABLED 1`.
+
+### Proof, from Module B's own serial
+
+```
++RCV addr=1 len=72  rssi=-30 snr=13  "31.07,21.78,940.66,15705.52,4.00,9.00,12.00,681.00,..."
++RCV addr=1 len=73  rssi=-29 snr=13  "31.36,22.96,940.62,17802.50,4.00,9.00,12.00,1079.00,..."
++RCV addr=1 len=116 rssi=-29 snr=12  "B,2,31.5,21.8,...;31.6,21.8,...;"
+```
+
+The third is the two-reading BATCH at the 12-tick realignment. BMV080 is
+reporting real particulates (pm1/pm2.5/pm10 = 4/9/12), not zeros. RSSI -29dBm.
+
+### The cycle as it now runs
+
+- 10s deep-sleep tick. Green LED wave on EVERY wake, idle ticks included.
+- Every 3rd tick: rails on, sensors read ONE AT A TIME, store, sleep. Yellow LED.
+- Every 4th tick: rails on, radio up, **sensor rails cut**, transmit, sleep.
+- Any other tick: wave, then straight back to sleep with no rail powered at all.
+
+3 and 4 do not divide evenly, so the two schedules drift and realign every 12
+ticks - that tick both reads and transmits, sending 2 readings. Every reading is
+still sent; only the grouping varies.
+
+### Fixed this session
+
+**1. LoRa transmit brownout.** The board took `POWERON` resets - true supply
+collapse - immediately after `Setup complete.` on EVERY transmit tick, at
+`radio.send()`. `quiesceAll()` stopped the sensors but left both rails powered, so
+everything on them kept drawing idle current under the RYLR998's ~120mA burst.
+Fix: `powerDownSensorRails()` cuts 3V3 and 5V, settles 400ms, then transmits. The
+radio needs an EXCLUSIVE slot, not merely idle neighbours - the sequential-sensor
+principle applied to the last load that was still sharing.
+
+**2. BME690 first read always fails.** Read 1 `Timeout`, read 2 OK, read 3 OK, on
+every boot. `getData()` treats any non-OK status from `bme69x_get_data()` as
+failure, and Bosch WARNINGS (e.g. `NO_NEW_DATA`) are positive status codes.
+Continuous sampling hid it by discarding one reading in a hundred; under sleep,
+every wake is a fresh `begin()` plus exactly ONE read - the one that always fails -
+so the BME690 sent nothing but zeros while reporting `OK` at init. Fix: a
+discarded priming read in `begin()` plus one retry in `read()`.
+
+**Generalises:** any sensor validated under continuous sampling must be
+re-validated under sleep. "First read after init" goes from a rare case to the
+ONLY case.
+
+**3. Status LED is NEO_RGB, not NEO_GRB.** `neopixelWrite()` hardcodes the
+WS2812B-standard GRB, so every colour was wrong. This was NOT a channel swap -
+single-channel probing gave results no permutation can explain (one channel
+producing teal) and two runs contradicted each other, because the error is in the
+FRAME: neopixelWrite puts the green byte first and this part reads the first byte
+as red. Settled by sweeping all six orders with `Adafruit_NeoPixel` and asking each
+for pure green. Do not revert this to `neopixelWrite`.
+
+**4. LED brightness was a power bug.** 120 and 120/80, commented as "a few percent
+of full scale" - actually nearly half, on two channels, held through the whole
+working tick. Unnoticed because the wrong colour order meant it never lit and drew
+almost nothing. Now 30 and 30/18, and blanked across the radio burst.
+
+**5. Module B logger dropped batches.** It required exactly 13 fields and skipped
+anything else, so `B,<n>,...` payloads - about one transmit in three - vanished.
+Now parses both, and uses each batch record's age-in-ticks to BACKDATE its
+timestamp, so a batched reading lands at the time it was taken rather than the time
+it was sent. Same 17 columns.
+
+### Also removed
+
+The bisect stop and the dead soft-start PWM ramp (written for the inrush theory the
+bisect disproved). `gpio_hold_dis` re-enabled - sleep REQUIRES it, since the gates
+are latched through sleep and the rails never come back without it.
+
+### Open
+
+- **Module B is not registered on NB-IoT.** Stuck at `+CEREG: 1,2` (searching),
+  cycling `AT+CFUN=0/1` with `+CPIN: NOT READY`. LoRa C->B works; nothing reaches
+  ThingsBoard. This is the next thing to chase.
+- **Opening COM10 resets Module B** (~35s re-attach), so USB monitoring perturbs
+  it. Non-invasive alternative: its WiFi AP `CHIP-FOREST-RX` / `chipforest1`, history
+  at `http://192.168.4.1/history`.
+- SEN0466 still excluded from the sleeping cycle - its 210s settle would dominate
+  every wake. Needs a multi-phase wake.
+- Fire thresholds are still invented placeholders; the `alarma`/`prealarma` tabs
+  were never transcribed.
+- LoRa TX power still 14 dBm, reduced during debugging. Raise to 22 for range work.
+- `LED_WAVE_MS 500` and `SLEEP_USB_DRAIN_MS 400` are bench instrumentation - both
+  are pure waste in the field.
+
+### Reflashing note
+
+With sleep enabled the port exists only ~1s per idle tick, so uploads fail with
+"port is busy or doesn't exist". Retry in a loop; it catches the next wake. Or
+power-cycle and flash inside the 30s cold-boot window.
+
 ## 2026-09-10 - RESETS FIXED: run the sensors one at a time
 
 ### The fix

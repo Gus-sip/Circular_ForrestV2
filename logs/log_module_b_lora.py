@@ -3,7 +3,7 @@ import os
 import re
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import serial
 
@@ -18,6 +18,10 @@ FIELDS = [
 ]
 
 RCV_RE = re.compile(r'\+RCV addr=(\d+) len=(\d+) rssi=(-?\d+) snr=(-?\d+) data="(.*)"')
+
+# One Module C sleep tick. Batched readings carry their age in ticks, so this is
+# what converts that age back into seconds for the timestamp.
+TICK_SECONDS = 10
 
 is_new_file = not os.path.exists(OUT_PATH)
 
@@ -73,13 +77,54 @@ with open(OUT_PATH, "a", newline="") as f:
             continue
 
         addr, length, rssi, snr, data = m.groups()
-        parts = data.split(",")
-        if len(parts) != 13:
-            print(f"skipped (expected 13 fields, got {len(parts)}): {line}", flush=True)
-            continue
 
-        ts = datetime.now(timezone.utc).isoformat()
-        row = [ts, addr, rssi, snr] + parts
-        writer.writerow(row)
+        # Two payload shapes now arrive, because Module C batches when more than
+        # one reading has accumulated since the last transmit:
+        #
+        #   single  "<13 comma-separated fields>"
+        #   batch   "B,<count>,<14 fields>;<14 fields>;..."
+        #
+        # The batch form was previously skipped outright by the 13-field check,
+        # which quietly dropped roughly one transmit in three - the read and
+        # transmit schedules (every 3 ticks and every 4) realign every 12 ticks and
+        # that tick sends two readings.
+        #
+        # A batch record carries one extra trailing field: its age in 10s ticks at
+        # the moment of transmit. That is used to BACKDATE the timestamp rather
+        # than being stored, so every row keeps the same 17 columns and a batched
+        # reading lands at the time it was actually taken instead of the time it
+        # happened to be sent.
+        records = []  # (fields13, age_ticks)
+        if data.startswith("B,"):
+            body = data.split(",", 2)
+            if len(body) < 3:
+                print(f"skipped (malformed batch header): {line}", flush=True)
+                continue
+            for chunk in body[2].split(";"):
+                chunk = chunk.strip()
+                if not chunk:
+                    continue
+                fields = chunk.split(",")
+                if len(fields) != 14:
+                    print(f"skipped batch record (expected 14 fields, got "
+                          f"{len(fields)}): {chunk}", flush=True)
+                    continue
+                try:
+                    age = int(fields[13])
+                except ValueError:
+                    age = 0
+                records.append((fields[:13], age))
+        else:
+            parts = data.split(",")
+            if len(parts) != 13:
+                print(f"skipped (expected 13 fields, got {len(parts)}): {line}", flush=True)
+                continue
+            records.append((parts, 0))
+
+        now = datetime.now(timezone.utc)
+        for fields, age in records:
+            ts = (now - timedelta(seconds=age * TICK_SECONDS)).isoformat()
+            writer.writerow([ts, addr, rssi, snr] + fields)
         f.flush()
-        print(f"logged: addr={addr} rssi={rssi} snr={snr} data={data}", flush=True)
+        print(f"logged {len(records)} reading(s): addr={addr} rssi={rssi} snr={snr}",
+              flush=True)
