@@ -267,13 +267,27 @@ static void ledWorking() {
 // Set to 0 for bench testing: the node stays awake, samples continuously and
 // transmits on a plain timer. Useful when you need the serial port to stay put and
 // the LED to be watchable, rather than the port vanishing every 10 seconds.
-#define SLEEP_ENABLED 0
+#define SLEEP_ENABLED 1
 
 // Transmit cadence when SLEEP_ENABLED is 0. The tick counters cannot drive it in
 // this mode - they advance once per boot, and without sleep there are no reboots,
 // so they would sit at 1/3 forever and nothing would ever be sent.
 #define NOSLEEP_TX_GAP_MS 15000UL
 #define SLEEP_CYCLE_SECONDS 10UL        // one tick; work is scheduled in ticks, not seconds
+
+// How long to hold before sleeping so the host can drain the USB CDC buffer.
+//
+// Serial.flush() is NOT sufficient on the ESP32-S3's USB-Serial/JTAG: it waits
+// only until the buffer is handed to the USB stack, and if the host is not polling
+// at that moment the bytes sit in the endpoint FIFO and die with the peripheral.
+// At 50ms the entire tail of every read tick was lost - [read], [store] and
+// [sleep] all vanished while the earlier [bmv080] and [cm1106] lines survived,
+// which is what a tail-loss looks like as opposed to a crash.
+//
+// This is BENCH instrumentation. It is pure waste in the field (the awake time it
+// adds is spent doing nothing at all), so drop it to ~50ms for deployment - by
+// which point there is no USB host listening anyway.
+#define SLEEP_USB_DRAIN_MS 400
 
 // ---------- Tick scheduling ----------
 // Every wake is one tick. Two counters advance on EVERY tick and each resets when
@@ -694,62 +708,32 @@ static void bootGuardMarkGood() {
   Serial.flush();
 }
 
-// Rails brought up one at a time, with USB given time to enumerate first.
-// Switching both rails at the same instant draws enough inrush to pull VBUS down
-// through the FETs - the Calypso on 5V plus the bulk caps on both rails is close
-// to a short for the first few milliseconds.
-//
-// The delays are DEBUG values. Once it boots reliably, walk them down to find
-// where it breaks: that number is how much soft-start the deployment firmware
-// needs, and it matters because on solar plus supercaps there is no USB port
-// propping the rail up.
-// Soft-start a rail gate by ramping it with PWM instead of switching it hard.
-//
-// Switching a FET fully on in one step makes the rail's bulk capacitance look
-// like a short for the first few milliseconds - the inrush is limited only by
-// ESR and trace resistance. The board survives WRITING GPIO11 high and dies in
-// the settle window straight after, which is that inrush, not the instruction.
-//
-// Ramping the gate keeps the FET partly on during the ramp, so it acts as a
-// current limiter while the caps charge. The cost is that the FET spends the ramp
-// in its linear region dissipating power, which is why the ramp is kept short -
-// this is a soft-start, not a regulator.
-//
-// SOFTSTART_MS is a DEBUG value. Once it boots reliably, walk it down to find
-// where it breaks; that number is the soft-start the deployment firmware needs,
-// and it matters because on solar plus supercaps nothing else is propping the
-// rail up.
-#define SOFTSTART_CHANNEL 0
-#define SOFTSTART_FREQ_HZ 20000
-#define SOFTSTART_RES_BITS 8
-#define SOFTSTART_STEPS 64
-#define SOFTSTART_MS 400
-
-static void softStartRail(int pin, int activeLevel, const char *name) {
-  Serial.printf("%s: soft-start ramp over %dms\n", name, SOFTSTART_MS);
-  Serial.flush();
-
-  ledcSetup(SOFTSTART_CHANNEL, SOFTSTART_FREQ_HZ, SOFTSTART_RES_BITS);
-  ledcAttachPin(pin, SOFTSTART_CHANNEL);
-
-  const int maxDuty = (1 << SOFTSTART_RES_BITS) - 1;
-  for (int i = 0; i <= SOFTSTART_STEPS; i++) {
-    int duty = (maxDuty * i) / SOFTSTART_STEPS;
-    // An active-LOW gate turns on as duty falls, so the ramp runs the other way.
-    ledcWrite(SOFTSTART_CHANNEL, (activeLevel == LOW) ? (maxDuty - duty) : duty);
-    delay(SOFTSTART_MS / SOFTSTART_STEPS);
+// Bus scan. The BME690 and BMV080 share this bus, so a scan separates "sensor
+// gone from the bus" from "sensor present but not answering" - and proves the bus
+// itself by whatever else replies on the same wires at the same instant. Node C1
+// lost its BME690 mid-session and this was what identified it as physical in one
+// line rather than an afternoon.
+static void scanI2C(const char *when) {
+  Serial.printf("--- I2C scan (%s) ---\n", when);
+  int found = 0;
+  for (uint8_t addr = 0x08; addr <= 0x77; addr++) {
+    Wire.beginTransmission(addr);
+    if (Wire.endTransmission() == 0) {
+      Serial.printf("  ACK at 0x%02X\n", addr);
+      found++;
+    }
   }
-
-  // Hand the pin back to plain GPIO, fully on. Leaving it on PWM would keep the
-  // FET switching forever and put ripple on the rail.
-  ledcDetachPin(pin);
-  pinMode(pin, OUTPUT);
-  digitalWrite(pin, activeLevel);
-
-  Serial.printf("%s: ramp complete, gate held %s\n", name, activeLevel == LOW ? "LOW" : "HIGH");
+  if (found == 0) Serial.println("  (nothing acked)");
   Serial.flush();
 }
 
+// Rails brought up one at a time, with USB given time to enumerate first.
+//
+// The soft-start ramp that used to live here has been removed. It was written for
+// the inrush theory, which the bisect disproved - it made the board die EARLIER,
+// mid-ramp, and the real cause turned out to be steady-state sensor overlap. Plain
+// writes now, identical to the minimal rail sketch that holds these same rails for
+// 80+ seconds with zero resets.
 static void enableRails(bool safeMode) {
   pinMode(PIN_PCB_EN_A, OUTPUT);
   pinMode(PIN_PCB_EN_B, OUTPUT);
@@ -927,16 +911,15 @@ void setup() {
   // Deep sleep left these pads latched (see kHeldGates). Nothing can drive them
   // until the hold is released, so this must happen before the pinMode calls
   // below - otherwise the writes are silently ignored and the rails stay off.
-  // BISECT: gpio_hold is the one thing the minimal rail sketch never touches, and
-  // that sketch holds these same rails for 80+ seconds. If a previous deep-sleep
-  // run latched these pads, releasing the hold here is a candidate for the rail
-  // misbehaving on assert. Disabled to test that.
-#if 0
+  // Re-enabled: this was disabled during the reset bisect, which has since found
+  // the real cause (concurrent sensor load, see the sequential slots below). It is
+  // REQUIRED for sleep to work at all - the gates are latched through deep sleep,
+  // so without releasing the hold the pinMode/digitalWrite calls below are
+  // silently ignored and the rails never come back on after the first wake.
   for (size_t i = 0; i < sizeof(kHeldGates) / sizeof(kHeldGates[0]); i++) {
     gpio_hold_dis(kHeldGates[i]);
   }
   gpio_deep_sleep_hold_dis();
-#endif
 
   // Rails one at a time, with USB given time to enumerate first - see enableRails().
   // Safe mode after three boots without a good run leaves them off entirely, so a
@@ -946,21 +929,9 @@ void setup() {
   g_safeMode = (nvsBoots >= 12);
   enableRails(g_safeMode);
 
-  // ---- BISECT (temporary) ----
-  // The minimal rail sketch holds all three rails for 80+ seconds with zero
-  // resets, while this firmware dies at the same pin write - so the hardware is
-  // fine and something here is at fault. The failure point has also moved every
-  // time the code changed, which points at corruption rather than a fixed bug.
-  //
-  // This stops setup() right after the rails: no sensors, no radio, no I2C, no
-  // UARTs. If it survives, the fault is in what comes AFTER; if it still dies,
-  // the fault is in what comes BEFORE. Remove once that is known.
-#if 1
-  Serial.println("[bisect] stopping after rails - no sensor or radio init");
-  Serial.flush();
-  g_safeMode = true;  // makes loop() idle instead of trying to read
-  return;
-#endif
+  // (The bisect stop that used to sit here is gone - it did its job. The answer
+  // was that the fault is in what comes AFTER: activating the sensors all at once,
+  // not powering the rails. See the sequential slots below.)
   if (g_safeMode) {
     Serial.println("Rails off - skipping sensor and radio init this boot.");
     Serial.flush();
@@ -970,12 +941,17 @@ void setup() {
   power.enable3V3Sensors();
   Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
 
+  scanI2C("after rails, before sensor init");
+
   Serial.printf("Waiting %dms for BMV080 startup...\n", BMV080_STARTUP_DELAY_MS);
   delay(BMV080_STARTUP_DELAY_MS);
 
   step("bme690.begin");
   bmeReady = bme690.begin();
-  Serial.println(bmeReady ? "BME690: OK" : "BME690: NOT FOUND");
+  // begin() tries the configured address then the alternate, so print which one it
+  // settled on - "OK" alone cannot tell 0x76 from 0x77.
+  Serial.printf("BME690: %s (bound to 0x%02X)\n", bmeReady ? "OK" : "NOT FOUND",
+                bme690.address());
 
 #if SLEEP_ENABLED && SLEEP_SKIP_SEN0466
   // Out of the cycle for now: its 210s settle would dominate every wake. Disabled
@@ -1067,7 +1043,7 @@ static void enterDeepSleep(const char *why) {
   gpio_deep_sleep_hold_en();
 
   Serial.flush();
-  delay(50);  // let the USB CDC drain before the peripheral dies with the sleep
+  delay(SLEEP_USB_DRAIN_MS);
 
   g_sleepFlag = SLEEP_FLAG_MAGIC;  // so the next boot knows it came from sleep
   esp_sleep_enable_timer_wakeup((uint64_t)SLEEP_CYCLE_SECONDS * 1000000ULL);
@@ -1136,45 +1112,82 @@ static void clearFreshFlags() {
   g_bmeFresh = g_bmvFresh = g_co2Fresh = g_coFresh = g_calFresh = false;
 }
 
-static void sampleSensors() {
-  if (g_calypsoEnabled) {
-    // Calypso streams NMEA - drop the stale buffer, then poll briefly for a
-    // fresh checksum-valid $--MWV.
-    calypso.flushInput();
-    Reading wind;
-    uint32_t t0 = millis();
-    do {
-      wind = calypso.read();
-      if (wind.ok()) break;
-      delay(10);
-    } while (millis() - t0 < CALYPSO_READ_WINDOW_MS);
-    g_calSt = wind.status;
-    if (wind.ok()) {
-      g_calFresh = true;
-      calypsoEverSeen = true;  // only now does it join the readiness gate
-      g_windAngle = wind.values[0];
-      g_windSpeed = wind.values[1];
-      g_windValid = wind.values[2] > 0.5f;
-    }
-  }
+// ---------------- Sequential sensor slots ----------------
+// ONE sensor active at a time, never overlapping. This is the fix for the resets
+// that blocked this project for days, and it is the single most important
+// property of this file - do not "optimise" it back into a single pass.
+//
+// The measurements that settled it, on this hardware:
+//
+//   all sensors active together      31 resets / 140s
+//   BMV080 disabled, rest together    1 reset  / 140s
+//   sequential slots, everything on   2 resets / 150s   (both were the reflash)
+//
+// The BMV080's laser alone is ~68mA - an order of magnitude more than anything
+// else here - and the old code left it measuring while the BME690, CM1106 and
+// SEN0466 were all read. That overlap is what browned the board out. Staggering
+// the rails and soft-starting the gate both failed because they addressed INRUSH,
+// and the problem was steady-state overlap.
+//
+// notes/power_budget.md specified this from the beginning: "switched rails so the
+// 68mA BMV080 and 5mA/210s SEN0466 only draw during their windows".
+enum Slot {
+  SLOT_BME690 = 0,
+  SLOT_BMV080,
+  SLOT_CM1106,
+  SLOT_SEN0466,
+  SLOT_CALYPSO,
+  SLOT_COUNT
+};
 
-  // BMV080: laser on only around an actual sample, never continuously. Idle ->
-  // Measuring when a fresh PM value is wanted, back to Idle as soon as a frame
-  // lands or the timeout expires. Non-blocking - one read() attempt per loop pass,
-  // so every other sensor keeps being sampled while this one warms up.
-  if (bmvReady && g_bmvEnabled) {
-    if (g_bmvPhase == BmvPhase::Idle) {
-      if (!g_bmvFresh) {
-        if (bmv080.startMeasurement()) {
-          g_bmvPhase = BmvPhase::Measuring;
-          g_bmvPhaseStartedMs = millis();
-        } else {
-          g_bmvSt = ReadingStatus::NoAck;
-        }
+// Longest the BMV080's laser may stay on waiting for a frame. Frames normally
+// arrive ~2-4s after the settle. This bounds one slot; BMV080_MEASURE_TIMEOUT_MS
+// is far too long to spend inside a sequential pass.
+#define BMV080_SLOT_MS 8000UL
+
+// Gap between slots, so one load has actually stopped drawing before the next
+// starts rather than the two meeting at the changeover.
+#define SLOT_GAP_MS 250UL
+
+// Everything off. Called between slots and before every transmit, so the radio's
+// ~120mA burst never lands on top of a laser or a warming heater.
+static void quiesceAll() {
+  if (bmvReady && g_bmvPhase != BmvPhase::Idle) {
+    bmv080.stopMeasurement();
+    g_bmvPhase = BmvPhase::Idle;
+  }
+  cm1106.sleep();  // EN low
+}
+
+// Runs exactly one sensor's slot. Blocking BY DESIGN: the whole point is that
+// nothing else is drawing while this one is. Each slot bounds its own time.
+static void runSlot(int slot) {
+  switch (slot) {
+    case SLOT_BME690: {
+      if (!bmeReady || !g_bmeEnabled) break;
+      Reading env = bme690.read();
+      g_bmeSt = env.status;
+      if (env.ok()) {
+        g_bmeFresh = true;
+        g_temp = env.values[0];
+        g_hum = env.values[1];
+        g_pres = env.values[2];
+        g_gas = env.values[3];
       }
-    } else {
-      uint32_t elapsed = millis() - g_bmvPhaseStartedMs;
-      if (elapsed >= BMV080_SETTLE_MS) {
+      break;
+    }
+
+    case SLOT_BMV080: {
+      if (!bmvReady || !g_bmvEnabled) break;
+      // Laser on only for this slot, off before the slot ends - on every path.
+      if (!bmv080.startMeasurement()) {
+        g_bmvSt = ReadingStatus::NoAck;
+        break;
+      }
+      g_bmvPhase = BmvPhase::Measuring;
+      uint32_t t0 = millis();
+      delay(BMV080_SETTLE_MS);  // preheat: frames before this are not meaningful
+      while (millis() - t0 < BMV080_SLOT_MS) {
         Reading pm = bmv080.read();
         g_bmvSt = pm.status;
         if (pm.ok()) {
@@ -1182,73 +1195,85 @@ static void sampleSensors() {
           g_pm1 = pm.values[0];
           g_pm25 = pm.values[1];
           g_pm10 = pm.values[2];
-          bmv080.stopMeasurement();
-          g_bmvPhase = BmvPhase::Idle;
-          Serial.printf("[bmv080] frame after %lums, laser off (pm2.5=%.1f)\n",
-                        (unsigned long)elapsed, g_pm25);
+          break;
         }
+        delay(50);
       }
-      if (g_bmvPhase == BmvPhase::Measuring && elapsed >= BMV080_MEASURE_TIMEOUT_MS) {
-        bmv080.stopMeasurement();
-        g_bmvPhase = BmvPhase::Idle;
-        Serial.printf("[bmv080] no frame in %lums - laser off, will retry\n",
-                      (unsigned long)elapsed);
-      }
-    }
-  }
-
-  if (bmeReady && g_bmeEnabled) {
-    Reading env = bme690.read();
-    g_bmeSt = env.status;
-    if (env.ok()) {
-      g_bmeFresh = true;
-      g_temp = env.values[0];
-      g_hum = env.values[1];
-      g_pres = env.values[2];
-      g_gas = env.values[3];
-    }
-  }
-
-  if (sen0466Ready && g_sen0466Enabled) {
-    Reading co = sen0466.read();
-    g_coSt = co.status;
-    if (co.ok()) {
-      g_coFresh = true;
-      g_co = co.values[0];
-      g_coTemp = co.values[1];
-    }
-  }
-
-  if (g_cm1106Enabled) {
-    Reading co2 = cm1106.read();
-    g_co2St = co2.status;
-    if (co2.ok()) {
-      g_co2Fresh = true;
-      g_co2 = co2.values[0];
+      bmv080.stopMeasurement();
+      g_bmvPhase = BmvPhase::Idle;
+      Serial.printf("[bmv080] laser off after %lums (pm2.5=%.1f, %s)\n",
+                    (unsigned long)(millis() - t0), g_pm25,
+                    g_bmvFresh ? "frame" : "no frame");
+      break;
     }
 
-    // Dump the wire bytes, not the parsed ppm. A ppm that never moves is
-    // ambiguous; byte-identical frames are not. identicalRun counts consecutive
-    // identical responses - a nonzero run means the sensor is repeating itself.
-    Serial.print("[cm1106 raw] ");
-    if (cm1106.lastRawLen() == 0) {
-      Serial.print("(nothing received)");
-    } else {
-      for (uint8_t i = 0; i < cm1106.lastRawLen(); i++) Serial.printf("%02X ", cm1106.lastRaw()[i]);
-    }
-    Serial.printf("| status=%s frozenValueRun=%u\n", statusName(co2.status),
-                  (unsigned)cm1106.frozenValueRun());
-
-    // Pegged measurement behind a healthy link - only a power cycle has ever
-    // cleared it. Drop the fresh flag too: a frozen number must not be published
-    // as though it were a live reading.
-    if (cm1106.frozenValueRun() >= CM1106_FREEZE_LIMIT) {
-      Serial.printf("[cm1106] value frozen for %u reads - power-cycling via EN\n",
-                    (unsigned)cm1106.frozenValueRun());
+    case SLOT_CM1106: {
+      if (!g_cm1106Enabled) break;
+      // Single-shot part: it measures on power-up and then repeats that value for
+      // the rest of the boot, so a FRESH number costs an EN power cycle every
+      // time. That is not a workaround for a fault - it is how the part behaves.
       cm1106.powerCycle();
-      g_co2St = ReadingStatus::NotReady;
-      g_co2Fresh = false;
+      Reading co2 = cm1106.read();
+      g_co2St = co2.status;
+      if (co2.ok()) {
+        g_co2Fresh = true;
+        g_co2 = co2.values[0];
+      }
+
+      // Wire bytes, not the parsed ppm. A ppm that never moves is ambiguous;
+      // byte-identical frames are not. Note resp[6] is a counter that increments
+      // every read, so frozenValueRun compares the VALUE bytes, never whole frames.
+      Serial.print("[cm1106 raw] ");
+      if (cm1106.lastRawLen() == 0) {
+        Serial.print("(nothing received)");
+      } else {
+        for (uint8_t i = 0; i < cm1106.lastRawLen(); i++)
+          Serial.printf("%02X ", cm1106.lastRaw()[i]);
+      }
+      Serial.printf("| status=%s frozenValueRun=%u\n", statusName(co2.status),
+                    (unsigned)cm1106.frozenValueRun());
+
+      cm1106.sleep();  // EN back off before the next slot starts
+      break;
     }
+
+    case SLOT_SEN0466: {
+      if (!sen0466Ready || !g_sen0466Enabled) break;
+      Reading co = sen0466.read();
+      g_coSt = co.status;
+      if (co.ok()) {
+        g_coFresh = true;
+        g_co = co.values[0];
+        g_coTemp = co.values[1];
+      }
+      break;
+    }
+
+    case SLOT_CALYPSO: {
+      if (!g_calypsoEnabled) break;
+      // Streams NMEA unprompted - drop the stale buffer, then poll briefly for a
+      // fresh checksum-valid $--MWV.
+      calypso.flushInput();
+      Reading wind;
+      uint32_t t0 = millis();
+      do {
+        wind = calypso.read();
+        if (wind.ok()) break;
+        delay(10);
+      } while (millis() - t0 < CALYPSO_READ_WINDOW_MS);
+      g_calSt = wind.status;
+      if (wind.ok()) {
+        g_calFresh = true;
+        calypsoEverSeen = true;  // only now does it join the readiness gate
+        g_windAngle = wind.values[0];
+        g_windSpeed = wind.values[1];
+        g_windValid = wind.values[2] > 0.5f;
+      }
+      break;
+    }
+
+    default:
+      break;
   }
 }
 
@@ -1346,6 +1371,11 @@ static void transmitStore() {
                   (unsigned long)g_storeDropped);
   }
 
+  // Every sensor off before the radio transmits. The RYLR998 pulls ~120mA on a
+  // send; that burst must not land on top of a laser or a warming heater.
+  quiesceAll();
+  delay(SLOT_GAP_MS);
+
   char packet[241];
   uint16_t sent = 0;
   while (sent < g_storeCount) {
@@ -1410,30 +1440,49 @@ static void transmitStore() {
 }
 
 
-// Samples the fast sensors repeatedly until each has gone fresh, bounded in time.
-// Used for one scheduled read - not the old continuous sampling.
+// One scheduled read: walk every slot once, in turn, with nothing overlapping.
+//
+// Note this is deliberately NOT the old "retry until everything is fresh" loop.
+// Each slot now bounds its own time internally, and retrying the whole set would
+// re-fire the BMV080 laser repeatedly - the exact load pattern that caused the
+// resets. A sensor that misses its slot keeps its last known value and is named
+// in the log line as STALE.
 static void readFastSensorsOnce() {
   uint32_t t0 = millis();
   char pending[64];
-  while (millis() - t0 < SENSOR_READ_WINDOW_MS) {
-    sampleSensors();
-    if (pendingSensors(pending, sizeof(pending)) == 0) break;
-    delay(SAMPLE_GAP_MS);
+
+  for (int slot = 0; slot < SLOT_COUNT; slot++) {
+    // Safety cap only - each slot is individually bounded, so this should never
+    // fire. If it does, one slot is overrunning and the log says which is left.
+    if (millis() - t0 >= SENSOR_READ_WINDOW_MS) {
+      Serial.printf("[read] WINDOW EXPIRED after %lums - slots %d..%d skipped\n",
+                    (unsigned long)(millis() - t0), slot, SLOT_COUNT - 1);
+      break;
+    }
+    runSlot(slot);
+    quiesceAll();  // nothing left drawing before the next slot starts
+    delay(SLOT_GAP_MS);
   }
+
   uint8_t stillPending = pendingSensors(pending, sizeof(pending));
-  // Calypso status belongs here explicitly. Without it the only evidence about
-  // the wind sensor is three zeros in the payload, which cannot distinguish "no
-  // bytes arriving at all" from "bytes arriving but failing the checksum" - and
-  // those point at completely different faults. rx counts raw bytes seen.
-  Serial.printf("[read] co2=%.1f co=%.2f T%.1f H%.1f gas%.0f pm2.5=%.1f | wind=%s(rx=%u)"
-                "%s%s\n",
-                g_co2, g_co, g_temp, g_hum, g_gas, g_pm25,
+  // Per-sensor status, not just the values. A read that FAILED and a value that
+  // never CHANGED look identical downstream otherwise - the firmware keeps the
+  // last good value either way and says nothing. That ambiguity is exactly how
+  // node C1's dead BME690 went unexplained for hours.
+  Serial.printf("[read] bme=%s(T%.1f H%.1f gas%.0f) bmv=%s(pm2.5=%.1f) co2=%s(%.0f) "
+                "co=%s(%.2f) wind=%s(rx=%u)%s%s  (pass %lums)\n",
+                statusName(g_bmeSt), g_temp, g_hum, g_gas,
+                statusName(g_bmvSt), g_pm25,
+                statusName(g_co2St), g_co2,
+                statusName(g_coSt), g_co,
                 !g_calypsoEnabled ? "off" : (g_windValid ? "OK" : "silent"),
-                calypso.lastReadBytes(), stillPending ? "  STALE: " : "",
-                stillPending ? pending : "");
+                calypso.lastReadBytes(),
+                stillPending ? "  STALE: " : "", stillPending ? pending : "",
+                (unsigned long)(millis() - t0));
   if (g_windValid) {
     Serial.printf("[wind] angle=%.1f deg  speed=%.2f\n", g_windAngle, g_windSpeed);
   }
+  Serial.flush();
 }
 
 void loop() {

@@ -15,7 +15,6 @@ public:
   bool begin() override;
   Reading read() override;
 
-
   // Which address begin() settled on. It tries the configured one then the
   // alternate, so the caller cannot otherwise know which is live - and that
   // matters when a sensor reports OK at init but returns nothing afterwards.
@@ -25,5 +24,6 @@ public:
 
 private:
   uint8_t _addr;
+  bool _primed = false;  // a discarded first measurement has been taken - see the .cpp
   BME69X_7Semi _sensor;
 };
