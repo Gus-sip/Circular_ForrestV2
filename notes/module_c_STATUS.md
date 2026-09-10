@@ -1,5 +1,103 @@
 # CHIP FOREST - Session Status
 
+## 2026-09-10 - RESETS FIXED: run the sensors one at a time
+
+### The fix
+
+Sensors must be read **sequentially, never concurrently**. That was the cause of
+the resets that blocked this project for days.
+
+| firmware | resets | reads | transmits |
+|---|---|---|---|
+| all sensors active together | 31 / 140s | 16 | 2 |
+| BMV080 disabled | 1 / 140s | 62 | 9 |
+| **sequential slots, everything on** | **2 / 150s** | **36** | **8** |
+
+The two resets in the last run were the flash and reconnect.
+
+**The bisect that found it.** `env:module-c-rail-gate` holds all three rails on
+for 80+ seconds with zero resets - because it powers the sensors but never
+ACTIVATES them. Disabling the BMV080 alone (~68mA, the largest load by an order
+of magnitude) took the full firmware from 31 resets to 1. So the instability
+tracked concurrent sensor LOAD, not the rails being on.
+
+That is why staggering the rail bring-up and soft-starting the gate had both
+failed: they addressed inrush, and the problem was steady-state overlap.
+`power_budget.md` had specified the answer all along - "switched rails so the
+68mA BMV080 and 5mA/210s SEN0466 only draw during their windows".
+
+### New firmware: env:module-c-simple
+
+`chip_forest_simple.cpp`, rebuilt from the rail sketch that works rather than cut
+down from the one that did not. Each sensor gets a slot: switched on, read,
+switched off before the next starts. The BMV080's laser fires only inside its own
+slot. The transmit gets a slot with everything quiesced first, so the radio's
+~120mA burst never lands on another load.
+
+Deliberately absent: deep sleep, RTC_NOINIT state, NVS boot guard, safe mode,
+soft-start, tick counters, batch store, alarm state machine.
+
+Kept, each proven on hardware: rail polarities, CM1106 EN power cycle (single-shot
+part), BMV080 address scan, GPIO21 status LED.
+
+**Note:** the BMV080 SDK restore is per-env. After the first build of a new env:
+`bosch_bmv080_sdk/restore.ps1 -EnvName <env>`.
+
+### Node C1 sensor state
+
+| Sensor | State |
+|---|---|
+| BMV080 | Working - real particulates, laser only in its slot |
+| CM1106 | Working - 827 -> 1192 -> 1223 -> 1541, fresh on each EN cycle |
+| SEN0466 | Initialises; needs its 210s settle before CO means anything |
+| RYLR998 | OK, transmits accepted |
+| **BME690** | **Absent from the I2C bus** - physical |
+| **Calypso** | **Silent under every configuration** - physical |
+
+**BME690** - the boot scan shows `ACK at 0x57` (BMV080) and `ACK at 0x74`
+(SEN0466) only. Neither 0x76 nor 0x77 answers, so the bus is proven good by its
+neighbours replying on the same wires at the same instant. It WAS working earlier
+the same day with live values and nothing was touched in between, which is the
+classic signature of a marginal solder joint opening. The board also took dozens
+of hard power collapses that day while the reset fault was being chased.
+
+**Calypso** - eliminated: both pins, six baud rates, six framings, a 20s boot wait
+plus 3 minutes of continuous listening. Zero bytes throughout. Pads self-echo.
+Power, ground and continuity confirmed by meter. Confirmed ULP PRO UART variant,
+never app-configured. Both faults survived a hard reset.
+
+### Diagnostics worth keeping
+
+Two additions made the BME690 diagnosable in one line, and would have caught it
+hours earlier:
+
+- **`scanI2C()` at boot.** Separates "sensor gone from the bus" from "sensor
+  present but not answering", and proves the bus by what else replies.
+- **Per-sensor read status in the `[read]` line.** Previously a failed read was
+  silently discarded by `if (r.ok())` and the last good value kept, so a dead
+  sensor and a stable one printed identically. The status showed `never read` -
+  the string's initial value - which meant the slot was being skipped entirely
+  because `bmeReady` was false, not that reads were failing.
+
+**These belong in the main firmware too, not just the minimal one.**
+
+### Wrong turns, recorded so they are not repeated
+
+The reset was misdiagnosed repeatedly before the bisect found it: as a shorted 5V
+rail, as the RYLR998 VDD bypass wire, and as VBUS sag. **A surge, a short and
+concurrent load all look identical from firmware.** Only disabling one sensor at
+a time separated them.
+
+Also: adding `esp_task_wdt_deinit()` broke a working build, and the RTC_NOINIT
+"domain lost" messages were treated as evidence about power for hours when the
+mechanism was something else entirely.
+
+### Next
+
+Node C2 for sleep-cycle development - its BME690 works, it has no Calypso, and it
+transmitted to Module B cleanly. C1 needs a meter on two sensors before it can be
+a complete node.
+
 ## 2026-09-09 - Sleep cycle causes the brownouts, not a short; LED found; Calypso silent
 
 ### THE BOARD IS SHIPPED WITH SLEEP DISABLED
