@@ -14,6 +14,12 @@ public:
 
   bool begin() override;
   Reading read() override;
+
+
+  // Which address begin() settled on. It tries the configured one then the
+  // alternate, so the caller cannot otherwise know which is live - and that
+  // matters when a sensor reports OK at init but returns nothing afterwards.
+  uint8_t address() const { return _addr; }
   void sleep() override {}
   const char *name() const override { return "BME690"; }
 

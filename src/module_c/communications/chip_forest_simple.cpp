@@ -102,6 +102,42 @@ RYLR998 radio(Serial0, LORA_RX_PIN, LORA_TX_PIN);
 
 static bool bmeReady = false, bmvReady = false, coReady = false, radioReady = false;
 
+// Read status per sensor. Without these, a read that fails and a value that never
+// changes look identical downstream - the firmware just keeps the last good value
+// and says nothing. That is exactly how the BME690 reporting OK at init while
+// returning zeros went unexplained.
+static const char *g_bmeStatus = "never read";
+static const char *g_bmvStatus = "never read";
+static const char *g_co2Status = "never read";
+
+static const char *statusText(ReadingStatus st) {
+  switch (st) {
+    case ReadingStatus::Ok: return "OK";
+    case ReadingStatus::Timeout: return "TIMEOUT";
+    case ReadingStatus::NoAck: return "NO-ACK";
+    case ReadingStatus::InvalidFrame: return "BAD-FRAME";
+    case ReadingStatus::NotReady: return "NOT-READY";
+    case ReadingStatus::NotInitialized: return "NOT-INIT";
+  }
+  return "?";
+}
+
+// Bus scan. The BME690 and BMV080 share this bus and one works, so a scan
+// separates "sensor gone from the bus" from "sensor present but not answering".
+static void scanI2C(const char *when) {
+  Serial.printf("--- I2C scan (%s) ---\n", when);
+  int found = 0;
+  for (uint8_t addr = 0x08; addr <= 0x77; addr++) {
+    Wire.beginTransmission(addr);
+    if (Wire.endTransmission() == 0) {
+      Serial.printf("  ACK at 0x%02X\n", addr);
+      found++;
+    }
+  }
+  if (found == 0) Serial.println("  (nothing acked)");
+  Serial.flush();
+}
+
 // Each field holds its last good value rather than snapping to zero on a
 // transient miss, so one bad read does not look like a sensor failure downstream.
 static float g_temp = 0, g_hum = 0, g_pres = 0, g_gas = 0;
@@ -148,8 +184,11 @@ void setup() {
 #endif
 
 #if USE_BME690
+  scanI2C("after rails, before sensor init");
+
   bmeReady = bme690.begin();
-  Serial.printf("BME690:  %s\n", bmeReady ? "OK" : "NOT FOUND");
+  Serial.printf("BME690:  %s  (bound to 0x%02X)\n", bmeReady ? "OK" : "NOT FOUND",
+                bme690.address());
 #else
   Serial.println("BME690:  disabled (bisect)");
 #endif
@@ -183,6 +222,31 @@ void setup() {
 #endif
 
 #if USE_CALYPSO
+  // Framing sweep. Every previous attempt used 8N1 - twelve pin/baud combinations,
+  // all zero bytes, with power, ground and continuity confirmed. Framing is the
+  // one dimension never varied, and a mismatched stop/parity bit produces silence
+  // rather than garbage on some UARTs.
+  {
+    const uint32_t cfgs[] = {SERIAL_8N1, SERIAL_8N2, SERIAL_8E1, SERIAL_8O1,
+                             SERIAL_7E1, SERIAL_7N1};
+    const char *names[] = {"8N1", "8N2", "8E1", "8O1", "7E1", "7N1"};
+    Serial.println("Calypso: framing sweep @38400 on GPIO8, 2s each");
+    Serial.flush();
+    for (size_t i = 0; i < sizeof(cfgs) / sizeof(cfgs[0]); i++) {
+      Serial1.end();
+      Serial1.begin(CALYPSO_BAUD, cfgs[i], PIN_CALYPSO_RX, PIN_CALYPSO_TX);
+      delay(60);
+      while (Serial1.available()) Serial1.read();
+      size_t n = 0;
+      uint32_t t0 = millis();
+      while (millis() - t0 < 2000) {
+        if (Serial1.available()) { Serial1.read(); n++; }
+      }
+      Serial.printf("  %s: %u bytes\n", names[i], (unsigned)n);
+      Serial.flush();
+    }
+    Serial1.end();
+  }
   calypso.begin();
   Serial.println("Calypso: UART open");
 #else
@@ -254,6 +318,7 @@ static void runSlot(int slot) {
     case SLOT_BME690: {
       if (!bmeReady) break;
       Reading r = bme690.read();
+      g_bmeStatus = statusText(r.status);
       if (r.ok()) {
         g_temp = r.values[0];
         g_hum = r.values[1];
@@ -269,10 +334,14 @@ static void runSlot(int slot) {
       if (!bmvReady) break;
       // Laser on only for as long as it takes to get one frame. This is the load
       // that was resetting the board when left running continuously.
-      if (!bmv080.startMeasurement()) break;
+      if (!bmv080.startMeasurement()) {
+        g_bmvStatus = "START-FAILED";
+        break;
+      }
       uint32_t t0 = millis();
       while (millis() - t0 < BMV080_SLOT_MS) {
         Reading r = bmv080.read();
+        g_bmvStatus = statusText(r.status);
         if (r.ok()) {
           g_pm1 = r.values[0];
           g_pm25 = r.values[1];
@@ -295,6 +364,7 @@ static void runSlot(int slot) {
       lastCo2Ms = millis();
       cm1106.powerCycle();
       Reading r = cm1106.read();
+      g_co2Status = statusText(r.status);
       if (r.ok()) g_co2 = r.values[0];
       cm1106.sleep();  // EN back off
       break;
@@ -356,10 +426,10 @@ void loop() {
     slot++;
     if (slot >= SLOT_COUNT) {
       slot = 0;
-      Serial.printf("[read] T%.2f H%.2f P%.2f gas%.0f | pm1=%.1f pm2.5=%.1f pm10=%.1f | "
-                    "co2=%.0f co=%.2f | wind=%s %.1fdeg %.2f  (cycle %lums)\n",
-                    g_temp, g_hum, g_pres, g_gas, g_pm1, g_pm25, g_pm10, g_co2, g_co,
-                    g_windValid ? "OK" : "silent", g_windAngle, g_windSpeed,
+      Serial.printf("[read] bme=%s(T%.2f H%.2f P%.2f gas%.0f) bmv=%s(pm2.5=%.1f) "
+                    "co2=%s(%.0f) co=%.2f wind=%s  (cycle %lums)\n",
+                    g_bmeStatus, g_temp, g_hum, g_pres, g_gas, g_bmvStatus, g_pm25,
+                    g_co2Status, g_co2, g_co, g_windValid ? "OK" : "silent",
                     (unsigned long)(millis() - cycleStartMs));
       Serial.flush();
     }
