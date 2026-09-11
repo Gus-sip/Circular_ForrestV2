@@ -72,6 +72,9 @@ public:
   // ---------- Observability - surfaced on the dashboard ----------
   State state() const { return _state; }
   const char *stateName() const;
+  // Names a state without needing an instance in that state - setState() must be
+  // able to print the state it is ENTERING, before _state is assigned.
+  static const char *stateNameOf(State st);
   const char *lastError() const { return _lastError; }
   int rssiDbm() const { return _rssiDbm; }
   bool attached() const { return _attached; }

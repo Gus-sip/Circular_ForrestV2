@@ -464,6 +464,14 @@ ModemNBIoTMqtt::CmdOutcome ModemNBIoTMqtt::consumeOutcome() {
 // ---------- State machine ----------
 
 void ModemNBIoTMqtt::setState(State s) {
+  // Trace every transition. The OLED shows only the CURRENT state name, so a
+  // fast POWERING -> WAIT_AT -> ERROR -> OFF loop looks like a single stuck
+  // state on the screen - which is exactly how "NBIoT: WAIT_AT" got read as
+  // "connected to the NB-IoT band". On serial the cycling is unmistakable.
+  if (_state != s) {
+    Serial.printf("[nbiot-mqtt] state %s -> %s\n", stateName(), stateNameOf(s));
+    Serial.flush();
+  }
   _state = s;
   _stateEnteredMs = millis();
   switch (s) {
@@ -572,10 +580,19 @@ uint32_t ModemNBIoTMqtt::computeBackoff(uint32_t attempt) const {
 void ModemNBIoTMqtt::setLastError(const char *msg) {
   strncpy(_lastError, msg, sizeof(_lastError) - 1);
   _lastError[sizeof(_lastError) - 1] = '\0';
+  // Also PRINT it. This only stored the string before, which is why a modem that
+  // never answered produced a serial log containing nothing but "-> AT" - the
+  // give-up, the power cycle and the reason were all invisible, and the only
+  // place the error surfaced was a getter nothing was calling. A silent recovery
+  // loop is indistinguishable from a hung one.
+  Serial.printf("[nbiot-mqtt] ERROR: %s\n", msg);
+  Serial.flush();
 }
 
-const char *ModemNBIoTMqtt::stateName() const {
-  switch (_state) {
+const char *ModemNBIoTMqtt::stateName() const { return stateNameOf(_state); }
+
+const char *ModemNBIoTMqtt::stateNameOf(State st) {
+  switch (st) {
     case State::OFF: return "OFF";
     case State::POWERING: return "POWERING";
     case State::WAIT_AT: return "WAIT_AT";
@@ -605,7 +622,11 @@ void ModemNBIoTMqtt::tickPowering() {
   // or a flat timeout before moving on - WAIT_AT's own AT retries are the
   // real synchronization point, same philosophy as the original class, this
   // is just a head start. Hardware-confirmed sequence, see modem_nbiot_mqtt.h.
-  static const uint32_t kPowerSettleMs = 300;
+  // VIN and the channel gate must be stable BEFORE PWRKEY is pulsed - pulsing
+  // into a rail that is still coming up can be ignored entirely by the module.
+  // Raised 300 -> 2000 (2026-09-11) along with the WAIT_AT ceiling; both were
+  // part of the same too-aggressive power-on race.
+  static const uint32_t kPowerSettleMs = 2000;
   uint32_t elapsed = millis() - _stateEnteredMs;
 
   if (elapsed < kPowerSettleMs) return;

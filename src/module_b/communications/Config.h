@@ -291,7 +291,20 @@ inline void nbiotResolveNodeName(uint16_t addr, char *outName, size_t outCap) {
 
 // ---------- State timeouts (ms) - every state in ModemNBIoT::tick() has one ----------
 #define NBIOT_TIMEOUT_POWERING_MS 3000
-#define NBIOT_TIMEOUT_WAIT_AT_MS 8000
+// Time allowed for the modem to answer a bare AT after PWRKEY is released.
+//
+// RAISED 8000 -> 30000 (2026-09-11). The old budget gave the BC660K-GL only
+// ~9.7s from PWRKEY release to its first AT reply before the firmware declared
+// failure and CUT ITS POWER: PWRKEY is released at t=1300ms, POWERING hands over
+// at t=3000ms, and WAIT_AT gave up 8s later. A BC660K-GL routinely needs longer
+// than that to reach a UART-ready state, so the recovery path was power-cycling a
+// modem that was still booting - forever, since each retry restarted the same
+// race. Observed symptom: "-> AT" repeating indefinitely with not one "<- OK".
+//
+// This must stay comfortably longer than the module's worst-case boot time. It
+// costs nothing when the modem is healthy, because WAIT_AT exits as soon as the
+// first OK arrives - it is a ceiling, not a delay.
+#define NBIOT_TIMEOUT_WAIT_AT_MS 30000
 #define NBIOT_TIMEOUT_CONFIG_MS 8000
 #define NBIOT_TIMEOUT_ATTACH_MS 60000  // AT+CEREG? polling until state 1 or 5
 #define NBIOT_TIMEOUT_SOCKET_MS 15000  // covers OK ack + the async +QIOPEN URC
@@ -311,4 +324,8 @@ inline void nbiotResolveNodeName(uint16_t addr, char *outName, size_t outCap) {
 #define NBIOT_MAX_ATTACH_RETRIES 2
 #define NBIOT_BACKOFF_BASE_MS 2000
 #define NBIOT_BACKOFF_MAX_MS 120000
-#define NBIOT_POWER_OFF_SETTLE_MS 500  // EN held deasserted this long before re-asserting on a power cycle
+// EN held deasserted this long before re-asserting on a power cycle. RAISED
+// 500 -> 3000 (2026-09-11): 500ms is not long enough for the module's own supply
+// rail to actually collapse, so the "power cycle" could leave it half-powered in
+// an undefined state rather than giving it the clean cold start intended.
+#define NBIOT_POWER_OFF_SETTLE_MS 3000
