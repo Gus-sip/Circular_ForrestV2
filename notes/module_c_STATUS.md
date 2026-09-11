@@ -1,5 +1,63 @@
 # CHIP FOREST - Session Status
 
+## 2026-09-11 - Chain status: C->B working, B->A working, end-to-end unproven
+
+| Link | State |
+|---|---|
+| Module C -> Module B (LoRa) | **Working** - RSSI -22, batches of 2, node addressing added |
+| Module B -> ThingsBoard (NB-IoT/MQTT) | **Working** - registered, CSQ 31/31, MQTT connected, stable 220s |
+| End-to-end telemetry in ThingsBoard | **NOT YET CONFIRMED** - no node transmitting during the window |
+
+### Fixed today
+
+**Module B's NB-IoT uplink** - the modem UART was held open across power cycles,
+so the ESP's TX pin back-powered the BC660K-GL through its protection diodes and
+it never cold-started. Full write-up in `notes/module_b_README.md`. Commit
+`fe29243`.
+
+**Module C sleep cycle** - sequential sensor slots (0 resets vs 31), the BME690
+priming read, the transmit brownout (sensor rails must be OFF for the radio
+burst), LED colour order (NEO_RGB, not the GRB `neopixelWrite` hardcodes), and
+`lora_trans` raised to 4. Commits `7925d11`, `4e1af78`, `9030017`, `80ce604`.
+
+**Per-node LoRa addressing** - every node shipped as `addr=1`, so Module B could
+not tell them apart and two nodes' readings interleaved under one identity.
+Now `env:module-c-node2` -> 3 and `module-c-node3` -> 4; address 2 is Module B.
+
+**Logging** - `logs/porthole_data.csv` records ALL LoRa traffic (single, batch,
+ack, downlink, unparseable) with the raw frame on every row. The old logger
+required exactly 13 fields and silently dropped everything else, which was about
+one transmit in three once batching started.
+
+### Node C1 - regressed, needs attention
+
+- **BME690 came back** (`ACK at 0x76`, live values) after the Calypso was removed,
+  confirming the earlier marginal-solder-joint diagnosis.
+- **BMV080 `NoAck`** and **CM1106 `Timeout` ("nothing received")** - both worked on
+  this firmware earlier the same day. The CO2 value of 663 in the packets is a
+  STALE CACHE, not a reading; `frozenValueRun=0` proves the read path is dead
+  rather than the sensor freezing.
+- **Cold-booting repeatedly with RTC lost**, so the tick counters reset to 1 every
+  boot and never reach their thresholds of 3 and 4 - the node reads and transmits
+  NOTHING and sleeps forever looking healthy. See the memory note
+  `module-c-sleep-rtc-loss-silent`.
+- C1 then dropped off USB entirely and has not been back.
+
+### Next, in order
+
+1. Power C1 and read the reset reason - now printed BEFORE the idle bail-out, so
+   it is finally visible on the boots that fail. POWERON / TASK_WDT / BROWNOUT are
+   three different faults.
+2. Confirm a real `AT+QMTPUB` and telemetry landing on `NodoC-1` in ThingsBoard.
+   A publish can report success while ThingsBoard stores nothing if the
+   `ts`/`values` pairing is wrong.
+3. Make the sleep schedule survive RTC loss - a cold boot must read and transmit
+   rather than idle, and the counters should be NVS-backed.
+4. Reconsider power-cycling the sensor rails every wake. The BMV080 laser is now
+   duty-cycled in software, which is the job the rail gating was for; doing both
+   costs a full sensor cold start every wake and is the likeliest reason C1's
+   BMV080 and CM1106 degraded.
+
 ## 2026-09-10 (later) - SLEEP CYCLE WORKING END TO END ON C2
 
 Node C2 sleeps, wakes on schedule, reads, transmits, and Module B receives it.

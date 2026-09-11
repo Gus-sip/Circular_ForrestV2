@@ -1,5 +1,91 @@
 # CHIP FOREST — LoRa Ground-Station Receiver
 
+## 2026-09-11 - NB-IoT uplink FIXED: the UART was back-powering the modem
+
+**Module B now reaches ThingsBoard over NB-IoT.** Commit `fe29243`.
+
+```
++CEREG: 1,5              registered (roaming)
++CGPADDR: 0,"10.0.0.1"   IP assigned
++CSQ: 31,0               signal 31/31
++QMTOPEN: 0,0            socket open to test-moduloa.home.kg:18831
++QMTCONN: 0,0,0          MQTT connected
++QMTSUB: 0,1,0,1         subscribed
+state MQTT_CONNECT -> IDLE   (held 220s, stable)
+```
+
+### The bug
+
+The modem UART was **held open across every power cycle**. `enterPowering()`
+called `_serial.begin()` first and latched `_uartStarted` true permanently, so the
+ESP's TX pin sat **driven HIGH while VIN was off** - back-powering the BC660K-GL
+through its input protection diodes. The rail never fully collapsed, so every
+"power cycle" restarted a module that had never actually been off, leaving it in a
+state no amount of AT retrying could clear.
+
+That is the mechanism behind "worked yesterday, silent today, unchanged firmware":
+it depended on whatever state the module happened to latch into.
+
+**Fix.** `releaseUart()` ends the peripheral AND returns TX/RX to `INPUT` before
+power is touched - ending the peripheral alone is NOT enough, the pin keeps its
+last level and carries on feeding the module. `startUart()` reopens it only once
+POWERING has settled. `powerCycle()` releases it too, or it is not a power cycle
+at all. `NBIOT_POWER_OFF_SETTLE_MS` 3000 -> 4000.
+
+**General rule: before cutting power to a UART peripheral, release the TX pin.**
+
+### How it was found
+
+The firmware got `-> AT` forever with not one `<- OK`. An isolation probe
+(`env:module-b-modem-probe`) then got clean `OK` replies from the same module,
+same pins, same baud - the only difference was that the probe powered the module,
+waited, and THEN opened the UART.
+
+Everything ruled out first, all with 0 bytes: RX/TX swapped, **all 18 free GPIOs
+swept as RX**, all 7 baud rates, channel gate open and closed, every EN/CHANNEL
+combination held 30s, and identical behaviour on pre-change firmware. Raw bytes
+were dumped throughout rather than parsed replies - "parser found no OK" and "UART
+received nothing" look identical from the main firmware and point at completely
+different faults.
+
+### A documented assumption that was wrong
+
+`Config.h` claimed the module "does NOT auto-boot on VIN alone" and credited a
+PWRKEY pulse for an earlier successful bring-up. **PWRKEY (GP11) is not connected
+on this board and never has been** - confirmed by the person who built it. Every
+PWRKEY pulse this firmware ever sent went nowhere; the pulse merely coincided with
+a working bring-up and was credited for it. Only VIN (GP9) and the GP10 channel
+gate start this module. Corrected in `Config.h` so it cannot misdirect again.
+
+### Diagnostics added
+
+- `setLastError()` now PRINTS. It previously only stored the string into a member
+  nothing read, so a modem that never answered produced a log containing nothing
+  but `-> AT` - the give-up, the reason and the power cycle were all invisible,
+  making a cycling state machine indistinguishable from a hung one.
+- `setState()` traces every transition. The OLED shows only the CURRENT state via
+  `NBIoT: %s`, so a fast POWERING -> WAIT_AT -> ERROR -> OFF loop looks like one
+  stuck state on screen. This is how `NBIoT: WAIT_AT` - which means "waiting for
+  the modem to answer AT", before any band or SIM - got read as "connected to the
+  NB-IoT band".
+- `NBIOT_TIMEOUT_WAIT_AT_MS` 8000 -> 30000 and VIN settle 300ms -> 2000ms. The old
+  budget gave the module ~9.7s from power-up to answer before the firmware cut its
+  power and restarted the same race.
+
+### Still open
+
+- **Telemetry publishing is NOT yet confirmed.** Module B sits at `IDLE` waiting
+  for data; no `AT+QMTPUB` has been observed because no node is currently
+  transmitting. Batching is 10 minutes (`MQTT_BATCH_SECONDS 600`).
+- Payload-shape trap still applies: a publish can report success while ThingsBoard
+  silently stores nothing if the `ts`/`values` pairing is wrong. A `"values"`
+  wrapper is valid ONLY with a `"ts"`.
+- `logs/lora_to_thingsboard.py` is a PC-side fallback bridge publishing the same
+  gateway payload over this machine's internet. NOT the deployment path - a field
+  node cannot depend on a PC - but it proved broker, port, token and payload shape
+  were all correct (CONNACK 0, PUBACK) while the modem was still silent, which
+  isolated the fault to the modem alone.
+
 Standalone firmware for the receiving ESP32-S3-Zero. This board has no
 sensors attached - its only job is to receive telemetry over a RYLR998 LoRa
 module and serve it as a live dashboard over WiFi. Separate PlatformIO project
