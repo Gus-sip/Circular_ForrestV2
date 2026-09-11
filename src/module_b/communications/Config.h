@@ -334,4 +334,4 @@ inline void nbiotResolveNodeName(uint16_t addr, char *outName, size_t outCap) {
 // 500 -> 3000 (2026-09-11): 500ms is not long enough for the module's own supply
 // rail to actually collapse, so the "power cycle" could leave it half-powered in
 // an undefined state rather than giving it the clean cold start intended.
-#define NBIOT_POWER_OFF_SETTLE_MS 3000
+#define NBIOT_POWER_OFF_SETTLE_MS 4000

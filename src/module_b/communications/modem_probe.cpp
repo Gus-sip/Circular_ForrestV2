@@ -1,118 +1,84 @@
 /*
- * BC660K-GL isolation probe - why does the modem never answer AT?
+ * BC660K-GL - the RST line, the last untried lever.
  *
- * The main firmware retries forever and never gets a byte back. Raising the
- * WAIT_AT ceiling from 8s to 30s changed nothing, which rules out the power-on
- * race (the modem was NOT simply being cut off mid-boot). ARDUINO_USB_CDC_ON_BOOT
- * is 1, so the console is USB CDC and UART0's GPIO43/44 are genuinely free - no
- * pin conflict either.
+ * Exhausted so far, with the module powered and held:
+ *   RX on GPIO43/44 swapped                 0 bytes
+ *   RX swept across all 18 free GPIOs       0 bytes (only GPIO44's line-settling 0x00)
+ *   all seven baud rates                    0 bytes
+ *   channel gate open AND closed            0 bytes
+ *   EN and channel, every combination, 30s  0 bytes
+ *   PWRKEY widths                           moot - NOT WIRED on this board
  *
- * So this strips away the state machine, the OLED, WiFi and the radio, and tests
- * the few things that remain, one variable at a time:
+ * So the pin map is right and the module is simply not talking. One control line
+ * has still never been driven: NBIOT_RST_PIN (GPIO6), which Config.h describes as
+ * "kept for a future explicit-reset recovery path, not currently wired into
+ * POWERING".
  *
- *   PHASE 1  documented sequence, RX=44 TX=43     - the known-good configuration
- *   PHASE 2  same, but RX/TX SWAPPED             - a swapped pair is silent, not garbled
- *   PHASE 3  longer PWRKEY pulse (2500ms)        - in case 1000ms no longer triggers it
- *   PHASE 4  no channel gate (GP10 left closed)  - proves GP10 matters, or that it does not
+ * Why it is worth trying even though PWRKEY turned out to be unconnected: RST and
+ * PWRKEY are different things. PWRKEY is a power-on REQUEST the module's own logic
+ * can decline if its state is wedged; RST forces the core to restart regardless.
+ * "Worked yesterday, silent today, unchanged firmware" is exactly what a latched
+ * module looks like, and this is the only remaining way to unlatch it in software.
  *
- * Every phase dumps RAW BYTES, not parsed replies. The distinction matters: a
- * parser that finds no "OK" and a UART that receives nothing at all look identical
- * from the main firmware, and they point at completely different faults. Any byte
- * arriving - even garbage - proves the modem is alive and the UART path works,
- * which would move the fault to baud rate or framing.
+ * If any strategy below yields bytes, that sequence goes straight into
+ * ModemNBIoTMqtt::enterPowering() as the standard bring-up.
  */
 
 #include <Arduino.h>
 
 #include "Config.h"
 
-#define LISTEN_MS 25000UL
-#define AT_GAP_MS 3000UL
+#define LISTEN_MS 8000UL
 
-static void dumpRaw(const char *label, size_t n, const uint8_t *buf) {
-  Serial.printf("  %s: %u byte(s)", label, (unsigned)n);
-  if (n == 0) {
-    Serial.println("  <- NOTHING AT ALL");
-    return;
-  }
-  Serial.print("  hex:");
-  for (size_t i = 0; i < n && i < 64; i++) Serial.printf(" %02X", buf[i]);
-  Serial.print("  ascii: \"");
-  for (size_t i = 0; i < n && i < 64; i++) {
-    char c = (char)buf[i];
-    Serial.print((c >= 32 && c < 127) ? c : '.');
-  }
-  Serial.println("\"");
-}
+static uint8_t buf[512];
 
-// Power the module up per the sequence in Config.h, optionally varying it.
-static void powerUp(uint32_t pwrkeyMs, bool useChannel) {
-  pinMode(NBIOT_EN_PIN, OUTPUT);
-  pinMode(NBIOT_CHANNEL_PIN, OUTPUT);
-  pinMode(NBIOT_PWRKEY_PIN, OUTPUT);
-
-  // Everything off first, and long enough for the module's rail to truly
-  // collapse - a half-powered module comes back in an undefined state.
-  digitalWrite(NBIOT_EN_PIN, NBIOT_DISABLE);
-  digitalWrite(NBIOT_CHANNEL_PIN, !NBIOT_CHANNEL_ACTIVE);
-  digitalWrite(NBIOT_PWRKEY_PIN, !NBIOT_PWRKEY_ACTIVE);
-  Serial.println("  power down 3s...");
-  Serial.flush();
-  delay(3000);
-
-  if (useChannel) {
-    digitalWrite(NBIOT_CHANNEL_PIN, NBIOT_CHANNEL_ACTIVE);
-    Serial.printf("  GP%d channel -> %s\n", NBIOT_CHANNEL_PIN,
-                  NBIOT_CHANNEL_ACTIVE == LOW ? "LOW" : "HIGH");
-  } else {
-    Serial.printf("  GP%d channel LEFT CLOSED (deliberate)\n", NBIOT_CHANNEL_PIN);
-  }
-  digitalWrite(NBIOT_EN_PIN, NBIOT_EN_ACTIVE);
-  Serial.printf("  GP%d VIN -> %s, settling 2s\n", NBIOT_EN_PIN,
-                NBIOT_EN_ACTIVE == LOW ? "LOW" : "HIGH");
-  Serial.flush();
-  delay(2000);
-
-  digitalWrite(NBIOT_PWRKEY_PIN, NBIOT_PWRKEY_ACTIVE);
-  Serial.printf("  GP%d PWRKEY -> active for %lums\n", NBIOT_PWRKEY_PIN,
-                (unsigned long)pwrkeyMs);
-  Serial.flush();
-  delay(pwrkeyMs);
-  digitalWrite(NBIOT_PWRKEY_PIN, !NBIOT_PWRKEY_ACTIVE);
-  Serial.println("  PWRKEY released");
-  Serial.flush();
-}
-
-static void phase(const char *name, int rxPin, int txPin, uint32_t pwrkeyMs, bool useChannel) {
-  Serial.println();
-  Serial.printf("================ %s ================\n", name);
-  Serial.printf("  UART RX=GPIO%d TX=GPIO%d @ %d baud\n", rxPin, txPin, NBIOT_BAUD);
-  Serial.flush();
-
+static void uartUp() {
   Serial2.end();
-  delay(50);
-  powerUp(pwrkeyMs, useChannel);
-
-  Serial2.begin(NBIOT_BAUD, SERIAL_8N1, rxPin, txPin);
+  delay(20);
+  Serial2.begin(NBIOT_BAUD, SERIAL_8N1, NBIOT_RX_PIN, NBIOT_TX_PIN);
   while (Serial2.available()) Serial2.read();
+}
 
-  static uint8_t buf[512];
+static bool listen(const char *what) {
   size_t n = 0;
   uint32_t t0 = millis();
   uint32_t lastAt = 0;
   while (millis() - t0 < LISTEN_MS) {
-    if (millis() - lastAt >= AT_GAP_MS) {
+    if (millis() - lastAt >= 1200) {
       lastAt = millis();
       Serial2.print("AT\r\n");
-      Serial.printf("  [%5lums] -> AT\n", (unsigned long)(millis() - t0));
-      Serial.flush();
     }
-    while (Serial2.available() && n < sizeof(buf)) {
-      buf[n++] = (uint8_t)Serial2.read();
-    }
+    while (Serial2.available() && n < sizeof(buf)) buf[n++] = (uint8_t)Serial2.read();
+    delay(1);  // yield - task WDT is 5s with panic enabled
   }
-  dumpRaw("received", n, buf);
+  // A lone 0x00 is the line settling when the UART attaches, not data - it has
+  // appeared in every previous run and must not be mistaken for success.
+  bool real = (n > 1) || (n == 1 && buf[0] != 0x00);
+  Serial.printf("  %-42s -> %u byte(s)", what, (unsigned)n);
+  if (n) {
+    Serial.print("  hex:");
+    for (size_t i = 0; i < n && i < 32; i++) Serial.printf(" %02X", buf[i]);
+    Serial.print("  ascii: \"");
+    for (size_t i = 0; i < n && i < 32; i++) {
+      char c = (char)buf[i];
+      Serial.print((c >= 32 && c < 127) ? c : '.');
+    }
+    Serial.print("\"");
+  }
+  Serial.println(real ? "   *** REAL DATA ***" : "");
   Serial.flush();
+  return real;
+}
+
+static void powerOn() {
+  digitalWrite(NBIOT_CHANNEL_PIN, NBIOT_CHANNEL_ACTIVE);
+  digitalWrite(NBIOT_EN_PIN, NBIOT_EN_ACTIVE);
+}
+
+static void powerOff(uint32_t ms) {
+  digitalWrite(NBIOT_EN_PIN, NBIOT_DISABLE);
+  digitalWrite(NBIOT_CHANNEL_PIN, !NBIOT_CHANNEL_ACTIVE);
+  delay(ms);
 }
 
 void setup() {
@@ -121,25 +87,68 @@ void setup() {
   while (!Serial && millis() - t0 < 3000) delay(10);
   delay(500);
 
+  pinMode(NBIOT_EN_PIN, OUTPUT);
+  pinMode(NBIOT_CHANNEL_PIN, OUTPUT);
+  pinMode(NBIOT_RST_PIN, OUTPUT);
+  pinMode(NBIOT_PWRKEY_PIN, INPUT);  // not wired - deliberately not driven
+  digitalWrite(NBIOT_RST_PIN, !NBIOT_RST_ACTIVE);
+
   Serial.println();
-  Serial.println("=== BC660K-GL isolation probe ===");
-  Serial.printf("EN=GPIO%d(active %s)  CHANNEL=GPIO%d(active %s)  PWRKEY=GPIO%d(active %s)\n",
-                NBIOT_EN_PIN, NBIOT_EN_ACTIVE == LOW ? "LOW" : "HIGH", NBIOT_CHANNEL_PIN,
-                NBIOT_CHANNEL_ACTIVE == LOW ? "LOW" : "HIGH", NBIOT_PWRKEY_PIN,
-                NBIOT_PWRKEY_ACTIVE == LOW ? "LOW" : "HIGH");
-  Serial.println("Any byte received - even garbage - proves the modem is alive.");
+  Serial.println("=== BC660K-GL: RST line trial ===");
+  Serial.printf("RST=GPIO%d (active %s)  EN=GPIO%d  CH=GPIO%d  RX=GPIO%d TX=GPIO%d\n",
+                NBIOT_RST_PIN, NBIOT_RST_ACTIVE == LOW ? "LOW" : "HIGH", NBIOT_EN_PIN,
+                NBIOT_CHANNEL_PIN, NBIOT_RX_PIN, NBIOT_TX_PIN);
+  Serial.println("PWRKEY is NOT wired on this board and is not driven.");
   Serial.flush();
 }
 
 void loop() {
-  phase("PHASE 1: documented sequence", NBIOT_RX_PIN, NBIOT_TX_PIN, NBIOT_PWRKEY_PULSE_MS, true);
-  phase("PHASE 2: RX/TX SWAPPED", NBIOT_TX_PIN, NBIOT_RX_PIN, NBIOT_PWRKEY_PULSE_MS, true);
-  phase("PHASE 3: longer PWRKEY 2500ms", NBIOT_RX_PIN, NBIOT_TX_PIN, 2500, true);
-  phase("PHASE 4: channel gate left CLOSED", NBIOT_RX_PIN, NBIOT_TX_PIN, NBIOT_PWRKEY_PULSE_MS,
-        false);
+  Serial.println("\n--- powering module, then trying RST every way ---");
+  Serial.flush();
+  powerOff(4000);
+  powerOn();
+  delay(2500);
+  uartUp();
 
-  Serial.println();
-  Serial.println("=== all phases done - repeating in 10s ===");
+  if (listen("A: powered, no RST (baseline)")) return;
+
+  digitalWrite(NBIOT_RST_PIN, NBIOT_RST_ACTIVE);
+  delay(NBIOT_RST_PULSE_MS);
+  digitalWrite(NBIOT_RST_PIN, !NBIOT_RST_ACTIVE);
+  delay(1500);  // let the core come out of reset before expecting anything
+  uartUp();
+  if (listen("B: RST pulsed 200ms")) return;
+
+  digitalWrite(NBIOT_RST_PIN, NBIOT_RST_ACTIVE);
+  delay(1500);
+  digitalWrite(NBIOT_RST_PIN, !NBIOT_RST_ACTIVE);
+  delay(2500);
+  uartUp();
+  if (listen("C: RST held 1500ms")) return;
+
+  // Reset asserted BEFORE the rail rises and released after, so the core starts
+  // from a defined state rather than whatever it powered into.
+  powerOff(4000);
+  digitalWrite(NBIOT_RST_PIN, NBIOT_RST_ACTIVE);
+  powerOn();
+  delay(2500);
+  digitalWrite(NBIOT_RST_PIN, !NBIOT_RST_ACTIVE);
+  delay(2000);
+  uartUp();
+  if (listen("D: RST held across VIN rise, released after")) return;
+
+  // Opposite polarity, in case the net is active-high on this board. Cheap to
+  // test and the alternative is assuming it away.
+  digitalWrite(NBIOT_RST_PIN, !NBIOT_RST_ACTIVE);
+  delay(500);
+  digitalWrite(NBIOT_RST_PIN, NBIOT_RST_ACTIVE);
+  delay(1500);
+  digitalWrite(NBIOT_RST_PIN, !NBIOT_RST_ACTIVE);
+  delay(2000);
+  uartUp();
+  if (listen("E: RST inverted polarity")) return;
+
+  Serial.println("\n=== RST produced nothing either - repeating in 10s ===");
   Serial.flush();
   delay(10000);
 }

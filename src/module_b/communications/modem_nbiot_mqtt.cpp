@@ -495,11 +495,32 @@ void ModemNBIoTMqtt::setState(State s) {
   }
 }
 
-void ModemNBIoTMqtt::enterPowering() {
-  if (!_uartStarted) {
-    _serial.begin(_baud, SERIAL_8N1, _rxPin, _txPin);
-    _uartStarted = true;
+// Stop driving the modem UART entirely. Ending the peripheral is not enough on
+// its own - the pin must also be taken out of output mode, or it keeps its last
+// level and continues to feed the unpowered module.
+void ModemNBIoTMqtt::releaseUart() {
+  if (_uartStarted) {
+    _serial.end();
+    _uartStarted = false;
   }
+  pinMode(_txPin, INPUT);
+  pinMode(_rxPin, INPUT);
+}
+
+void ModemNBIoTMqtt::startUart() {
+  if (_uartStarted) return;
+  _serial.begin(_baud, SERIAL_8N1, _rxPin, _txPin);
+  _uartStarted = true;
+  while (_serial.available()) _serial.read();  // drop power-up line noise
+}
+
+void ModemNBIoTMqtt::enterPowering() {
+  // UART DOWN FIRST, and the TX line released, before power is touched. See the
+  // block comment above: a driven TX pin back-powers the module while VIN is off
+  // and prevents a genuine cold start. The UART is reopened in tickPowering()
+  // once the rail has come up and settled.
+  releaseUart();
+
   digitalWrite(_channelPin, NBIOT_CHANNEL_ACTIVE);
   digitalWrite(_enPin, NBIOT_EN_ACTIVE);
   _sawBootUrc = false;
@@ -516,6 +537,9 @@ void ModemNBIoTMqtt::enterError(const char *reason) {
 
 void ModemNBIoTMqtt::powerCycle() {
   setLastError("power cycling modem (last resort)");
+  // Release TX before cutting VIN - otherwise the module is still being fed
+  // through it and this is not a power cycle at all.
+  releaseUart();
   digitalWrite(_enPin, NBIOT_DISABLE);
   digitalWrite(_channelPin, !NBIOT_CHANNEL_ACTIVE);
   digitalWrite(_pwrkeyPin, !NBIOT_PWRKEY_ACTIVE);
@@ -642,6 +666,8 @@ void ModemNBIoTMqtt::tickPowering() {
   }
 
   if (_sawBootUrc || elapsed > NBIOT_TIMEOUT_POWERING_MS) {
+    // Only now, with the module powered and settled, is it safe to drive TX.
+    startUart();
     _lastAtPingMs = 0;
     setState(State::WAIT_AT);
   }

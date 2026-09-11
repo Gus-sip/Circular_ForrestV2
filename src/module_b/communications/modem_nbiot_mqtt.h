@@ -71,6 +71,12 @@ public:
 
   // ---------- Observability - surfaced on the dashboard ----------
   State state() const { return _state; }
+  // The modem UART is deliberately NOT held open across power cycles - a driven
+  // TX pin back-powers the module through its protection diodes and prevents it
+  // ever cold-starting. See the comment on enterPowering().
+  void releaseUart();
+  void startUart();
+
   const char *stateName() const;
   // Names a state without needing an instance in that state - setState() must be
   // able to print the state it is ENTERING, before _state is assigned.
