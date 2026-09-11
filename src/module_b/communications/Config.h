@@ -46,8 +46,14 @@ struct NodeNameEntry {
   const char *name;
 };
 
+// Address 2 is this receiver (LORA_MY_ADDR) and is deliberately absent - it is
+// never a sender. Nodes were all shipped on address 1, which made them
+// indistinguishable on the air; they now get one address each, set per build via
+// the env:module-c-node* environments.
 static const NodeNameEntry NBIOT_NODE_NAMES[] = {
-    {LORA_NODE_ADDR, "NodoC-1"},
+    {LORA_NODE_ADDR, "NodoC-1"},  // 1
+    {3, "NodoC-2"},
+    {4, "NodoC-3"},
 };
 
 // Resolves addr to its configured name, or "NodoDesconocido-<addr>" if addr

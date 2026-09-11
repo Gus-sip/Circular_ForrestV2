@@ -38,9 +38,24 @@ OUT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "porthole_da
 # One Module C sleep tick, for converting a batch record's age back to seconds.
 TICK_SECONDS = 10
 
+# Address -> node name. Must match NBIOT_NODE_NAMES in Module B's Config.h.
+# Address 2 is Module B itself and is never a sender.
+NODE_NAMES = {
+    "1": "NodoC-1",
+    "3": "NodoC-2",
+    "4": "NodoC-3",
+}
+
+
+def node_name(addr):
+    # Unknown addresses are LABELLED, never dropped - a node with a placeholder
+    # name is visible and fixable; one whose data is silently discarded is not.
+    return NODE_NAMES.get(str(addr), "NodoDesconocido-%s" % addr)
+
+
 FIELDS = [
     "timestamp", "received_at", "direction", "kind",
-    "addr", "rssi", "snr", "len",
+    "node", "addr", "rssi", "snr", "len",
     "batch_index", "batch_count", "age_ticks",
     "temp", "hum", "pres", "gas", "pm1", "pm25", "pm10",
     "co2", "co", "coTemp", "windAngle", "windSpeed", "windValid",
@@ -71,8 +86,8 @@ def blank_row(**kw):
 def rows_for_payload(addr, length, rssi, snr, data, now):
     """Every row this payload yields. Never returns empty - an unparseable frame
     still produces one row, so nothing is lost."""
-    common = dict(received_at=now.isoformat(), direction="RX", addr=addr,
-                  rssi=rssi, snr=snr, len=length, raw=data)
+    common = dict(received_at=now.isoformat(), direction="RX", node=node_name(addr),
+                  addr=addr, rssi=rssi, snr=snr, len=length, raw=data)
 
     if data.startswith("ACK,"):
         return [blank_row(timestamp=now.isoformat(), kind="ack", **common)]
@@ -95,7 +110,7 @@ def rows_for_payload(addr, length, rssi, snr, data, now):
             ts = now - timedelta(seconds=age * TICK_SECONDS)
             r = blank_row(timestamp=ts.isoformat(), kind="batch", batch_index=i,
                           batch_count=len(chunks), age_ticks=age, **common)
-            for name, val in zip(FIELDS[11:24], f[:13]):
+            for name, val in zip(FIELDS[12:25], f[:13]):
                 r[name] = val
             out.append(r)
         return out or [blank_row(timestamp=now.isoformat(), kind="other", **common)]
@@ -103,7 +118,7 @@ def rows_for_payload(addr, length, rssi, snr, data, now):
     parts = data.split(",")
     if len(parts) == 13:
         r = blank_row(timestamp=now.isoformat(), kind="single", **common)
-        for name, val in zip(FIELDS[11:24], parts):
+        for name, val in zip(FIELDS[12:25], parts):
             r[name] = val
         return [r]
 
@@ -153,7 +168,7 @@ with open(OUT_PATH, "a", newline="") as f:
                 writer.writerow(r)
             f.flush()
             kinds = ",".join(sorted({r["kind"] for r in rows}))
-            print(f"RX {kinds}: addr={addr} rssi={rssi} snr={snr} -> {len(rows)} row(s)",
+            print(f"RX {kinds}: {node_name(addr)} (addr={addr}) rssi={rssi} snr={snr} -> {len(rows)} row(s)",
                   flush=True)
             continue
 
@@ -161,7 +176,8 @@ with open(OUT_PATH, "a", newline="") as f:
         if d:
             node, cfg, result = d.groups()
             writer.writerow(blank_row(timestamp=now.isoformat(), received_at=now.isoformat(),
-                                      direction="TX", kind="downlink", addr=node,
+                                      direction="TX", kind="downlink", node=node,
+                                      addr=node,
                                       raw=f"{cfg} ({result})"))
             f.flush()
             print(f"TX downlink to {node}: {cfg} ({result})", flush=True)

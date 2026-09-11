@@ -120,7 +120,20 @@
 // (see the note in rylr998_bridge.cpp). Raise it once the supply can take it.
 #define LORA_TX_POWER_DBM 14
 
-#define LORA_MY_ADDR 1  // this node's AT+ADDRESS
+// This node's AT+ADDRESS - the number Module B sees as "+RCV addr=<n>", and the
+// ONLY thing distinguishing one node from another on the air. Every node shipped
+// with 1, so Module B could not tell them apart and two nodes' readings
+// interleaved under one identity in the log.
+//
+// Overridable per build so one firmware serves every node - see the
+// env:module-c-node* environments. Address 2 is Module B itself and must never be
+// used by a node. Keep these in step with NBIOT_NODE_NAMES in Module B's Config.h,
+// and never renumber a node already known to ThingsBoard.
+//
+//   1 = C1 (NodoC-1)   2 = Module B (receiver)   3 = C2   4 = C3
+#ifndef LORA_MY_ADDR
+#define LORA_MY_ADDR 1
+#endif
 #define LORA_RX_ADDR 2  // pp1-lora-receiver's AT+ADDRESS
 
 // LoRa send period - Module C -> Module B. Sampling runs continuously
@@ -928,6 +941,11 @@ void setup() {
   // in milliseconds instead of once per 10s tick.
   if (g_sensorReadCount < 0xFFFF) g_sensorReadCount++;
   if (g_loraTransCount < 0xFFFF) g_loraTransCount++;
+  // Reset reason FIRST - before any bail-out can skip it. This costs one line per
+  // wake and is the difference between diagnosing a reset and guessing at it.
+  Serial.printf("Last reset reason: %d = %s\n", (int)rr, rrName);
+  Serial.printf("Node address: %d (Module B sees this as +RCV addr=%d)\n", LORA_MY_ADDR,
+                LORA_MY_ADDR);
   Serial.printf("Tick: sensor_read %u/%u, lora_trans %u/%u\n",
                 (unsigned)g_sensorReadCount, (unsigned)g_sensorReadEvery,
                 (unsigned)g_loraTransCount, (unsigned)g_loraTransEvery);
@@ -967,7 +985,7 @@ void setup() {
   ledWorking();
   g_bootCount++;
   Serial.printf("Boot #%lu since last power loss\n", (unsigned long)g_bootCount);
-  Serial.printf("Last reset reason: %d = %s\n", (int)rr, rrName);
+  // (reset reason already printed above, before the idle bail-out)
   Serial.flush();
 
   // Deep sleep left these pads latched (see kHeldGates). Nothing can drive them
@@ -1534,6 +1552,7 @@ static void transmitStore() {
       handleInboundMessage(msg);
       break;
     }
+    delay(1);  // yields to FreeRTOS so the idle task can feed the task WDT
   }
 }
 
