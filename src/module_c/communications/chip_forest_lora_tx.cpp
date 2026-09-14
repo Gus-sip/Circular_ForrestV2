@@ -410,7 +410,10 @@ static uint16_t readingsPerPacket(uint16_t sensorReadEvery, uint16_t loraTransEv
 // Longest a single scheduled read may spend waiting for every fast sensor to go
 // fresh. Bounds the awake time of a reading tick; whatever is still stale is sent
 // as its last known value and named in the log.
-#define SENSOR_READ_WINDOW_MS 20000UL
+// Ceiling for one read tick. Must now cover every slot PLUS the post-heater rail
+// cycle and the BMV080's startup delay that follows it, so it is far wider than
+// when the slots merely ran back to back.
+#define SENSOR_READ_WINDOW_MS 45000UL
 #define SLEEP_SKIP_SEN0466 1            // 210s settle: out of the cycle until we sleep through it
 
 // A power-cycled board must always give a window to reflash in. Deep sleep drops
@@ -1386,23 +1389,14 @@ static const char *slotName(int slot) {
 // is far too long to spend inside a sequential pass.
 #define BMV080_SLOT_MS 8000UL
 
-// Gap between slots.
-//
-// RAISED 250 -> 1500 (2026-09-14). Sequencing the slots was not enough on its own:
-// they were still only 250ms apart, and the BME690's gas heater runs at 320C in
-// the slot immediately before the BMV080's laser. Measured on node C2 with the
-// 250ms gap, alternating between consecutive read passes:
-//
-//   8562ms pass   bme=OK  bmv=OK      co2=OK
-//   7343ms pass   bme=OK  bmv=NoAck   co2=Timeout
-//
-// The short passes are short precisely BECAUSE they failed - startMeasurement()
-// NoAcks and the slot exits immediately instead of waiting for a frame.
-//
-// Separating loads in sequence is not the same as separating them in TIME: a
-// heater that has just switched off has still left the rail sagging 250ms later.
-// This is the gap the sequential-slot rule actually needs.
+// Gap between ordinary slots - enough for one small load to stop drawing before
+// the next starts.
 #define SLOT_GAP_MS 1500UL
+
+// How long the sensor rails are held OFF after the BME690's gas heater runs.
+// A gap alone was not enough at 250ms or at 1500ms; only an actual rail cycle let
+// the BMV080 start afterwards. This is that cycle's off-time.
+#define HEATER_RECOVERY_OFF_MS 800UL
 
 // Settling time after the sensor rails are cut and before the radio transmits.
 // Long enough for the rails to actually discharge their loads and for whatever
@@ -1739,44 +1733,76 @@ static void transmitStore() {
 // re-fire the BMV080 laser repeatedly - the exact load pattern that caused the
 // resets. A sensor that misses its slot keeps its last known value and is named
 // in the log line as STALE.
+// ONE read tick services EVERY sensor, then the node sleeps. Transmit happens on
+// its own tick. This is the requested cycle:
+//
+//   tick 1,2  idle - wave, straight back to sleep, no rail powered
+//   tick 3    wake, read ALL sensors, store, sleep   (sensor_read resets to 0)
+//   tick 4    wake, transmit, sleep                  (lora_trans resets to 0)
+//
+// The slots still run STRICTLY ONE AT A TIME within the tick - that part is not
+// negotiable, it is what took this board from 31 resets in 140s to none.
+//
+// The hard part is the BME690's gas heater at 320C. Reading everything in one
+// wake previously failed in a very specific way: the BME690 is read first, its own
+// gas value came back low (15764 instead of ~45000) whenever the rail sagged, and
+// the next two sensors then could not start:
+//
+//   gas 52925 -> bmv=OK     co2=OK
+//   gas 15764 -> bmv=NoAck  co2=Timeout
+//
+// Widening the inter-slot gap from 250ms to 1500ms did not help, because the sag
+// happens INSIDE the heater cycle rather than after it. What did help was a full
+// rail power-cycle between the heater and the next sensor - previously achieved by
+// putting them on different ticks. So that recovery is done here instead, inside
+// the tick, right after the heater runs: rails down, settle, rails back up.
+//
+// It costs the BMV080's startup delay once per read tick, which is the price of
+// reading everything in one wake rather than spreading it out.
+static void recoverRailsAfterHeater() {
+  Serial.println("[read] rail recovery after the BME690 heater");
+  Serial.flush();
+
+  digitalWrite(PIN_PCB_EN_A, (PIN_PCB_EN_A_ACTIVE == LOW) ? HIGH : LOW);
+  digitalWrite(PIN_PCB_EN_B, (PIN_PCB_EN_B_ACTIVE == LOW) ? HIGH : LOW);
+  delay(HEATER_RECOVERY_OFF_MS);
+
+  digitalWrite(PIN_PCB_EN_A, PIN_PCB_EN_A_ACTIVE);
+  digitalWrite(PIN_PCB_EN_B, PIN_PCB_EN_B_ACTIVE);
+  delay(PIN_PCB_EN_SETTLE_MS);
+
+  // The BMV080 needs its full startup window after any power cycle or it NoAcks -
+  // that is exactly the failure this recovery exists to prevent, so skipping the
+  // wait here would defeat the point.
+  delay(BMV080_STARTUP_DELAY_MS);
+}
+
 static void readFastSensorsOnce() {
   uint32_t t0 = millis();
   char pending[64];
 
-  // ONE SENSOR PER WAKE, not the whole set in one pass.
-  //
-  // Sequencing the slots was not sufficient, and neither was spacing them further
-  // apart. Measured on node C2 with a 1500ms inter-slot gap, consecutive passes:
-  //
-  //   gas 52925 -> bmv=OK     co2=OK
-  //   gas 15764 -> bmv=NoAck  co2=Timeout
-  //   gas 44199 -> bmv=OK     co2=OK
-  //
-  // The BME690 is read FIRST, so its own gas value coming back low is the tell:
-  // the rail sags during its 320C heater, which corrupts that measurement AND
-  // leaves the next two sensors unable to start. More gap does not help, because
-  // the sag happens INSIDE the heater cycle rather than after it.
-  //
-  // So the loads are now separated across TICKS. Each wake services exactly one
-  // sensor and then sleeps, which puts ten seconds and a full rail power-cycle
-  // between the heater and the laser instead of a delay() - far beyond anything a
-  // gap inside one pass can achieve, and it costs nothing extra because the node
-  // was sleeping anyway.
-  //
-  // The cache keeps each field's last known value, so a packet still carries a
-  // full set; the fields are simply staggered in age by up to one rotation.
-  int slot = (int)(g_slotCursor % (uint16_t)SLOT_COUNT);
-  g_slotCursor = (uint16_t)((g_slotCursor + 1) % SLOT_COUNT);
+  for (int slot = 0; slot < SLOT_COUNT; slot++) {
+    if (millis() - t0 >= SENSOR_READ_WINDOW_MS) {
+      Serial.printf("[read] WINDOW EXPIRED after %lums - slots %d..%d skipped\n",
+                    (unsigned long)(millis() - t0), slot, SLOT_COUNT - 1);
+      break;
+    }
 
-  Serial.printf("[read] servicing slot %d (%s) - one sensor per wake\n", slot, slotName(slot));
-  Serial.flush();
+    runSlot(slot);
+    quiesceAll();
 
-  runSlot(slot);
-  quiesceAll();
+    // The heater is the one load big enough to stop its neighbours starting, so it
+    // gets a rail cycle rather than merely a gap.
+    if (slot == SLOT_BME690 && bmeReady && g_bmeEnabled) {
+      recoverRailsAfterHeater();
+    } else {
+      delay(SLOT_GAP_MS);
+    }
+  }
 
   uint8_t stillPending = pendingSensors(pending, sizeof(pending));
   Serial.printf("[read] bme=%s(T%.1f H%.1f gas%.0f) bmv=%s(pm2.5=%.1f) co2=%s(%.0f) "
-                "co=%s(%.2f) wind=%s(rx=%u)%s%s  (slot %s, %lums)\n",
+                "co=%s(%.2f) wind=%s(rx=%u)%s%s  (all sensors, %lums)\n",
                 statusName(g_bmeSt), g_temp, g_hum, g_gas,
                 statusName(g_bmvSt), g_pm25,
                 statusName(g_co2St), g_co2,
@@ -1784,7 +1810,7 @@ static void readFastSensorsOnce() {
                 !g_calypsoEnabled ? "off" : (g_windValid ? "OK" : "silent"),
                 calypso.lastReadBytes(),
                 stillPending ? "  STALE: " : "", stillPending ? pending : "",
-                slotName(slot), (unsigned long)(millis() - t0));
+                (unsigned long)(millis() - t0));
   if (g_windValid) {
     Serial.printf("[wind] angle=%.1f deg  speed=%.2f\n", g_windAngle, g_windSpeed);
   }
