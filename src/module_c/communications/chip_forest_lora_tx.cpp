@@ -863,6 +863,45 @@ static void enableRails(bool safeMode) {
 
 static bool g_safeMode = false;
 
+// How long a safe-mode boot holds before restarting into normal operation. Long
+// enough to be caught on serial and to reflash, short enough that a node is not
+// out of service for long. Safe mode is a pause, not a terminal state.
+#define SAFE_MODE_RECOVER_MS 60000UL
+
+// Brings up ONLY the LoRa rail and radio - no sensors, since sensor load is the
+// usual reason for being in safe mode in the first place - and sends one packet
+// saying so. Without this a node in safe mode is indistinguishable from a dead
+// one, which is exactly how node C1 cost days of investigation.
+static void sendSafeModeDistress() {
+  Serial.println("[safe mode] sending distress packet (radio only, sensors stay off)");
+  Serial.flush();
+
+  pinMode(PIN_LORA_EN, OUTPUT);
+  digitalWrite(PIN_LORA_EN, PIN_LORA_EN_ACTIVE);
+  delay(PIN_LORA_EN_SETTLE_MS);
+
+  if (!radio.begin(LORA_MY_ADDR, LORA_NETWORK_ID, LORA_BAND_HZ,
+                   {LORA_PARAM_SF, LORA_PARAM_BW, LORA_PARAM_CR, LORA_PARAM_PREAMBLE},
+                   &Serial)) {
+    Serial.println("[safe mode] radio init failed - cannot report");
+    Serial.flush();
+    return;
+  }
+
+  // Deliberately NOT the telemetry format: this must not be mistaken for a
+  // reading. Module B logs an unrecognised payload verbatim rather than dropping
+  // it, so it will surface in porthole_data.csv as kind=other.
+  char msg[96];
+  int len = snprintf(msg, sizeof(msg), "SAFE,%lu,%d,%lu", (unsigned long)nvsBoots,
+                     (int)esp_reset_reason(), (unsigned long)g_wakeCount);
+  if (len < 0) len = 0;
+  if (len >= (int)sizeof(msg)) len = (int)sizeof(msg) - 1;
+
+  bool ok = radio.send(LORA_RX_ADDR, msg, (uint8_t)len);
+  Serial.printf("[safe mode] distress \"%s\" (%s)\n", msg, ok ? "sent" : "FAILED");
+  Serial.flush();
+}
+
 // Defined below, but setup() must be able to sleep before it ever powers a rail.
 static void enterDeepSleep(const char *why);
 
@@ -1612,15 +1651,44 @@ void loop() {
     bootGuardMarkGood();
   }
 
-  // Safe mode: rails are off, so there is nothing to read or transmit. Hold the
-  // port open and say so, rather than looping through code that cannot work.
+  // Safe mode: sensors stay off, but the node does NOT go silent, and it does NOT
+  // stay here forever.
+  //
+  // It used to do both. g_safeMode is decided once in setup(); loop() cleared the
+  // NVS counter at 15s and then returned here on every pass, never sleeping and
+  // therefore never rebooting to re-evaluate it. A single unlucky boot latched the
+  // node into safe mode until a human power-cycled it - and with the radio never
+  // initialised, the node could not say so. Node C1 sat like that from 2026-09-11,
+  // powered and awake, while it looked from every angle like a dead board.
   if (g_safeMode) {
     static uint32_t lastSaid = 0;
     if (millis() - lastSaid > 5000) {
       lastSaid = millis();
-      Serial.println("[safe mode] rails off, waiting - reflash to clear");
+      Serial.printf("[safe mode] sensors off, %lus until auto-recovery reboot\n",
+                    (unsigned long)((SAFE_MODE_RECOVER_MS - millis()) / 1000));
       Serial.flush();
     }
+
+    // Announce it over the radio, once. The whole point is that a node in trouble
+    // must still be heard - a distress packet is far more useful than silence, and
+    // it costs one transmit. Sensors stay off; only the LoRa rail comes up.
+    static bool distressSent = false;
+    if (!distressSent && millis() > 3000) {
+      distressSent = true;
+      sendSafeModeDistress();
+    }
+
+    // Then reboot back into normal operation. The NVS counter was cleared at 15s
+    // above, so the next boot starts clean; if the underlying fault is still there
+    // it will simply trip safe mode again and send another distress packet, which
+    // is a visible heartbeat rather than a silent latch.
+    if (millis() >= SAFE_MODE_RECOVER_MS) {
+      Serial.println("[safe mode] recovery window elapsed - restarting into normal mode");
+      Serial.flush();
+      delay(50);
+      esp_restart();
+    }
+
     delay(200);
     return;
   }
