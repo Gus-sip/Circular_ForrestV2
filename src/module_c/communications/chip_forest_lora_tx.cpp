@@ -280,9 +280,13 @@
 #define LED_BLUE_R 0
 #define LED_BLUE_G 0
 #define LED_BLUE_B 30
-#define LED_YELLOW_R 30
-#define LED_YELLOW_G 18
-#define LED_YELLOW_B 0
+// White = transmitting. All three channels, so it draws roughly three times a
+// single-channel colour at the same per-channel value - kept at 30 for that
+// reason. Safe here because the LED is blanked across the radio burst itself
+// (see transmitStore), so it is never lit at the tightest moment for the supply.
+#define LED_WHITE_R 30
+#define LED_WHITE_G 30
+#define LED_WHITE_B 30
 #define LED_FLASH_MS 120
 
 // Wake indicator shape: a smooth ramp up and back down rather than a hard blink.
@@ -357,9 +361,10 @@ static void ledFlashWake() {
   ledWave(LED_GREEN_R, LED_GREEN_G, LED_GREEN_B);
 }
 
-// Held for the whole of a transmit, not blinked, so its length is meaningful.
+// White, held for the whole of a transmit, not blinked, so its length is
+// meaningful - a transmit is ~1s against the read tick's ~19s of blue.
 static void ledWorking() {
-  ledWrite(LED_YELLOW_R, LED_YELLOW_G, LED_YELLOW_B, true);
+  ledWrite(LED_WHITE_R, LED_WHITE_G, LED_WHITE_B, true);
 }
 
 // Red: something is wrong that the node cannot fix itself - a sensor that was
@@ -1193,8 +1198,8 @@ void setup() {
 
   // Colour says WHICH kind of work this tick is doing, held until sleep:
   //   BLUE   a read tick - rails and sensors
-  //   YELLOW a transmit-only tick - radio
-  // A tick that does both starts blue and switches to yellow at the transmit.
+  //   WHITE  a transmit-only tick - radio
+  // A tick that does both starts blue and switches to white at the transmit.
   if (g_readDue) {
     ledReading();
   } else {
@@ -2064,7 +2069,7 @@ void loop() {
 
   if (txDue) {
     g_loraTransCount = 0;
-    ledWorking();  // yellow for the transmit itself
+    ledWorking();  // white for the transmit itself
     transmitStore();
     transmitStatus();
   }
