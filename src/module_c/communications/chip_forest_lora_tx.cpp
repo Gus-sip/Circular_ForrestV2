@@ -768,11 +768,43 @@ static void step(const char *what) {
 static Preferences bootStore;
 static uint32_t nvsBoots = 0;
 
-static void bootGuardBegin() {
+// COUNTS CRASHES, NOT WAKES. The distinction is the whole point.
+//
+// This used to increment on EVERY boot, with bootGuardMarkGood() clearing it only
+// after a run lasted 15s. That is incompatible with deep sleep: an idle tick wakes
+// and sleeps again in well under 15s, so the counter was never cleared, climbed on
+// every single wake, and tripped safe mode after 12 of them. EVERY healthy
+// sleeping node did this, within about two minutes of being switched on.
+//
+// It was proved by the node's own distress packet: "SAFE,12,8,17" - twelve boots,
+// reset reason 8 = DEEPSLEEP, seventeen wakes. Twelve PERFECTLY NORMAL timer wakes
+// were being counted as twelve failures.
+//
+// A deep-sleep wake is the firmware working exactly as designed and must never
+// count against it. Only a boot that did NOT come from our own sleep - a crash, a
+// brownout, a watchdog, a power cut - is evidence of trouble, and that is what the
+// guard now counts.
+static void bootGuardBegin(bool wokeFromTimer) {
   bootStore.begin("boot", false);
-  nvsBoots = bootStore.getUInt("n", 0) + 1;
-  bootStore.putUInt("n", nvsBoots);
-  Serial.printf("NVS boot count (survives power loss): %lu\n", (unsigned long)nvsBoots);
+  nvsBoots = bootStore.getUInt("n", 0);
+
+  if (wokeFromTimer) {
+    // Reaching a scheduled wake means the previous cycle completed and slept on
+    // purpose. That is a healthy run however short it was, so the counter is
+    // cleared here rather than waiting for loop()'s 15s timer - which a short tick
+    // never reaches.
+    if (nvsBoots != 0) {
+      bootStore.putUInt("n", 0);
+      Serial.printf("Boot guard: timer wake - counter cleared (was %lu)\n",
+                    (unsigned long)nvsBoots);
+      nvsBoots = 0;
+    }
+  } else {
+    nvsBoots++;
+    bootStore.putUInt("n", nvsBoots);
+    Serial.printf("NVS boot count (non-sleep boots since last good run): %lu\n",
+                  (unsigned long)nvsBoots);
+  }
   Serial.flush();
 }
 
@@ -925,8 +957,6 @@ void setup() {
   Serial.println("=== CHIP FOREST + LoRa TX: sensors -> RYLR998 -> ground station ===");
   Serial.flush();
 
-  // First, before any rail is touched: the NVS counter that survives a power loss.
-  bootGuardBegin();
   esp_reset_reason_t rr = esp_reset_reason();
   const char *rrName = rr == ESP_RST_POWERON    ? "POWERON"
                        : rr == ESP_RST_EXT      ? "EXT"
@@ -943,6 +973,11 @@ void setup() {
   // The flag is authoritative; the cause is only reported for diagnosis.
   g_wokeFromTimer = (g_sleepFlag == SLEEP_FLAG_MAGIC);
   g_sleepFlag = 0;
+
+  // The boot guard needs to know whether this was our own timer wake, so it runs
+  // HERE and not earlier - a deep-sleep wake must not be counted as a failure.
+  // (It still runs before any rail is touched, which was the original intent.)
+  bootGuardBegin(g_wokeFromTimer);
 
   if (g_bootMagic != BOOTCOUNT_MAGIC) {
     g_bootMagic = BOOTCOUNT_MAGIC;
