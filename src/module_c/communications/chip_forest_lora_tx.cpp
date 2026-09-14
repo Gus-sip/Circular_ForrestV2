@@ -183,7 +183,34 @@
 // fire and liable to latch on a stale number.
 #define ALARM_PM25_UGM3 50.0f        // smoke: BMV080 PM2.5
 #define ALARM_TEMP_C 50.0f           // BME690 temperature
-#define ALARM_GAS_DROP_FRAC 0.50f    // BME690 gas resistance falling this far below baseline
+// BME690 gas-resistance drop as a fire trigger - DISABLED (0 = off).
+//
+// This fired a FALSE PRE-ALARM on the bench on 2026-09-14 with no smoke anywhere
+// near the board:
+//
+//   *** PRE-ALARM: BME690 gas resistance drop *** staying awake, all sensors
+//   [alarm] clean read 1/5 ... 5/5 -> cleared
+//
+// The rule compares gas resistance against a rolling baseline, but this sensor's
+// gas resistance CLIMBS STEADILY as its heater stabilises - measured going
+// 6k -> 20k -> 45k within a single session. A baseline learned while the heater was
+// hot therefore makes every later cold-start reading look like a 50% collapse.
+// Under the sleep cycle the heater starts from cold on every single read tick, so
+// the comparison is between values that were never measured under the same
+// conditions.
+//
+// It is disabled rather than retuned because the fix is not a better constant: the
+// baseline has to be conditioned on heater state (or on a fixed settling time
+// after power-up) before any threshold on it means anything. The other triggers -
+// PM2.5, temperature, CO - are unaffected and still active.
+//
+// This matters beyond a nuisance alarm: PRE-ALARM DELIBERATELY DOES NOT SLEEP, so
+// a false trigger pins the node awake continuously. On battery that is the
+// difference between a node that runs overnight and one that is flat by morning.
+//
+// Set back above 0 only alongside a heater-aware baseline AND the real figures
+// from the alarma/prealarma spreadsheet.
+#define ALARM_GAS_DROP_FRAC 0.0f
 #define ALARM_CO_PPM 50.0f           // SEN0466, only while it is in the cycle
 
 // Consecutive all-sensor reads below every threshold before pre-alarm auto-clears.
@@ -247,6 +274,12 @@
 #define LED_GREEN_R 0
 #define LED_GREEN_G 30
 #define LED_GREEN_B 0
+#define LED_RED_R 30
+#define LED_RED_G 0
+#define LED_RED_B 0
+#define LED_BLUE_R 0
+#define LED_BLUE_G 0
+#define LED_BLUE_B 30
 #define LED_YELLOW_R 30
 #define LED_YELLOW_G 18
 #define LED_YELLOW_B 0
@@ -324,9 +357,28 @@ static void ledFlashWake() {
   ledWave(LED_GREEN_R, LED_GREEN_G, LED_GREEN_B);
 }
 
-// Held for the whole of a working tick, not blinked, so its length is meaningful.
+// Held for the whole of a transmit, not blinked, so its length is meaningful.
 static void ledWorking() {
   ledWrite(LED_YELLOW_R, LED_YELLOW_G, LED_YELLOW_B, true);
+}
+
+// Red: something is wrong that the node cannot fix itself - a sensor that was
+// expected and did not answer, or safe mode. Deliberately the SAME brightness as
+// the others so it is a colour change rather than an attention-grabbing flash;
+// the point is to be readable from a distance, not to be loud.
+//
+// This matters specifically for untethered testing: with no serial cable, the LED
+// and the radio are the only two things that can tell you the node is unhappy.
+static void ledTrouble() {
+  ledWrite(LED_RED_R, LED_RED_G, LED_RED_B, true);
+}
+
+// Blue, held for the whole of a READ tick. Distinguishing reading from
+// transmitting matters at a glance: a read tick is ~19s (every sensor plus the
+// post-heater rail cycle) while a transmit is barely a second, so the two are
+// unmistakable by duration alone once they are different colours.
+static void ledReading() {
+  ledWrite(LED_BLUE_R, LED_BLUE_G, LED_BLUE_B, true);
 }
 
 // ---------- Deep sleep ----------
@@ -362,7 +414,10 @@ static void ledWorking() {
 // This is BENCH instrumentation. It is pure waste in the field (the awake time it
 // adds is spent doing nothing at all), so drop it to ~50ms for deployment - by
 // which point there is no USB host listening anyway.
-#define SLEEP_USB_DRAIN_MS 400
+// 400ms was for watching the log over USB. In the field there is no host draining
+// the buffer, so it is pure awake time on every single wake - dropped for
+// untethered running. Raise it again when debugging on a cable.
+#define SLEEP_USB_DRAIN_MS 60
 
 // ---------- Tick scheduling ----------
 // Every wake is one tick. Two counters advance on EVERY tick and each resets when
@@ -526,6 +581,22 @@ enum AlarmState : uint8_t { ALARM_NORMAL = 0, ALARM_PREALARM = 1 };
 RTC_NOINIT_ATTR uint8_t g_alarmState;
 RTC_NOINIT_ATTR uint16_t g_alarmClearRun;   // consecutive clean reads while in pre-alarm
 RTC_NOINIT_ATTR float g_gasBaseline;        // BME690 gas resistance in clean air
+
+// Which sensors read OK on the most recent READ tick, as a 5-bit field
+// (bme, bmv, co2, co, wind - MSB first).
+//
+// Must be RTC_NOINIT and must be SEPARATE from the g_*St status variables. The
+// status packet goes out on a TRANSMIT tick, where by definition no sensor was
+// read, so the live statuses are still at their power-on defaults and report every
+// sensor dead:
+//
+//   [stat] STAT,23,8,0,00000,17467      <- all five "dead"
+//   [read] bme=OK bmv=OK co2=OK ...     <- the very next tick, all fine
+//
+// On an untethered node that is worse than no status at all: it would cry wolf on
+// every single packet and make a genuine failure unnoticeable.
+RTC_NOINIT_ATTR uint8_t g_lastReadHealth;
+RTC_NOINIT_ATTR uint32_t g_lastReadWake;  // which wake produced it, so age is visible
 
 bool g_wokeFromTimer = false;   // this boot was a deep-sleep wake, not a cold boot
 uint32_t g_setupDoneMs = 0;
@@ -1057,6 +1128,8 @@ void setup() {
     g_alarmState = ALARM_NORMAL;
     g_alarmClearRun = 0;
     g_gasBaseline = 0.0f;
+    g_lastReadHealth = 0;
+    g_lastReadWake = 0;
     Serial.println("Boot counter initialised (true power-on, or RTC domain lost)");
   }
   if (g_wokeFromTimer) {
@@ -1118,8 +1191,15 @@ void setup() {
   g_txDue = true;
 #endif
 
-  // Yellow: this tick has real work - rails, sensors, radio. Held until sleep.
-  ledWorking();
+  // Colour says WHICH kind of work this tick is doing, held until sleep:
+  //   BLUE   a read tick - rails and sensors
+  //   YELLOW a transmit-only tick - radio
+  // A tick that does both starts blue and switches to yellow at the transmit.
+  if (g_readDue) {
+    ledReading();
+  } else {
+    ledWorking();
+  }
   g_bootCount++;
   Serial.printf("Boot #%lu since last power loss\n", (unsigned long)g_bootCount);
   // (reset reason already printed above, before the idle bail-out)
@@ -1584,7 +1664,10 @@ static bool readingsIndicateFire(const char **whyOut) {
     if (g_temp >= ALARM_TEMP_C) { *whyOut = "temperature"; return true; }
     // Gas RESISTANCE falls as VOCs rise, so a drop below a fraction of the clean-air
     // baseline is the smoke signal. Needs a baseline first, hence the guard.
-    if (g_gasBaseline > 0.0f && g_gas > 0.0f &&
+    // ALARM_GAS_DROP_FRAC of 0 disables this trigger entirely - see its definition
+    // for why. Without this guard a fraction of 0 would mean "fire whenever gas is
+    // below baseline", which is half the time.
+    if (ALARM_GAS_DROP_FRAC > 0.0f && g_gasBaseline > 0.0f && g_gas > 0.0f &&
         g_gas < g_gasBaseline * (1.0f - ALARM_GAS_DROP_FRAC)) {
       *whyOut = "BME690 gas resistance drop";
       return true;
@@ -1733,6 +1816,57 @@ static void transmitStore() {
 // re-fire the BMV080 laser repeatedly - the exact load pattern that caused the
 // resets. A sensor that misses its slot keeps its last known value and is named
 // in the log line as STALE.
+// Sends a compact health packet alongside the telemetry.
+//
+// WHY THIS EXISTS: the telemetry payload carries VALUES only. A sensor that dies
+// keeps publishing its last cached value, so the data looks perfectly healthy - it
+// is exactly how node C1's frozen co2=663 went unexplained for days while the read
+// path was dead. With a serial cable that ambiguity is annoying; with the node
+// outside and untethered it is fatal to any test, because there is no other way to
+// find out.
+//
+// Deliberately a SEPARATE packet rather than extra fields on the telemetry: adding
+// a field would break Module B's 13-field parser, whereas an unrecognised payload
+// is recorded verbatim by the porthole logger as kind=other and ignored safely by
+// everything else.
+//
+//   STAT,<wake>,<resetReason>,<nvsBoots>,<bme><bmv><co2><co><wind>,<awakeMs>
+//
+// The five flags are 1 = read OK this cycle, 0 = not. Read them as the answer to
+// "which sensors were actually alive when this packet left".
+static void transmitStatus() {
+  // Flags come from the last READ tick, not from this transmit tick - see
+  // g_lastReadHealth. The trailing age says how many ticks ago that was, so a
+  // stale snapshot is visible rather than silently assumed current.
+  uint8_t h = g_lastReadHealth;
+  unsigned long ageTicks =
+      (g_wakeCount >= g_lastReadWake) ? (unsigned long)(g_wakeCount - g_lastReadWake) : 0UL;
+
+  char msg[80];
+  int len = snprintf(msg, sizeof(msg), "STAT,%lu,%d,%lu,%d%d%d%d%d,%lu",
+                     (unsigned long)g_wakeCount, (int)esp_reset_reason(),
+                     (unsigned long)nvsBoots,
+                     (h >> 4) & 1, (h >> 3) & 1, (h >> 2) & 1, (h >> 1) & 1, h & 1,
+                     ageTicks);
+  if (len < 0) len = 0;
+  if (len >= (int)sizeof(msg)) len = (int)sizeof(msg) - 1;
+
+  bool ok = radio.send(LORA_RX_ADDR, msg, (uint8_t)len);
+  Serial.printf("[stat] %s  (flags from wake %lu, %lu tick(s) ago) (%s)\n", msg,
+                (unsigned long)g_lastReadWake, ageTicks, ok ? "sent" : "FAILED");
+  Serial.flush();
+}
+
+// True if a sensor that was expected to work did not read OK this cycle. Drives
+// the red LED - "expected" means enabled AND initialised, so an absent Calypso or
+// a deliberately skipped SEN0466 does not raise a false alarm.
+static bool sensorsDegraded() {
+  if (bmeReady && g_bmeEnabled && g_bmeSt != ReadingStatus::Ok) return true;
+  if (bmvReady && g_bmvEnabled && g_bmvSt != ReadingStatus::Ok) return true;
+  if (g_cm1106Enabled && g_co2St != ReadingStatus::Ok) return true;
+  return false;
+}
+
 // ONE read tick services EVERY sensor, then the node sleeps. Transmit happens on
 // its own tick. This is the requested cycle:
 //
@@ -1799,6 +1933,14 @@ static void readFastSensorsOnce() {
       delay(SLOT_GAP_MS);
     }
   }
+
+  // Snapshot health NOW, while the statuses refer to reads that just happened.
+  g_lastReadHealth = (uint8_t)(((g_bmeSt == ReadingStatus::Ok ? 1 : 0) << 4) |
+                               ((g_bmvSt == ReadingStatus::Ok ? 1 : 0) << 3) |
+                               ((g_co2St == ReadingStatus::Ok ? 1 : 0) << 2) |
+                               ((g_coSt == ReadingStatus::Ok ? 1 : 0) << 1) |
+                               (g_windValid ? 1 : 0));
+  g_lastReadWake = g_wakeCount;
 
   uint8_t stillPending = pendingSensors(pending, sizeof(pending));
   Serial.printf("[read] bme=%s(T%.1f H%.1f gas%.0f) bmv=%s(pm2.5=%.1f) co2=%s(%.0f) "
@@ -1922,7 +2064,17 @@ void loop() {
 
   if (txDue) {
     g_loraTransCount = 0;
+    ledWorking();  // yellow for the transmit itself
     transmitStore();
+    transmitStatus();
+  }
+
+  // Only judge health on a tick that actually READ something. On a transmit-only
+  // tick the statuses refer to no reads at all, and every sensor would look failed.
+  if (readDue && sensorsDegraded()) {
+    Serial.println("[health] a sensor that was expected did not read - LED red");
+    Serial.flush();
+    ledTrouble();
   }
 
   if (coldBootWindowOpen()) {
