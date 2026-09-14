@@ -218,7 +218,8 @@ void ModemNBIoTMqtt::handleUrc(const char *line, size_t len) {
   if (NbiotProtocol::parseQmtstat(line, idx, errCode)) {
     if (idx == MQTT_CLIENT_IDX) {
       _mqttConnected = false;
-      Serial.printf("[nbiot-mqtt] +QMTSTAT fired (err=%d) - session marked dead, reconnecting on next publish\n",
+      Serial.printf("[nbiot-mqtt] +QMTSTAT fired (err=%d) - session marked dead, "
+                    "will reconnect from IDLE\n",
                     errCode);
     }
     return;
@@ -995,6 +996,31 @@ void ModemNBIoTMqtt::tickIdle() {
   if (outcome == CmdOutcome::OK && _cmd.hasInfoLine) {
     int dbm;
     if (NbiotProtocol::parseCsq(_cmd.infoLine, dbm)) _rssiDbm = dbm;
+  }
+
+  // A DEAD SESSION MUST BE REBUILT HERE, not left for the next publish.
+  //
+  // handleUrc() clears _mqttConnected when +QMTSTAT arrives and says it will
+  // reconnect "on next publish". But a publish only happens when LoRa data
+  // arrives, and IDLE is precisely the state where none is arriving. A node that
+  // goes hours between readings - or is simply switched off - means no publish,
+  // therefore no reconnect, EVER: the state machine sits here polling CSQ with a
+  // dead session and the OLED reading "MQTT: caido" indefinitely.
+  //
+  // Observed 2026-09-14: Module B idle for days, cellular fine (CSQ 31/31,
+  // registered), MQTT dead on screen and never retried, because nothing was
+  // transmitting to trigger a publish.
+  //
+  // Gated on the shared backoff so a broker that is genuinely down is retried
+  // steadily rather than hammered - MQTT_CONNECT failures feed that same backoff
+  // through handleFailureAtLevel().
+  if (!_mqttConnected && millis() >= _backoffUntilMs) {
+    Serial.println("[nbiot-mqtt] idle with a dead MQTT session - reconnecting now "
+                   "(not waiting for a publish)");
+    Serial.flush();
+    _mqttConnectSub = MqttConnectSub::CLOSE_FIRST;
+    setState(State::MQTT_CONNECT);
+    return;
   }
 
   // An RPC response goes out ahead of the telemetry batch - it's what someone
