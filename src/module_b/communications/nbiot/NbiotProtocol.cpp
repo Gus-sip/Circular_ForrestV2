@@ -119,7 +119,29 @@ bool parseCclk(const char *line, int64_t &epochMs) {
   long long days = (long long)era * 146097 + (long long)doe - 719468;
 
   long long secs = days * 86400LL + hh * 3600LL + mm * 60LL + ss;
-  secs -= (long long)tzQuarters * 15LL * 60LL;  // local -> UTC
+
+  // THE TIME FIELD FROM THIS MODULE IS ALREADY UTC - do not subtract the offset.
+  //
+  // 3GPP says +CCLK? returns LOCAL time with the timezone offset alongside, so the
+  // obvious reading is "subtract the offset to get UTC". This BC660K-GL does not
+  // behave that way: it reports UTC in the time field while still advertising the
+  // local offset. Subtracting double-corrects and puts every timestamp exactly one
+  // offset into the past.
+  //
+  // Measured on hardware 2026-09-14:
+  //   modem  +CCLK: 26/09/14,08:46:08+08   (+08 quarter-hours = +2h, Spain CEST)
+  //   PC UTC        2026-09-14 08:45:54
+  //   old parse ->  2026-09-14 06:46:08    = 2.00 hours EARLY
+  //
+  // The time field matches UTC to within the 14s of round-trip, so it is UTC.
+  //
+  // tzQuarters is still parsed - it must be consumed to validate the line, and it
+  // is worth keeping for diagnosis - but it is deliberately NOT applied. If a
+  // different module is ever used, verify this against a known clock before
+  // reinstating the subtraction; the failure is silent and looks like a server-side
+  // display problem rather than a parsing bug.
+  (void)tzQuarters;
+
   epochMs = (int64_t)secs * 1000LL;
   return true;
 }

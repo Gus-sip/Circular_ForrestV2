@@ -203,7 +203,13 @@ inline void nbiotResolveNodeName(uint16_t addr, char *outName, size_t outCap) {
 //                              timestamped reading is ~230 bytes typical,
 //                              ~300 worst case, so 4 (~1200B worst case)
 //                              keeps margin under 1400.
-#define MQTT_BATCH_SECONDS 600UL
+// Lowered 600 -> 60 (2026-09-14). Ten minutes is a long time to sit on a reading
+// from a WILDFIRE sensor, and it also made the uplink impossible to verify: with
+// fewer than MQTT_BATCH_MAX_READINGS buffered, nothing was published for ten
+// minutes and the chain looked broken when it was merely waiting. 60UL is
+// MQTT_BATCH_SECONDS_MIN. Raise it again if NB-IoT data volume becomes the
+// binding constraint - the trade is uplink cost against detection latency.
+#define MQTT_BATCH_SECONDS 60UL
 #define MQTT_BATCH_MAX_READINGS 6
 #define MQTT_PUB_CHUNK_READINGS 4
 
