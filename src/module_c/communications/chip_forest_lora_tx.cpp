@@ -1104,8 +1104,20 @@ void setup() {
   bmeReady = bme690.begin();
   // begin() tries the configured address then the alternate, so print which one it
   // settled on - "OK" alone cannot tell 0x76 from 0x77.
-  Serial.printf("BME690: %s (bound to 0x%02X)\n", bmeReady ? "OK" : "NOT FOUND",
-                bme690.address());
+  if (bmeReady) {
+    Serial.printf("BME690: OK (bound to 0x%02X)\n", bme690.address());
+  } else if (bme690.chipIdValid()) {
+    // The driver refused it but the register still reads. 0x61 means the part is
+    // present and healthy and the DRIVER is at fault; anything else means the bus
+    // is corrupting a multi-byte read while still ACKing a bare address probe.
+    Serial.printf("BME690: NOT FOUND at 0x%02X - chip ID 0x%02X via mode %d (expect 0x61) -> %s\n",
+                  bme690.address(), bme690.lastChipId(), bme690.chipIdMode(),
+                  bme690.lastChipId() == 0x61 ? "part is FINE, driver init failed"
+                                              : "BUS CORRUPTION or wrong part");
+  } else {
+    Serial.printf("BME690: NOT FOUND at 0x%02X - chip ID register does not respond\n",
+                  bme690.address());
+  }
 
 #if SLEEP_ENABLED && SLEEP_SKIP_SEN0466
   // Out of the cycle for now: its 210s settle would dominate every wake. Disabled
