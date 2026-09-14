@@ -495,6 +495,10 @@ RTC_NOINIT_ATTR uint32_t g_txPeriodMsPersist;
 // reset on reaching their threshold; thresholds arrive by downlink from Module A.
 RTC_NOINIT_ATTR uint16_t g_sensorReadCount;
 RTC_NOINIT_ATTR uint16_t g_loraTransCount;
+// Which sensor the next read tick will service. Survives sleep in RTC memory -
+// if it reset every wake the node would read slot 0 forever and never touch the
+// others.
+RTC_NOINIT_ATTR uint16_t g_slotCursor;
 RTC_NOINIT_ATTR uint16_t g_sensorReadEvery;
 RTC_NOINIT_ATTR uint16_t g_loraTransEvery;
 
@@ -533,15 +537,28 @@ bool sen0466Ready = false;
 bool bmvReady = false;
 bool radioReady = false;
 
-// Last-known-good readings, refreshed continuously by sampleSensors() - see
-// file header. A field stays at its last good value (0 until the first ever
-// success) rather than snapping to 0 on a transient miss.
-float g_temp = 0, g_hum = 0, g_pres = 0, g_gas = 0;
-float g_pm1 = 0, g_pm25 = 0, g_pm10 = 0;
-float g_co2 = 0;
-float g_co = 0, g_coTemp = 0;
-float g_windAngle = 0, g_windSpeed = 0;
-bool g_windValid = false;
+// Last-known-good readings. A field stays at its last good value rather than
+// snapping to 0 on a transient miss.
+//
+// THESE MUST BE RTC_NOINIT, NOT PLAIN GLOBALS. Now that each wake services only
+// ONE sensor, every other field in a packet comes from a previous wake - and deep
+// sleep wipes ordinary RAM. As plain globals the cache reset to zero on every
+// wake, so a packet carried one fresh value and twelve zeros:
+//
+//   bme=NotInit(T0.0 H0.0 gas0) bmv=OK(pm2.5=0.0) ... STALE: BME690,CM1106
+//
+// which looks exactly like three dead sensors. In RTC memory they survive the
+// sleep, so the packet carries a full set whose fields are merely staggered in
+// age by up to one rotation.
+//
+// Seeded to zero in the BOOTCOUNT_MAGIC block below, like every other RTC_NOINIT
+// value - they hold garbage on a true power-on until then.
+RTC_NOINIT_ATTR float g_temp, g_hum, g_pres, g_gas;
+RTC_NOINIT_ATTR float g_pm1, g_pm25, g_pm10;
+RTC_NOINIT_ATTR float g_co2;
+RTC_NOINIT_ATTR float g_co, g_coTemp;
+RTC_NOINIT_ATTR float g_windAngle, g_windSpeed;
+RTC_NOINIT_ATTR bool g_windValid;
 
 // Set when a sensor returns a good reading; cleared for all sensors immediately
 // after each transmit. These - not a timer - decide when the next packet goes out.
@@ -815,6 +832,40 @@ static void bootGuardMarkGood() {
   Serial.flush();
 }
 
+// Raw chip-ID read, usable at any point in setup() and independent of the sensor
+// driver. Every previous look at this register happened AFTER bme690.begin() had
+// already failed, which cannot distinguish "the device never transacts" from
+// "something between the bus scan and begin() breaks it". Calling this at two
+// different moments does distinguish them.
+static void probeBmeChipId(const char *when) {
+  const uint8_t addrs[2] = {0x76, 0x77};
+  for (int i = 0; i < 2; i++) {
+    uint8_t addr = addrs[i];
+    Wire.beginTransmission(addr);
+    if (Wire.endTransmission() != 0) continue;  // nothing here at all
+
+    Wire.beginTransmission(addr);
+    Wire.write(0xD0);  // BME69X_REG_CHIP_ID
+    uint8_t wr = Wire.endTransmission(false);
+    if (wr != 0) {
+      Serial.printf("[bme probe %s] 0x%02X ACKs its address but NACKs the register "
+                    "write (endTransmission=%u)\n",
+                    when, addr, (unsigned)wr);
+      continue;
+    }
+    if (Wire.requestFrom((int)addr, 1) != 1) {
+      Serial.printf("[bme probe %s] 0x%02X accepted the register write but returned "
+                    "no data\n",
+                    when, addr);
+      continue;
+    }
+    uint8_t id = (uint8_t)Wire.read();
+    Serial.printf("[bme probe %s] 0x%02X chip ID = 0x%02X %s\n", when, addr, id,
+                  id == 0x61 ? "(0x61 = BME69x, CORRECT)" : "(expected 0x61)");
+  }
+  Serial.flush();
+}
+
 // Bus scan. The BME690 and BMV080 share this bus, so a scan separates "sensor
 // gone from the bus" from "sensor present but not answering" - and proves the bus
 // itself by whatever else replies on the same wires at the same instant. Node C1
@@ -987,6 +1038,15 @@ void setup() {
     g_txPeriodMsPersist = LORA_TX_PERIOD_MS;
     g_sensorReadCount = 0;
     g_loraTransCount = 0;
+    g_slotCursor = 0;
+    // The reading cache lives in RTC_NOINIT too, so it holds garbage on a true
+    // power-on and must be seeded here with everything else.
+    g_temp = g_hum = g_pres = g_gas = 0.0f;
+    g_pm1 = g_pm25 = g_pm10 = 0.0f;
+    g_co2 = 0.0f;
+    g_co = g_coTemp = 0.0f;
+    g_windAngle = g_windSpeed = 0.0f;
+    g_windValid = false;
     g_sensorReadEvery = SENSOR_READ_EVERY_DEFAULT;
     g_loraTransEvery = LORA_TRANS_EVERY_DEFAULT;
     g_storeCount = 0;
@@ -1096,10 +1156,12 @@ void setup() {
   Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
 
   scanI2C("after rails, before sensor init");
+  probeBmeChipId("right after scan");
 
   Serial.printf("Waiting %dms for BMV080 startup...\n", BMV080_STARTUP_DELAY_MS);
   delay(BMV080_STARTUP_DELAY_MS);
 
+  probeBmeChipId("after BMV080 wait, before begin");
   step("bme690.begin");
   bmeReady = bme690.begin();
   // begin() tries the configured address then the alternate, so print which one it
@@ -1306,14 +1368,41 @@ enum Slot {
   SLOT_COUNT
 };
 
+// Names the slot in the log. With one sensor serviced per wake, the log is the
+// only way to see which one a given tick actually touched.
+static const char *slotName(int slot) {
+  switch (slot) {
+    case SLOT_BME690: return "BME690";
+    case SLOT_BMV080: return "BMV080";
+    case SLOT_CM1106: return "CM1106";
+    case SLOT_SEN0466: return "SEN0466";
+    case SLOT_CALYPSO: return "Calypso";
+  }
+  return "?";
+}
+
 // Longest the BMV080's laser may stay on waiting for a frame. Frames normally
 // arrive ~2-4s after the settle. This bounds one slot; BMV080_MEASURE_TIMEOUT_MS
 // is far too long to spend inside a sequential pass.
 #define BMV080_SLOT_MS 8000UL
 
-// Gap between slots, so one load has actually stopped drawing before the next
-// starts rather than the two meeting at the changeover.
-#define SLOT_GAP_MS 250UL
+// Gap between slots.
+//
+// RAISED 250 -> 1500 (2026-09-14). Sequencing the slots was not enough on its own:
+// they were still only 250ms apart, and the BME690's gas heater runs at 320C in
+// the slot immediately before the BMV080's laser. Measured on node C2 with the
+// 250ms gap, alternating between consecutive read passes:
+//
+//   8562ms pass   bme=OK  bmv=OK      co2=OK
+//   7343ms pass   bme=OK  bmv=NoAck   co2=Timeout
+//
+// The short passes are short precisely BECAUSE they failed - startMeasurement()
+// NoAcks and the slot exits immediately instead of waiting for a frame.
+//
+// Separating loads in sequence is not the same as separating them in TIME: a
+// heater that has just switched off has still left the rail sagging 250ms later.
+// This is the gap the sequential-slot rule actually needs.
+#define SLOT_GAP_MS 1500UL
 
 // Settling time after the sensor rails are cut and before the radio transmits.
 // Long enough for the rails to actually discharge their loads and for whatever
@@ -1654,26 +1743,40 @@ static void readFastSensorsOnce() {
   uint32_t t0 = millis();
   char pending[64];
 
-  for (int slot = 0; slot < SLOT_COUNT; slot++) {
-    // Safety cap only - each slot is individually bounded, so this should never
-    // fire. If it does, one slot is overrunning and the log says which is left.
-    if (millis() - t0 >= SENSOR_READ_WINDOW_MS) {
-      Serial.printf("[read] WINDOW EXPIRED after %lums - slots %d..%d skipped\n",
-                    (unsigned long)(millis() - t0), slot, SLOT_COUNT - 1);
-      break;
-    }
-    runSlot(slot);
-    quiesceAll();  // nothing left drawing before the next slot starts
-    delay(SLOT_GAP_MS);
-  }
+  // ONE SENSOR PER WAKE, not the whole set in one pass.
+  //
+  // Sequencing the slots was not sufficient, and neither was spacing them further
+  // apart. Measured on node C2 with a 1500ms inter-slot gap, consecutive passes:
+  //
+  //   gas 52925 -> bmv=OK     co2=OK
+  //   gas 15764 -> bmv=NoAck  co2=Timeout
+  //   gas 44199 -> bmv=OK     co2=OK
+  //
+  // The BME690 is read FIRST, so its own gas value coming back low is the tell:
+  // the rail sags during its 320C heater, which corrupts that measurement AND
+  // leaves the next two sensors unable to start. More gap does not help, because
+  // the sag happens INSIDE the heater cycle rather than after it.
+  //
+  // So the loads are now separated across TICKS. Each wake services exactly one
+  // sensor and then sleeps, which puts ten seconds and a full rail power-cycle
+  // between the heater and the laser instead of a delay() - far beyond anything a
+  // gap inside one pass can achieve, and it costs nothing extra because the node
+  // was sleeping anyway.
+  //
+  // The cache keeps each field's last known value, so a packet still carries a
+  // full set; the fields are simply staggered in age by up to one rotation.
+  int slot = (int)(g_slotCursor % (uint16_t)SLOT_COUNT);
+  g_slotCursor = (uint16_t)((g_slotCursor + 1) % SLOT_COUNT);
+
+  Serial.printf("[read] servicing slot %d (%s) - one sensor per wake\n", slot, slotName(slot));
+  Serial.flush();
+
+  runSlot(slot);
+  quiesceAll();
 
   uint8_t stillPending = pendingSensors(pending, sizeof(pending));
-  // Per-sensor status, not just the values. A read that FAILED and a value that
-  // never CHANGED look identical downstream otherwise - the firmware keeps the
-  // last good value either way and says nothing. That ambiguity is exactly how
-  // node C1's dead BME690 went unexplained for hours.
   Serial.printf("[read] bme=%s(T%.1f H%.1f gas%.0f) bmv=%s(pm2.5=%.1f) co2=%s(%.0f) "
-                "co=%s(%.2f) wind=%s(rx=%u)%s%s  (pass %lums)\n",
+                "co=%s(%.2f) wind=%s(rx=%u)%s%s  (slot %s, %lums)\n",
                 statusName(g_bmeSt), g_temp, g_hum, g_gas,
                 statusName(g_bmvSt), g_pm25,
                 statusName(g_co2St), g_co2,
@@ -1681,7 +1784,7 @@ static void readFastSensorsOnce() {
                 !g_calypsoEnabled ? "off" : (g_windValid ? "OK" : "silent"),
                 calypso.lastReadBytes(),
                 stillPending ? "  STALE: " : "", stillPending ? pending : "",
-                (unsigned long)(millis() - t0));
+                slotName(slot), (unsigned long)(millis() - t0));
   if (g_windValid) {
     Serial.printf("[wind] angle=%.1f deg  speed=%.2f\n", g_windAngle, g_windSpeed);
   }

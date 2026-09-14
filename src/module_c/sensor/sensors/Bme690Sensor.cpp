@@ -102,10 +102,22 @@ bool Bme690Sensor::begin() {
 }
 
 void Bme690Sensor::primeAndMark() {
-  // Priming measurement, deliberately discarded. Costs ~200ms, and on the sleep
-  // path it lands inside the BMV080's 5s startup wait anyway, so it is free.
-  float t, h, pr, g;
-  _sensor.getData(t, h, pr, g);
+  // NO MEASUREMENT HERE - deliberately.
+  //
+  // This used to fire a discarded priming measurement, which meant running the gas
+  // heater at 320C inside setup(), immediately before bmv080.begin(). The result
+  // was measurable: with priming here the BME690 came up and the BMV080 went
+  // NoAck and the CM1106 Timeout; without it the BMV080 and CM1106 came up and the
+  // BME690 did not. The sensors were taking turns.
+  //
+  // setup() initialises every sensor back-to-back, so it is the one place the
+  // sequential-slot rule was never applied - the slots govern READS only. A heater
+  // firing there is exactly the concurrent load the slots exist to prevent.
+  //
+  // The priming is not needed here anyway: read() already retries twice, which
+  // covers the "first forced measurement after begin() always fails" behaviour,
+  // and it does so inside the BME690's own slot where the heater has the power
+  // budget to itself.
   _primed = true;
   _chipId = 0x61;  // it initialised, so the ID matched by definition
   _chipIdValid = true;
