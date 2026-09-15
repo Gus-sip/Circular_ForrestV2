@@ -920,16 +920,23 @@ static void probeBmeChipId(const char *when) {
   const uint8_t addrs[2] = {0x76, 0x77};
   for (int i = 0; i < 2; i++) {
     uint8_t addr = addrs[i];
+
+    // Try the REGISTER READ even when the bare address probe fails.
+    //
+    // This used to `continue` on a failed zero-length write, which assumes a
+    // device that will not ACK an empty transaction cannot answer a real one.
+    // That is not true of every I2C part, and it meant a sensor could be declared
+    // absent without ever being asked a question. Report both results instead.
     Wire.beginTransmission(addr);
-    if (Wire.endTransmission() != 0) continue;  // nothing here at all
+    uint8_t probe = Wire.endTransmission();
 
     Wire.beginTransmission(addr);
     Wire.write(0xD0);  // BME69X_REG_CHIP_ID
     uint8_t wr = Wire.endTransmission(false);
     if (wr != 0) {
-      Serial.printf("[bme probe %s] 0x%02X ACKs its address but NACKs the register "
-                    "write (endTransmission=%u)\n",
-                    when, addr, (unsigned)wr);
+      Serial.printf("[bme probe %s] 0x%02X addr-probe=%u, register write NACKed "
+                    "(endTransmission=%u) - no answer either way\n",
+                    when, addr, (unsigned)probe, (unsigned)wr);
       continue;
     }
     if (Wire.requestFrom((int)addr, 1) != 1) {
@@ -939,7 +946,8 @@ static void probeBmeChipId(const char *when) {
       continue;
     }
     uint8_t id = (uint8_t)Wire.read();
-    Serial.printf("[bme probe %s] 0x%02X chip ID = 0x%02X %s\n", when, addr, id,
+    Serial.printf("[bme probe %s] 0x%02X (addr-probe=%u) chip ID = 0x%02X %s\n", when, addr,
+                  (unsigned)probe, id,
                   id == 0x61 ? "(0x61 = BME69x, CORRECT)" : "(expected 0x61)");
   }
   Serial.flush();

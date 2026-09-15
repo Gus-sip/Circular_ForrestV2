@@ -33,6 +33,16 @@
 #define LORA_PARAM_CR 1
 #define LORA_PARAM_PREAMBLE 12
 
+// Most readings one batch packet can carry. A node caps its own batch so the
+// packet fits the RYLR998's 240-byte limit (READINGS_PER_PACKET_MAX on Module C);
+// this is that, plus headroom.
+#define BATCH_RX_MAX 6
+
+// One Module C sleep tick, in seconds. Batch records carry their age in ticks, so
+// this converts that age back into real time for the reading's timestamp. Must
+// match SLEEP_CYCLE_SECONDS on Module C.
+#define NODE_TICK_SECONDS 10
+
 #define LORA_NODE_ADDR 1  // sensor node's AT+ADDRESS
 #define LORA_MY_ADDR 2    // this receiver's own AT+ADDRESS - must differ from the node's
 

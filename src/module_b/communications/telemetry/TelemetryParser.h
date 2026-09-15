@@ -21,8 +21,20 @@ public:
   // Returns false (and leaves out untouched) if the payload doesn't split into
   // exactly kFieldCount comma-separated fields - rejected outright rather than
   // partially populating a snapshot from a malformed or out-of-sync payload.
+  // A single flat reading: exactly 13 comma-separated fields, nothing more.
+  // REJECTS a batch payload ("B,<n>,...") - see parseBatch.
   static bool parse(const char *payload, uint8_t len, SensorSnapshot &out);
+
+  // A batch: "B,<count>,<record>;<record>;..." where each record is the same 13
+  // fields plus a trailing age in 10s ticks at the moment of transmit.
+  //
+  // Returns how many records were actually parsed, writing up to maxOut snapshots
+  // and (optionally) their ages. The header's count is not trusted - a truncated
+  // packet yields the records that are really there.
+  static uint8_t parseBatch(const char *payload, uint8_t len, SensorSnapshot *out,
+                            uint8_t maxOut, uint16_t *ageTicksOut = nullptr);
 
 private:
   static constexpr uint8_t kFieldCount = 13;
+  static constexpr uint8_t kBatchFieldCount = 14;  // 13 + ageTicks
 };

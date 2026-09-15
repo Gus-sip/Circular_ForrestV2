@@ -272,10 +272,41 @@ void loop() {
       continue;
     }
 
-    SensorSnapshot snap;
-    if (TelemetryParser::parse(msg.payload, msg.length, snap)) {
+    // A node sends either a single reading or a BATCH of them. Both shapes end up
+    // here; keep them apart, because squeezing a batch through the single-reading
+    // parser is what corrupted the data reaching ThingsBoard - the "B" and the
+    // count were read as temperature and humidity, every field shifted by two, and
+    // the batch's second reading was discarded outright.
+    SensorSnapshot batch[BATCH_RX_MAX];
+    uint16_t ages[BATCH_RX_MAX] = {};
+    uint8_t count = 0;
+    bool isBatch = (msg.length >= 2 && msg.payload[0] == 'B' && msg.payload[1] == ',');
+
+    if (isBatch) {
+      count = TelemetryParser::parseBatch(msg.payload, msg.length, batch, BATCH_RX_MAX, ages);
+      if (count == 0) {
+        Serial.println("  (batch payload didn't parse - dropped)");
+      } else {
+        Serial.printf("  batch of %u reading(s)\n", (unsigned)count);
+      }
+    } else if (TelemetryParser::parse(msg.payload, msg.length, batch[0])) {
+      ages[0] = 0;  // a single reading is current by definition
+      count = 1;
+    }
+
+    if (count == 0 && !isBatch) {
+      Serial.println("  (payload didn't match the expected schema - dropped, see "
+                      "telemetry/TelemetryParser.h)");
+    }
+
+    for (uint8_t b = 0; b < count; b++) {
+      SensorSnapshot &snap = batch[b];
       snap.hasData = true;
-      snap.lastHeardMs = millis();
+      // Backdate by the record's age so a batched reading is timestamped when it
+      // was TAKEN, not when the packet happened to arrive. Single readings have
+      // age 0 and are unaffected.
+      uint32_t ageMs = (uint32_t)ages[b] * (uint32_t)NODE_TICK_SECONDS * 1000UL;
+      snap.lastHeardMs = millis() - ageMs;
       snap.senderAddr = msg.senderAddr;
       snap.rssi = msg.rssi;
       snap.snr = msg.snr;
@@ -289,9 +320,6 @@ void loop() {
       } else {
         g_historyHead = (uint16_t)((g_historyHead + 1) % LORA_HISTORY_CAPACITY);
       }
-    } else {
-      Serial.println("  (payload didn't match the expected schema - dropped, see "
-                      "telemetry/TelemetryParser.h)");
     }
   }
 
