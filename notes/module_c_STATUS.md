@@ -1,5 +1,135 @@
 # CHIP FOREST - Session Status
 
+## 2026-09-15 - End to end working; batch corruption fixed; power is the next problem
+
+**The full chain runs:** Module C -> LoRa -> Module B -> NB-IoT/MQTT -> ThingsBoard,
+with correct UTC timestamps and both nodes separable.
+
+### Node state
+
+| Node | Port | Address -> name | Sensors |
+|---|---|---|---|
+| 1 | COM14 | 1 -> `NodoC-1` | BME690, BMV080, CM1106 all OK |
+| 2 | COM13 | **3 -> `NodoC-2`** | BME690, BMV080, CM1106 all OK |
+
+Both flashed with the current firmware. They are no longer blending into one
+ThingsBoard device - that was the point of the per-node addressing.
+
+### DATA CORRUPTION - found by Jose, fixed (commit 3d308fd)
+
+Every third message in ThingsBoard had its fields displaced by two:
+
+```
+reported:  temp=0.0  rh=2.0  pres=42.4  gas=11.3  pm1=945.2  pm25=185038
+actual:                      temp=42.4  rh=11.3   pres=945.2 gas=185038
+```
+
+The phantom `0.0` and `2.0` are the batch header - `"B"` parsed as 0.0 and the
+record count `"2"` as 2.0.
+
+`TelemetryParser::parse()` stopped scanning once it had 13 fields, then tested
+`fieldIdx != kFieldCount` - a guard that could never fail, because the loop had
+just guaranteed it. **Any payload with more than 13 fields was silently accepted
+using only its first 13**, and the batch's second reading was discarded outright.
+The comment claimed it would "reject rather than guess"; it did the opposite.
+
+Now: `parse()` refuses `B,` payloads and rejects trailing content, `parseBatch()`
+handles them properly, and every reading in a batch is enqueued and backdated by
+its age-in-ticks.
+
+**Not yet confirmed against a live batch** - only the rejection path is verified.
+
+### Other fixes since the last log
+
+- **Safe mode was a permanent silent trap.** Decided once in `setup()`, which
+  returned early with the radio never initialised; `loop()` then returned early
+  forever, never sleeping, so it never rebooted to re-evaluate. One unlucky boot
+  latched a node until a human power-cycled it - and with no radio it could not say
+  so. Now restarts after 60s and sends a `SAFE,...` distress packet first.
+- **The boot guard counted healthy sleep wakes as crashes.** Proved by the node's
+  own distress packet `SAFE,12,8,17`: twelve boots, reset reason 8 = DEEPSLEEP.
+  Twelve NORMAL timer wakes counted as twelve failures, tripping safe mode.
+  **Every healthy node destroyed itself within about two minutes.** Now counts only
+  non-sleep boots.
+- **False fire alarm** from the BME690 gas-drop trigger, with no smoke present.
+  Gas resistance CLIMBS as the heater stabilises (6k -> 20k -> 45k), so a baseline
+  learned while hot makes every cold reading look like a 50% collapse. Disabled
+  (`ALARM_GAS_DROP_FRAC 0`) rather than retuned - the baseline must be conditioned
+  on heater state first. It mattered beyond nuisance: **pre-alarm does not sleep**,
+  so a false trigger pins the node awake and flattens the battery.
+- **`STAT` health packet** so an untethered node can report which sensors are
+  actually alive: `STAT,<wake>,<reset>,<boots>,<bme><bmv><co2><co><wind>,<age>`.
+  Flags come from the last READ tick (held in RTC), not the transmit tick - the
+  first version reported `00000` on every packet.
+- **LED**: green wave on wake, BLUE through the ~19s read tick, WHITE on transmit,
+  RED when an expected sensor did not read.
+- **All sensors now read on one tick again**, with a rail power-cycle after the
+  BME690's heater. A gap alone never worked at 250ms or 1500ms, because the rail
+  sags INSIDE the heater cycle.
+
+### THE NEXT PROBLEM: power
+
+Measured duty cycle over one 12-tick cycle (120s):
+
+| | Count | Each | Total |
+|---|---|---|---|
+| Read ticks | 4 | **19.4s** | 77.6s |
+| Transmit | 3 | ~3s | 9s |
+| Idle | 6 | ~1.5s | 9s |
+| **Awake** | | | **~95s of 120s (~80%)** |
+
+**Deep sleep is buying almost nothing.** The read tick is nearly all fixed delay:
+the BMV080's 5s startup is paid TWICE (once in setup, once in the post-heater rail
+recovery) = 10s of the 19.4s, and `SLOT_GAP_MS` at 1500ms x4 adds 6s that the rail
+recovery made redundant.
+
+Options, in order of value:
+1. Reorder slots so the BMV080 reads LAST and its startup overlaps others (~5s)
+2. `SLOT_GAP_MS` 1500 -> 300 (~4.8s)
+3. **Light sleep during the warm-up delays** - biggest single win, ~40mA -> ~0.8mA
+   for those seconds. Risky: light sleep was removed once before for breaking
+   USB-Serial/JTAG and the Calypso UART.
+4. Slow the cadence (`sensor_read`), which scales linearly
+5. Stop power-cycling the CM1106 every read - 3.5s for a sensor that is explicitly
+   excluded from fire detection
+6. Drop the CPU clock 240 -> 80MHz during waits (~40% of active current)
+
+`BMV080_STARTUP_DELAY_MS 5000` and `CM1106_WARMUP_MS 3000` are both marked
+UNCONFIRMED against datasheets - 8s per read resting on guesses.
+
+### Scaling to 20 nodes per Module B
+
+- **Node address must move to NVS.** Compile-time means 20 binaries; NVS means one
+  binary and a provisioning step.
+- **NB-IoT data volume does not fit.** 20 nodes x every 40s x ~230 bytes is
+  ~10MB/day ~ 3.6GB/year. A 1NCE SIM is typically 500MB/10yr - about seven weeks.
+  Each node can transmit roughly every 45-60 minutes to fit.
+- **LoRa collisions**: 20 nodes transmitting blind, no listen-before-talk. Needs
+  per-node jitter or address-derived slots.
+- **`MQTT_BATCH_MAX_READINGS 6`** fills in 12 seconds at 20 nodes.
+- `MQTT_BATCH_SECONDS` was lowered 600 -> 60 to make the uplink verifiable. That is
+  a debugging value, not a deployment one.
+
+### Hardware, unresolved
+
+- **BME690 SDO floats** (documented in `Bme690Sensor.h`). The address is decided by
+  chance per unit, which is why identical boards differ and why handling a board
+  changes the outcome. Needs a pull-down to GND (-> 0x76) on the PCB.
+- The **BMV080's address also drifts** - `0x56` on one boot, `0x57` on another. Same
+  class of problem; the driver's auto-scan copes.
+- CM1106 reads 3861 ppm indoors - needs zero-point calibration, consistent with the
+  existing note that it is not fully trusted.
+
+### Still open
+
+- Fire thresholds are still invented placeholders; waiting on the real figures.
+- **CFG downlink never verified end to end** - `logs/send_rpc.py` added to test it.
+- Alarm propagation between nodes: discussed, not designed. Key constraint is that
+  a sleeping node is deaf except for ~2s after each transmit, so network-wide alert
+  latency equals the transmit cadence.
+- Export/flashing bundle for programming 20 modules: discussed, not started.
+- Never run unattended for longer than minutes.
+
 ## 2026-09-11 - Chain status: C->B working, B->A working, end-to-end unproven
 
 | Link | State |
