@@ -1087,9 +1087,33 @@ static bool g_txDue = false;
 
 void setup() {
   Serial.begin(115200);
-  uint32_t waitStart = millis();
-  while (!Serial && millis() - waitStart < 3000) delay(10);
-  delay(500);
+
+  // WAIT FOR A USB HOST ONLY ON A COLD BOOT - never on a timer wake.
+  //
+  // This used to wait unconditionally:
+  //
+  //     while (!Serial && millis() - waitStart < 3000) delay(10);
+  //     delay(500);
+  //
+  // In the field there IS no USB host, so `!Serial` stays true and every wake -
+  // including the idle ticks that are supposed to be nearly free - burned the full
+  // 3s, plus another 500ms unconditionally. At a 10s tick that is 3.5s of every
+  // 10s: a 35% duty cycle at ~40mA, roughly 14mA average, spent waiting for a
+  // serial port that will never appear.
+  //
+  // It also hid itself during development: on the bench, USB IS attached, `Serial`
+  // goes true within milliseconds and the wait collapses - so every measurement
+  // taken with a cable understated the real field consumption.
+  //
+  // g_sleepFlag is RTC_NOINIT and survives deep sleep, so it can be read here
+  // before anything else has run. A timer wake means nobody is watching: skip
+  // straight to work. A cold boot means someone may have just plugged it in and
+  // wants to see the banner, so keep the wait there.
+  if (g_sleepFlag != SLEEP_FLAG_MAGIC) {
+    uint32_t waitStart = millis();
+    while (!Serial && millis() - waitStart < 3000) delay(10);
+    delay(500);
+  }
 
   Serial.println();
   Serial.println("=== CHIP FOREST + LoRa TX: sensors -> RYLR998 -> ground station ===");
