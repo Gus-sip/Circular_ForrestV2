@@ -1,5 +1,105 @@
 # CHIP FOREST - Session Status
 
+## 2026-09-17 - Power: the node was never really sleeping
+
+### The measurement that anchors everything
+
+**2 x 350F supercaps in parallel = 700F, 3.8V -> ~2.7V = 0.685 Wh ~ 176 mAh @ 3.3V.**
+This matches `power_budget.md`'s 0.6825 Wh figure almost exactly, so the budget's
+model is sound.
+
+**Measured runtime: ~3 hours.** Working backwards:
+
+> 176 mAh / 3 h = **~59 mA average**
+
+A deep-sleeping ESP32 is 15uA; an awake one with sensors is 40-110mA. **59mA average
+means the node was effectively never sleeping.**
+
+### Root cause found: the serial wait (commit 4e6e1eb)
+
+`setup()` opened with:
+
+```c
+Serial.begin(115200);
+while (!Serial && millis() - waitStart < 3000) delay(10);
+delay(500);
+```
+
+In the field there is **no USB host**, so `!Serial` stays true and EVERY wake - idle
+ticks included - burned the full 3s plus 500ms. At a 10s tick that is 3.5s of every
+10s: ~35% duty at ~40mA, about **14mA average, waiting for a port that will never
+appear**.
+
+With it, a read tick took ~23s in the field and an idle tick ~3.6s, each followed by
+10s of sleep - so the node spent more time working than sleeping and the duty cycle
+never fell.
+
+**It hid behind the debug cable.** On the bench USB IS attached, `Serial` goes true
+in milliseconds and the wait collapses - so every measurement ever taken with a
+cable understated real field consumption. Worth remembering as a class of bug:
+anything conditioned on the debug interface behaves differently in the field.
+
+Now gated on `g_sleepFlag` (RTC_NOINIT, readable before anything else runs): cold
+boot keeps the wait, timer wake skips it.
+
+### Route to 12 hours
+
+Target is <= 14.7 mA average. Estimates anchored on the one real measurement:
+
+| Change | Read tick | Awake/120s | Avg | Runtime |
+|---|---|---|---|---|
+| Before | 19.4s | never sleeps | 59 mA | **3 h (measured)** |
+| **Serial fix (done)** | 19.4s | 88s | ~33 mA | ~5 h |
+| BMV080 read last | ~14s | 68s | ~26 mA | ~7 h |
+| Gaps 1500 -> 300ms | ~9s | 48s | ~18 mA | ~10 h |
+| Drop duplicate BMV080 wait | ~6s | 34s | ~13 mA | **~13 h** |
+| CPU 80MHz in waits | ~6s | 34s | ~9 mA | ~19 h |
+| CM1106 every 10th read | ~4s | 26s | ~7 mA | ~25 h |
+
+All behaviour-neutral: same sensors, same data, **same 10-second tick**. They only
+remove waiting. The 10s tick is worth keeping - it is easy to measure and reason
+about, and it was never the problem.
+
+### Three things that could eat the margin
+
+1. **Pre-alarm does not sleep.** A node in pre-alarm runs at ~59mA. **One false
+   alarm holding for an hour costs ~5 hours of normal runtime.** The gas threshold
+   already did exactly this. Wants a hard cap on how long pre-alarm may hold.
+2. **Supercap leakage is unmeasured.** Invisible at 59mA; at ~9mA, leakage from 700F
+   could be a real fraction. Measure it directly: charge, disconnect the node, watch
+   the decay.
+3. **Regulator quiescent current.** Many regulators are efficient at 50mA and poor at
+   5mA, so the last few milliamps may convert to runtime worse than the arithmetic
+   suggests.
+
+### Also worth knowing
+
+- `power_budget.md` targets a **30-minute** Normal cycle for ~80h. The firmware has
+  been doing a 30-SECOND read cycle - 60x faster than the design.
+- Some figures in that file look like averaged contributions rather than
+  instantaneous draw (BME690 T/H/P at 2.2uA, CM1106 at 3uA), so treat them with
+  care.
+- **Nobody has ever put a meter on this board.** Every figure here is calculated
+  from awake time and datasheet values, anchored on one runtime measurement.
+
+### State
+
+- Both nodes healthy: BME690, BMV080, CM1106 all OK on each, transmitting,
+  separable as `NodoC-1` (addr 1) and `NodoC-2` (addr 3).
+- Module B receiving both, MQTT publishing, zero errors over a 5-minute monitor.
+- **Batch parsing confirmed fixed in the field** - a live `B,2,...` packet logged as
+  `batch of 2 reading(s)`, both readings recovered.
+- All three builds pass.
+
+### Next
+
+1. Tier 1 power items (BMV080 last, gaps, duplicate wait, CPU scaling, CM1106
+   throttle) - targets ~25h on paper
+2. **Measure a real discharge** after each stage rather than trusting the estimates
+3. Cap pre-alarm duration so a false trigger cannot flatten the store
+4. Still open: real fire thresholds, CFG downlink never verified end to end, export
+   bundle for flashing 20 modules, alarm propagation between nodes
+
 ## 2026-09-15 - End to end working; batch corruption fixed; power is the next problem
 
 **The full chain runs:** Module C -> LoRa -> Module B -> NB-IoT/MQTT -> ThingsBoard,
