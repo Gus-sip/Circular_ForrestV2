@@ -1081,6 +1081,10 @@ static void enableRails(bool safeMode) {
   digitalWrite(PIN_BMV080_EN, PIN_BMV080_EN_ACTIVE);
   Serial.printf("BMV080 EN: GPIO%d -> %s\n", PIN_BMV080_EN,
                 PIN_BMV080_EN_ACTIVE == LOW ? "LOW" : "HIGH");
+
+  // Supercap sense is an INPUT. Left as an input explicitly, because this pin was
+  // briefly driven as an output during the BMV080 enable hunt.
+  pinMode(PIN_SUPERCAP_SENSE, INPUT);
   Serial.flush();
   delay(500);
 
@@ -1982,6 +1986,23 @@ static void transmitStore() {
 //
 // The five flags are 1 = read OK this cycle, 0 = not. Read them as the answer to
 // "which sensors were actually alive when this packet left".
+// Raw millivolts at the supercap sense pin. NOT the supercap terminal voltage -
+// the divider ratio is unknown, so this is the number at the ADC. Averaged over a
+// few samples because a single ADC reading on this part is noisy.
+//
+// Reported in the STAT packet so a discharge test can be followed over the radio
+// rather than by sitting next to the node with a meter: the node tells you its own
+// charge state on every status packet.
+static int readSupercapMv() {
+  const int kSamples = 8;
+  uint32_t sum = 0;
+  for (int i = 0; i < kSamples; i++) {
+    sum += (uint32_t)analogReadMilliVolts(PIN_SUPERCAP_SENSE);
+    delay(2);
+  }
+  return (int)(sum / kSamples);
+}
+
 static void transmitStatus() {
   // Flags come from the last READ tick, not from this transmit tick - see
   // g_lastReadHealth. The trailing age says how many ticks ago that was, so a
@@ -1990,12 +2011,14 @@ static void transmitStatus() {
   unsigned long ageTicks =
       (g_wakeCount >= g_lastReadWake) ? (unsigned long)(g_wakeCount - g_lastReadWake) : 0UL;
 
+  int vmv = readSupercapMv();
+
   char msg[80];
-  int len = snprintf(msg, sizeof(msg), "STAT,%lu,%d,%lu,%d%d%d%d%d,%lu",
+  int len = snprintf(msg, sizeof(msg), "STAT,%lu,%d,%lu,%d%d%d%d%d,%lu,%d",
                      (unsigned long)g_wakeCount, (int)esp_reset_reason(),
                      (unsigned long)nvsBoots,
                      (h >> 4) & 1, (h >> 3) & 1, (h >> 2) & 1, (h >> 1) & 1, h & 1,
-                     ageTicks);
+                     ageTicks, vmv);
   if (len < 0) len = 0;
   if (len >= (int)sizeof(msg)) len = (int)sizeof(msg) - 1;
 

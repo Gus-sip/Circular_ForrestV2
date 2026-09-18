@@ -24,7 +24,9 @@
 #define PIN_CALYPSO_TX 9  // ESP TX -> sensor RX/yellow (unused - sensor streams unprompted)
 #define PIN_CALYPSO_RX 8  // ESP RX <- sensor TX/green
 
-// Spare pin, unused for now (reserved for a future CM1106 RDY line).
+// NOTE: GPIO12 is NO LONGER SPARE - it is the BMV080 enable, see PIN_BMV080_EN
+// below. This define is kept only so older code still compiles; do not use it for
+// anything new.
 #define PIN_SPARE 12
 
 // BMV080 enable line, added to the board after this file was first written.
@@ -39,8 +41,23 @@
 //
 // Driven with the rail gates, before any sensor is opened, so it is settled by the
 // time the SDK talks to the part.
-#define PIN_BMV080_EN 14
+#define PIN_BMV080_EN 12
 #define PIN_BMV080_EN_ACTIVE LOW
+
+// Supercapacitor voltage sense - AN ANALOG INPUT, NEVER AN OUTPUT.
+//
+// This must never be driven. It briefly was during the BMV080 enable hunt, when
+// GPIO14 was mistaken for a second enable candidate and held LOW as an output -
+// that fights whatever divider feeds it and is capable of damaging it. Kept
+// explicit here so nobody repeats it.
+//
+// GPIO14 is ADC2_CH3 on the ESP32-S3. ADC2 is unavailable while WiFi is active,
+// which is fine for Module C (no WiFi) but would matter on Module B.
+//
+// The divider ratio is NOT yet known, so readings are reported as raw millivolts
+// at the pin rather than as a supercap voltage. Confirm the divider before
+// treating the number as a real terminal voltage.
+#define PIN_SUPERCAP_SENSE 14
 
 // ---------- Module C PCB enable lines (GPIO10/11) ----------
 // The real PCB (as opposed to the bench harness this file originally described)
