@@ -563,7 +563,7 @@ RYLR998 radio(Serial0, LORA_RX_PIN, LORA_TX_PIN);  // UART0 is free - UART1/UART
 // the RTC domain powered, and is only lost on genuine power loss - which is
 // exactly the distinction being measured. It starts as garbage at true power-on,
 // hence the magic word.
-#define BOOTCOUNT_MAGIC 0xC0FFEE03UL  // bumped: re-seeds thresholds + re-syncs counters
+#define BOOTCOUNT_MAGIC 0xC0FFEE04UL  // bumped: re-seeds thresholds + re-syncs counters
 RTC_NOINIT_ATTR uint32_t g_bootMagic;
 RTC_NOINIT_ATTR uint32_t g_bootCount;
 
