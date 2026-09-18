@@ -9,16 +9,19 @@ the development tree.
 
 ## Just want to flash a board? Don't build anything.
 
-`prebuilt/` contains **one ready-to-flash binary per node** — bootloader, partition
-table and application merged into a single image. No compiler, no libraries, no
-Bosch SDK step:
+`prebuilt/` contains **two ready-to-flash binaries** — one per module. Each is
+bootloader, partition table, OTA selector and application merged into a single
+image. No compiler, no libraries, no Bosch SDK step:
 
 ```
-esptool.py --chip esp32s3 --port COM14 --baud 460800 write_flash 0x0 prebuilt/CHIP-FOREST_node1.bin
+esptool.py --chip esp32s3 --port COM14 --baud 460800 write_flash 0x0 prebuilt/CHIP-FOREST_MODULE-C.bin
+esptool.py --chip esp32s3 --port COM10 --baud 460800 write_flash 0x0 prebuilt/CHIP-FOREST_MODULE-B.bin
 ```
 
-See `prebuilt/FLASH.md`. Build from source only when you need to CHANGE something,
-or need a node address beyond the three provided.
+See `prebuilt/FLASH.md`. Build from source only when you need to CHANGE something
+— in particular, **`CHIP-FOREST_MODULE-C.bin` has LoRa address 1 compiled in**, so
+a second node needs the `node2` environment below rather than a second copy of that
+file.
 
 ---
 
