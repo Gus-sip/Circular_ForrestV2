@@ -24,10 +24,13 @@
 #define PIN_CALYPSO_TX 9  // ESP TX -> sensor RX/yellow (unused - sensor streams unprompted)
 #define PIN_CALYPSO_RX 8  // ESP RX <- sensor TX/green
 
-// NOTE: GPIO12 is NO LONGER SPARE - it is the BMV080 enable, see PIN_BMV080_EN
-// below. This define is kept only so older code still compiles; do not use it for
-// anything new.
-#define PIN_SPARE 12
+// GPIO12 goes to the CUBIC CM1106 (the CO2 sensor - Cubic is the manufacturer),
+// which is what the original "future CM1106 RDY line" note meant.
+//
+// DO NOT DRIVE IT. It was briefly driven low while hunting the BMV080 enable,
+// before the board was described - the CM1106 works, and driving a line into a
+// working sensor is a good way to stop it working.
+#define PIN_CM1106_RDY 12
 
 // BMV080 enable line, added to the board after this file was first written.
 //
@@ -41,7 +44,12 @@
 //
 // Driven with the rail gates, before any sensor is opened, so it is settled by the
 // time the SDK talks to the part.
-#define PIN_BMV080_EN 12
+// BMV080 enable. Must be driven LOW for the sensor to run.
+//
+// Moved 12 -> 14 -> 15 as the board was described; 12 turned out to be the CM1106
+// and 14 the supercap sense. Asserted with the rail gates, before any sensor is
+// opened, so it is settled by the time the SDK talks to the part.
+#define PIN_BMV080_EN 15
 #define PIN_BMV080_EN_ACTIVE LOW
 
 // Supercapacitor voltage sense - AN ANALOG INPUT, NEVER AN OUTPUT.

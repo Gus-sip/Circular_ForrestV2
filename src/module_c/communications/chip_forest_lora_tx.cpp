@@ -1664,34 +1664,14 @@ static void runSlot(int slot) {
                       bmv080.lastStartStatus());
         Serial.flush();
 
-        // SWEEP GPIO12/GPIO14 AT THE MOMENT THE LASER REFUSES.
-        //
-        // If a line was added to the board that enables this sensor, the firmware
-        // has never driven it: GPIO12 is only PIN_SPARE ("reserved for a future
-        // CM1106 RDY line") and GPIO14 is absent from pins.h entirely. Driving
-        // both LOW alone changed nothing, so try every combination here rather
-        // than guess - the same technique that settled the GPIO10/11 rail gates,
-        // where the answer turned out to be that the two had OPPOSITE active
-        // levels and driving both the same way kept a rail off.
-        static const int kLevels[4][2] = {{LOW, HIGH}, {HIGH, LOW}, {HIGH, HIGH}, {LOW, LOW}};
-        bool started = false;
-        for (int c = 0; c < 4 && !started; c++) {
-          digitalWrite(12, kLevels[c][0]);
-          digitalWrite(14, kLevels[c][1]);
-          delay(250);
-          started = bmv080.startMeasurement();
-          Serial.printf("  [sweep] GPIO12=%s GPIO14=%s -> %s (status %d)\n",
-                        kLevels[c][0] == LOW ? "LOW " : "HIGH",
-                        kLevels[c][1] == LOW ? "LOW " : "HIGH",
-                        started ? "*** LASER STARTED ***" : "refused",
-                        bmv080.lastStartStatus());
-          Serial.flush();
-        }
-
-        if (!started) {
-          g_bmvSt = ReadingStatus::NoAck;
-          break;
-        }
+        // NOTE: a GPIO12/GPIO14 sweep used to sit here, from before the board was
+        // described. It has been REMOVED and must not come back in that form:
+        // GPIO12 goes to the Cubic CM1106 and GPIO14 is the analog supercap sense,
+        // so that loop was driving a working sensor's line and fighting an analog
+        // divider. The enable turned out to be GPIO15 (PIN_BMV080_EN), asserted
+        // once with the rail gates.
+        g_bmvSt = ReadingStatus::NoAck;
+        break;
       }
       g_bmvPhase = BmvPhase::Measuring;
       uint32_t t0 = millis();
@@ -1993,6 +1973,43 @@ static void transmitStore() {
 // Reported in the STAT packet so a discharge test can be followed over the radio
 // rather than by sitting next to the node with a meter: the node tells you its own
 // charge state on every status packet.
+// ---- Supercapacitor charge, as a percentage of USABLE ENERGY ----
+//
+// CALIBRATION REQUIRED. SUPERCAP_DIVIDER_RATIO is the factor from the voltage at
+// the ADC pin to the voltage at the supercap terminals. It defaults to 1.0, which
+// is certainly WRONG - it is a placeholder until the divider is known. Either read
+// the resistor values off the board (ratio = (Rtop + Rbottom) / Rbottom) or put a
+// meter on the supercap at the same moment as a STAT packet and divide.
+//
+// Until then the percentage is not trustworthy in absolute terms, though its TREND
+// over a discharge still is.
+#define SUPERCAP_DIVIDER_RATIO 1.0f
+
+// Full and empty, from the node strategy: charged to 3.7V, regulator gives up at
+// 2.5V. Everything below 2.5V is energy that cannot be used.
+#define SUPERCAP_V_FULL 3.7f
+#define SUPERCAP_V_EMPTY 2.5f
+
+// Percent of USABLE energy remaining, not percent of voltage.
+//
+// A supercapacitor stores 0.5*C*V^2, so energy falls with the SQUARE of voltage
+// while the voltage itself falls linearly. Reporting a voltage percentage would
+// say "50%" at 3.1V when only about 35% of the usable energy is left - flattering,
+// and misleading exactly when it matters. This uses the energy form:
+//
+//     (V^2 - Vempty^2) / (Vfull^2 - Vempty^2)
+//
+// so 50% means roughly half the remaining RUNTIME, which is what anyone reading it
+// actually wants to know.
+static int supercapPercent(float volts) {
+  const float lo = SUPERCAP_V_EMPTY * SUPERCAP_V_EMPTY;
+  const float hi = SUPERCAP_V_FULL * SUPERCAP_V_FULL;
+  float e = (volts * volts - lo) / (hi - lo);
+  if (e < 0.0f) e = 0.0f;
+  if (e > 1.0f) e = 1.0f;
+  return (int)(e * 100.0f + 0.5f);
+}
+
 static int readSupercapMv() {
   const int kSamples = 8;
   uint32_t sum = 0;
@@ -2012,19 +2029,22 @@ static void transmitStatus() {
       (g_wakeCount >= g_lastReadWake) ? (unsigned long)(g_wakeCount - g_lastReadWake) : 0UL;
 
   int vmv = readSupercapMv();
+  float vcap = (vmv / 1000.0f) * SUPERCAP_DIVIDER_RATIO;
+  int pct = supercapPercent(vcap);
 
-  char msg[80];
-  int len = snprintf(msg, sizeof(msg), "STAT,%lu,%d,%lu,%d%d%d%d%d,%lu,%d",
+  char msg[96];
+  int len = snprintf(msg, sizeof(msg), "STAT,%lu,%d,%lu,%d%d%d%d%d,%lu,%d,%d",
                      (unsigned long)g_wakeCount, (int)esp_reset_reason(),
                      (unsigned long)nvsBoots,
                      (h >> 4) & 1, (h >> 3) & 1, (h >> 2) & 1, (h >> 1) & 1, h & 1,
-                     ageTicks, vmv);
+                     ageTicks, vmv, pct);
   if (len < 0) len = 0;
   if (len >= (int)sizeof(msg)) len = (int)sizeof(msg) - 1;
 
   bool ok = radio.send(LORA_RX_ADDR, msg, (uint8_t)len);
-  Serial.printf("[stat] %s  (flags from wake %lu, %lu tick(s) ago) (%s)\n", msg,
-                (unsigned long)g_lastReadWake, ageTicks, ok ? "sent" : "FAILED");
+  Serial.printf("[stat] %s  (cap %.2fV = %d%% usable, flags from wake %lu, %lu tick(s) ago) (%s)\n",
+                msg, vcap, pct, (unsigned long)g_lastReadWake, ageTicks,
+                ok ? "sent" : "FAILED");
   Serial.flush();
 }
 
