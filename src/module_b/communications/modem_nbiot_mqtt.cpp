@@ -1220,16 +1220,17 @@ size_t ModemNBIoTMqtt::buildGatewayPayload(uint8_t *out, size_t cap, uint8_t max
       if (!firstReading) append(",");
       firstReading = false;
 
-      char keys[420];
+      char keys[470];  // +2 keys for chargePct/capMv
       snprintf(keys, sizeof(keys),
                "{"
                "\"temp\":%.2f,\"rh\":%.2f,\"pres\":%.2f,\"gas\":%.2f,"
                "\"pm1\":%.2f,\"pm25\":%.2f,\"pm10\":%.2f,\"co2\":%.2f,"
                "\"co\":%.2f,\"coTemp\":%.2f,\"windAngle\":%.2f,\"windSpeed\":%.2f,"
-               "\"windValid\":%s,\"rssi\":%d,\"snr\":%d}",
+               "\"windValid\":%s,\"rssi\":%d,\"snr\":%d,"
+               "\"chargePct\":%d,\"capMv\":%d}",
                snap.temp, snap.hum, snap.pres, snap.gas, snap.pm1, snap.pm25, snap.pm10, snap.co2, snap.co,
                snap.coTemp, snap.windAngle, snap.windSpeed, snap.windValid ? "true" : "false", (int)snap.rssi,
-               (int)snap.snr);
+               (int)snap.snr, (int)snap.chargePct, (int)snap.capMv);
 
       if (_haveNetTime) {
         int64_t ts = _netEpochMsAtSync + (int64_t)(int32_t)(snap.lastHeardMs - _netSyncLocalMs);

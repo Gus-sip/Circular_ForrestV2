@@ -29,4 +29,15 @@ struct SensorSnapshot {
   float windAngle = 0;  // Calypso, deg
   float windSpeed = 0;   // Calypso
   bool windValid = false;
+
+  // Node health, carried in the node's separate STAT packet rather than in the
+  // telemetry payload. Filled in from the most recent STAT seen from that node, so
+  // the charge state travels to ThingsBoard alongside the sensor data instead of
+  // stopping at Module B.
+  //
+  // chargePct is -1 until a STAT has been heard from that node - a real 0% and
+  // "not yet known" are different things, and a node reporting 0% when it simply
+  // has not said anything yet would be alarming for no reason.
+  int16_t chargePct = -1;
+  int16_t capMv = -1;
 };

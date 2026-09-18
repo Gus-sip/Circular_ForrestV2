@@ -241,6 +241,45 @@ void setup() {
   Serial.println();
 }
 
+// Last charge state heard from each node, by LoRa address.
+//
+// Kept separate from the telemetry ring because STAT and telemetry arrive as
+// different packets at different times - a node transmits its readings and its
+// health independently, and either may be the one that gets through.
+struct NodeCharge {
+  uint16_t addr;
+  int16_t pct;
+  int16_t mv;
+};
+static NodeCharge g_nodeCharge[8];
+static uint8_t g_nodeChargeCount = 0;
+
+static void nodeChargeRemember(uint16_t addr, int pct, int mv) {
+  for (uint8_t i = 0; i < g_nodeChargeCount; i++) {
+    if (g_nodeCharge[i].addr == addr) {
+      g_nodeCharge[i].pct = (int16_t)pct;
+      g_nodeCharge[i].mv = (int16_t)mv;
+      return;
+    }
+  }
+  if (g_nodeChargeCount < (uint8_t)(sizeof(g_nodeCharge) / sizeof(g_nodeCharge[0]))) {
+    g_nodeCharge[g_nodeChargeCount].addr = addr;
+    g_nodeCharge[g_nodeChargeCount].pct = (int16_t)pct;
+    g_nodeCharge[g_nodeChargeCount].mv = (int16_t)mv;
+    g_nodeChargeCount++;
+  }
+}
+
+static void nodeChargeAttach(SensorSnapshot &snap) {
+  for (uint8_t i = 0; i < g_nodeChargeCount; i++) {
+    if (g_nodeCharge[i].addr == snap.senderAddr) {
+      snap.chargePct = g_nodeCharge[i].pct;
+      snap.capMv = g_nodeCharge[i].mv;
+      return;
+    }
+  }
+}
+
 void loop() {
   server.handleClient();
 
@@ -269,6 +308,41 @@ void loop() {
     // reading (it would just be dropped as "wrong field count").
     if (msg.length >= 4 && strncmp(msg.payload, "ACK,", 4) == 0) {
       modem.onNodeCommandAck(msg.payload);
+      continue;
+    }
+
+    // STAT - the node's own health packet, not telemetry.
+    //
+    //   STAT,<wake>,<resetReason>,<boots>,<bme><bmv><co2><co><wind>,<ageTicks>,<mV>,<pct>
+    //
+    // It is a separate packet precisely so it cannot break the 13-field telemetry
+    // parser, but the charge state in it is worth having in ThingsBoard - a node
+    // that is about to run out of energy should say so where someone will see it.
+    // So the values are remembered per node here and attached to that node's next
+    // telemetry publish.
+    if (msg.length >= 5 && strncmp(msg.payload, "STAT,", 5) == 0) {
+      char buf[96];
+      size_t n = msg.length < sizeof(buf) - 1 ? msg.length : sizeof(buf) - 1;
+      memcpy(buf, msg.payload, n);
+      buf[n] = 0;
+
+      // Fields 7 and 8 (0-based 6 and 7) are the sense reading and the percentage.
+      int field = 0;
+      int mv = -1, pct = -1;
+      char *tok = strtok(buf, ",");
+      while (tok) {
+        if (field == 6) mv = atoi(tok);
+        if (field == 7) pct = atoi(tok);
+        field++;
+        tok = strtok(nullptr, ",");
+      }
+
+      if (pct >= 0) {
+        nodeChargeRemember(msg.senderAddr, pct, mv);
+        Serial.printf("  node health: charge %d%% (%d mV at the sense pin)\n", pct, mv);
+      } else {
+        Serial.println("  STAT without a charge field - older node firmware?");
+      }
       continue;
     }
 
@@ -310,6 +384,7 @@ void loop() {
       snap.senderAddr = msg.senderAddr;
       snap.rssi = msg.rssi;
       snap.snr = msg.snr;
+      nodeChargeAttach(snap);  // most recent STAT from this node, if any
       g_latest = snap;
       modem.enqueue(snap);
 

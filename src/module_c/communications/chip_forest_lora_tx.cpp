@@ -1985,6 +1985,16 @@ static void transmitStore() {
 // over a discharge still is.
 #define SUPERCAP_DIVIDER_RATIO 1.0f
 
+// Set to 1 once SUPERCAP_DIVIDER_RATIO above is a MEASURED number.
+//
+// While this is 0 the percentage is reported as -1 ("unknown") rather than as a
+// computed value. That matters: with the placeholder ratio the maths produced a
+// confident-looking 0%, which is both wrong and alarming - a node claiming it is
+// flat when it is fully charged is worse than a node admitting it does not know.
+// The raw millivolts are still sent either way, so a discharge can be followed by
+// its trend before calibration.
+#define SUPERCAP_CALIBRATED 0
+
 // Full and empty, from the node strategy: charged to 3.7V, regulator gives up at
 // 2.5V. Everything below 2.5V is energy that cannot be used.
 #define SUPERCAP_V_FULL 3.7f
@@ -2030,7 +2040,7 @@ static void transmitStatus() {
 
   int vmv = readSupercapMv();
   float vcap = (vmv / 1000.0f) * SUPERCAP_DIVIDER_RATIO;
-  int pct = supercapPercent(vcap);
+  int pct = SUPERCAP_CALIBRATED ? supercapPercent(vcap) : -1;
 
   char msg[96];
   int len = snprintf(msg, sizeof(msg), "STAT,%lu,%d,%lu,%d%d%d%d%d,%lu,%d,%d",
@@ -2042,9 +2052,14 @@ static void transmitStatus() {
   if (len >= (int)sizeof(msg)) len = (int)sizeof(msg) - 1;
 
   bool ok = radio.send(LORA_RX_ADDR, msg, (uint8_t)len);
-  Serial.printf("[stat] %s  (cap %.2fV = %d%% usable, flags from wake %lu, %lu tick(s) ago) (%s)\n",
-                msg, vcap, pct, (unsigned long)g_lastReadWake, ageTicks,
-                ok ? "sent" : "FAILED");
+  if (SUPERCAP_CALIBRATED) {
+    Serial.printf("[stat] %s  (cap %.2fV = %d%% usable, flags from wake %lu, %lu tick(s) ago) (%s)\n",
+                  msg, vcap, pct, (unsigned long)g_lastReadWake, ageTicks,
+                  ok ? "sent" : "FAILED");
+  } else {
+    Serial.printf("[stat] %s  (%d mV at the pin; %% UNCALIBRATED - set the divider ratio) (%s)\n",
+                  msg, vmv, ok ? "sent" : "FAILED");
+  }
   Serial.flush();
 }
 
