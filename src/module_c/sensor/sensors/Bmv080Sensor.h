@@ -42,11 +42,24 @@ public:
   bool stopMeasurement();
   bool isMeasuring() const { return _measuring; }
 
+  // Why begin() failed, and the SDK status code behind it. begin() otherwise
+  // collapses "not on the bus at any strap address" and "present but the laser
+  // would not start" into one bool - two faults with completely different causes
+  // and fixes.
+  enum class FailStage { None, Open };
+  FailStage failStage() const { return _failStage; }
+  int lastOpenStatus() const { return _lastOpenStatus; }
+  // SDK status from the last attempt to start the laser.
+  int lastStartStatus() const { return _lastStartStatus; }
+
 private:
   uint8_t _addr;
   TwoWire &_wire;
   sfTkArdI2C _bus;
   bmv080_handle_t _handle = nullptr;
+  FailStage _failStage = FailStage::None;
+  int _lastOpenStatus = 0;
+  int _lastStartStatus = 0;
   bool _measuring = false;
 
   volatile bool _dataReady = false;

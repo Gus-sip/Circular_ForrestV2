@@ -1,5 +1,10 @@
 #include "Bmv080Sensor.h"
 
+// Settling after a reset before the sensor accepts a measurement command.
+#define BMV080_POST_RESET_MS 100
+// Pause between attempts to start the laser.
+#define BMV080_START_RETRY_MS 150
+
 #if defined(ESP32)
 SET_LOOP_TASK_STACK_SIZE(60 * 1024);
 #endif
@@ -64,22 +69,60 @@ bool Bmv080Sensor::begin() {
     // bmv080_open leaves no handle behind on failure, so nothing to close here.
     _handle = nullptr;
   }
-  if (rc != E_BMV080_OK) return false;
+  _lastOpenStatus = (int)rc;
+  if (rc != E_BMV080_OK) {
+    _failStage = FailStage::Open;
+    return false;
+  }
 
   bmv080_reset(_handle);
+  // A reset needs settling before the sensor will accept a measurement command.
+  // Without it the first bmv080_start_continuous_measurement() after begin() fails,
+  // which used to be reported as "NOT FOUND" and is now reported as a read NoAck.
+  delay(BMV080_POST_RESET_MS);
 
   bool doObstructionDetection = true;
   bmv080_set_parameter(_handle, "do_obstruction_detection", (void *)&doObstructionDetection);
 
-  rc = bmv080_start_continuous_measurement(_handle);
-  _measuring = (rc == E_BMV080_OK);
-  return _measuring;
+  // DO NOT start a measurement here.
+  //
+  // begin() used to finish with bmv080_start_continuous_measurement() and return
+  // its result, which conflated two entirely different failures under one "NOT
+  // FOUND": the sensor being absent, and the sensor being present but unable to
+  // START ITS LASER. The laser is the 68mA load that has browned this board out
+  // repeatedly, so the second case is the likely one - and it was being reported
+  // as a missing sensor, which sent the diagnosis toward the I2C bus and the
+  // hardware instead of the supply.
+  //
+  // It was also wasted work: the caller stops the measurement again immediately,
+  // because the sequential-slot design starts the laser only inside the BMV080's
+  // own slot, with every other load quiesced. Opening the sensor is what begin()
+  // is for; measuring is the slot's job.
+  //
+  // So begin() now succeeds when the sensor OPENS. A laser that will not start is
+  // reported later, by the slot, as a read failure - which is what it actually is.
+  _measuring = false;
+  _failStage = FailStage::None;
+  return true;
 }
 
 bool Bmv080Sensor::startMeasurement() {
   if (_handle == nullptr) return false;
   if (_measuring) return true;
-  bmv080_status_code_t rc = bmv080_start_continuous_measurement(_handle);
+
+  // Retry the start. This is where the laser actually fires - the 68mA load that
+  // has browned this board out repeatedly - so a single refusal is not proof the
+  // sensor is broken, and one retry after a short pause costs nothing on the
+  // healthy path. The SDK status is kept so a persistent failure can be diagnosed
+  // rather than guessed at.
+  bmv080_status_code_t rc = E_BMV080_ERROR_HW_WRITE;
+  for (int attempt = 0; attempt < 3; attempt++) {
+    rc = bmv080_start_continuous_measurement(_handle);
+    if (rc == E_BMV080_OK) break;
+    delay(BMV080_START_RETRY_MS);
+  }
+
+  _lastStartStatus = (int)rc;
   _measuring = (rc == E_BMV080_OK);
   _dataReady = false;
   return _measuring;

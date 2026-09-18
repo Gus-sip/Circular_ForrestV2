@@ -27,6 +27,21 @@
 // Spare pin, unused for now (reserved for a future CM1106 RDY line).
 #define PIN_SPARE 12
 
+// BMV080 enable line, added to the board after this file was first written.
+//
+// Must be driven LOW for the sensor to run. Left undriven the BMV080 opens over
+// I2C perfectly - it answers at its strap address and bmv080_open() succeeds - but
+// refuses to start its laser, returning SDK status 114
+// (E_BMV080_ERROR_OPERATION_MODE_CHANNELS_OUT_OF_SYNC), whose Bosch hint is
+// "check that power provided to BMV080 is sufficient & stable". That hint points
+// at the supply, which is exactly what an unasserted enable line looks like from
+// the sensor's side.
+//
+// Driven with the rail gates, before any sensor is opened, so it is settled by the
+// time the SDK talks to the part.
+#define PIN_BMV080_EN 14
+#define PIN_BMV080_EN_ACTIVE LOW
+
 // ---------- Module C PCB enable lines (GPIO10/11) ----------
 // The real PCB (as opposed to the bench harness this file originally described)
 // gates BOTH sensor supply rails behind these: each drives a high-side switching

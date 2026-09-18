@@ -1074,6 +1074,13 @@ static void enableRails(bool safeMode) {
   pinMode(PIN_LORA_EN, OUTPUT);
   digitalWrite(PIN_LORA_EN, PIN_LORA_EN_ACTIVE);
   Serial.println("LoRa: asserted");
+
+  // BMV080 enable - see PIN_BMV080_EN in pins.h. Without it the sensor opens but
+  // will not start its laser.
+  pinMode(PIN_BMV080_EN, OUTPUT);
+  digitalWrite(PIN_BMV080_EN, PIN_BMV080_EN_ACTIVE);
+  Serial.printf("BMV080 EN: GPIO%d -> %s\n", PIN_BMV080_EN,
+                PIN_BMV080_EN_ACTIVE == LOW ? "LOW" : "HIGH");
   Serial.flush();
   delay(500);
 
@@ -1391,7 +1398,16 @@ void setup() {
 
   step("bmv080.begin (SWAPPED: now after cm1106)");
   bmvReady = bmv080.begin();
-  Serial.println(bmvReady ? "BMV080: OK" : "BMV080: NOT FOUND");
+  if (bmvReady) {
+    Serial.println("BMV080: OK");
+  } else {
+    // Say WHICH stage failed. "NOT FOUND" alone cannot distinguish a sensor that
+    // is absent from one that is present but would not open - and those point at
+    // the bus and the supply respectively.
+    Serial.printf("BMV080: NOT FOUND - open failed at every strap address "
+                  "(0x57/0x56/0x55/0x54), last SDK status %d\n",
+                  bmv080.lastOpenStatus());
+  }
   // begin() leaves it measuring in order to prove presence; park it straight away
   // so the laser stays off until a sample is actually wanted.
   if (bmvReady) {
@@ -1640,8 +1656,38 @@ static void runSlot(int slot) {
       if (!bmvReady || !g_bmvEnabled) break;
       // Laser on only for this slot, off before the slot ends - on every path.
       if (!bmv080.startMeasurement()) {
-        g_bmvSt = ReadingStatus::NoAck;
-        break;
+        Serial.printf("[bmv080] start FAILED - SDK status %d (see bmv080_status_code_t)\n",
+                      bmv080.lastStartStatus());
+        Serial.flush();
+
+        // SWEEP GPIO12/GPIO14 AT THE MOMENT THE LASER REFUSES.
+        //
+        // If a line was added to the board that enables this sensor, the firmware
+        // has never driven it: GPIO12 is only PIN_SPARE ("reserved for a future
+        // CM1106 RDY line") and GPIO14 is absent from pins.h entirely. Driving
+        // both LOW alone changed nothing, so try every combination here rather
+        // than guess - the same technique that settled the GPIO10/11 rail gates,
+        // where the answer turned out to be that the two had OPPOSITE active
+        // levels and driving both the same way kept a rail off.
+        static const int kLevels[4][2] = {{LOW, HIGH}, {HIGH, LOW}, {HIGH, HIGH}, {LOW, LOW}};
+        bool started = false;
+        for (int c = 0; c < 4 && !started; c++) {
+          digitalWrite(12, kLevels[c][0]);
+          digitalWrite(14, kLevels[c][1]);
+          delay(250);
+          started = bmv080.startMeasurement();
+          Serial.printf("  [sweep] GPIO12=%s GPIO14=%s -> %s (status %d)\n",
+                        kLevels[c][0] == LOW ? "LOW " : "HIGH",
+                        kLevels[c][1] == LOW ? "LOW " : "HIGH",
+                        started ? "*** LASER STARTED ***" : "refused",
+                        bmv080.lastStartStatus());
+          Serial.flush();
+        }
+
+        if (!started) {
+          g_bmvSt = ReadingStatus::NoAck;
+          break;
+        }
       }
       g_bmvPhase = BmvPhase::Measuring;
       uint32_t t0 = millis();
