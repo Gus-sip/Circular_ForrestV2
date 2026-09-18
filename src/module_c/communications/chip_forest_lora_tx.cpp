@@ -437,6 +437,37 @@ static void ledReading() {
 // A tick where neither is due does no sensor or radio initialisation at all and
 // goes straight back to sleep - that is what makes a 10s tick affordable, since
 // the BMV080's startup alone would otherwise cost 5s of every 10s tick.
+// --- "Dueto Centinela": two sensor groups on two schedules ---
+//
+// SENTINEL, every tick: BME690 temperature/humidity/pressure with the GAS HEATER
+// OFF, plus CO. Both are fast and cheap, and both are the signals that move first
+// in a fire. This is the group that justifies a 10s tick.
+//
+// BURST, every BURST_EVERY_DEFAULT ticks: the expensive sensors - BME690 gas
+// (10.8s of heater), BMV080 (68mA laser), CM1106 (power-cycle plus warm-up) and
+// the wind sensor. Particulates and CO2 change on the timescale of a spreading
+// fire, not of seconds, so 15 minutes matches the phenomenon and costs a
+// seventieth of what sampling them every 30s costs.
+//
+// Both counters live in RTC memory and both are settable from Module A, so the
+// balance between detection latency and battery life can be retuned in the field
+// without a reflash.
+#define BURST_EVERY_DEFAULT 90   // ticks; 90 x 10s = 15 minutes
+
+// NOTE ON THE SENTINEL CADENCE. The sentinels are cheap in SENSOR terms, but on
+// this board they are not free: the BME690 sits behind the gated 3V3 rail, so
+// reading it means powering that rail and re-initialising the sensor - roughly a
+// second, against ~0.15s for a tick that powers nothing.
+//
+// So a true 10s sentinel cadence (SENSOR_READ=1) costs ~10% duty on rail bring-up
+// alone. It becomes genuinely cheap only once the sentinel sensors are permanently
+// powered, which is a board change (the 3V3 rail currently gates all of them
+// together).
+//
+// Until then SENSOR_READ stays at 3 - sentinels every 30s - which keeps the idle
+// ticks free. Set CFG,SENSOR_READ=1 for 10s sentinels when the power budget allows
+// it or the hardware changes.
+
 #define SENSOR_READ_EVERY_DEFAULT 3
 #define LORA_TRANS_EVERY_DEFAULT 4
 #define COUNTER_EVERY_MIN 1
@@ -532,7 +563,7 @@ RYLR998 radio(Serial0, LORA_RX_PIN, LORA_TX_PIN);  // UART0 is free - UART1/UART
 // the RTC domain powered, and is only lost on genuine power loss - which is
 // exactly the distinction being measured. It starts as garbage at true power-on,
 // hence the magic word.
-#define BOOTCOUNT_MAGIC 0xC0FFEE02UL  // bumped: re-seeds thresholds + re-syncs counters
+#define BOOTCOUNT_MAGIC 0xC0FFEE03UL  // bumped: re-seeds thresholds + re-syncs counters
 RTC_NOINIT_ATTR uint32_t g_bootMagic;
 RTC_NOINIT_ATTR uint32_t g_bootCount;
 
@@ -562,6 +593,8 @@ RTC_NOINIT_ATTR uint16_t g_loraTransCount;
 // if it reset every wake the node would read slot 0 forever and never touch the
 // others.
 RTC_NOINIT_ATTR uint16_t g_slotCursor;
+RTC_NOINIT_ATTR uint16_t g_burstCount;
+RTC_NOINIT_ATTR uint16_t g_burstEvery;
 RTC_NOINIT_ATTR uint16_t g_sensorReadEvery;
 RTC_NOINIT_ATTR uint16_t g_loraTransEvery;
 
@@ -747,6 +780,23 @@ static bool applyConfigCommand(const char *payload, uint8_t len, char *ackPayloa
           g_loraTransEvery = (uint16_t)n;
           g_loraTransCount = 0;
           snprintf(appliedKv, sizeof(appliedKv), "LORA_TRANS=%ld", n);
+        }
+      } else if (strcmp(key, "BURST") == 0) {
+        // Ticks between runs of the EXPENSIVE sensor group (PM, CO2, gas, wind).
+        // This is the main power/latency dial in the field: 90 ticks = 15 min at
+        // the default 10s tick. Bounded by the same COUNTER_EVERY_* limits as the
+        // other schedules so a fat-fingered value cannot silence the node.
+        long n = strtol(valueStr, nullptr, 10);
+        if (n < COUNTER_EVERY_MIN || n > COUNTER_EVERY_MAX) {
+          Serial.printf("[downlink] BURST=%ld out of range %d..%d - ignored\n", n,
+                        COUNTER_EVERY_MIN, COUNTER_EVERY_MAX);
+          matched = false;
+        } else {
+          g_burstEvery = (uint16_t)n;
+          g_burstCount = 0;
+          Serial.printf("[downlink] burst group now every %ld ticks (%lds)\n", n,
+                        n * (long)SLEEP_CYCLE_SECONDS);
+          snprintf(appliedKv, sizeof(appliedKv), "BURST=%ld", n);
         }
       } else if (strcmp(key, "ALARM") == 0) {
         // Force-clear from Module A. Setting it is deliberately NOT supported:
@@ -1084,6 +1134,8 @@ static bool isColdBoot();
 // return to sleep without bringing up a single rail.
 static bool g_readDue = false;
 static bool g_txDue = false;
+// The expensive sensor group is due this tick - see BURST_EVERY_DEFAULT.
+static bool g_burstDue = false;
 
 void setup() {
   Serial.begin(115200);
@@ -1158,6 +1210,12 @@ void setup() {
     g_co = g_coTemp = 0.0f;
     g_windAngle = g_windSpeed = 0.0f;
     g_windValid = false;
+    // Start DUE, not at zero, so the first working tick runs a burst immediately.
+    // Otherwise a freshly powered node spends its first BURST_EVERY_DEFAULT ticks
+    // (15 minutes by default) transmitting gas/PM/CO2 as zeros, which is
+    // indistinguishable from three dead sensors at the receiving end.
+    g_burstEvery = BURST_EVERY_DEFAULT;
+    g_burstCount = g_burstEvery;
     g_sensorReadEvery = SENSOR_READ_EVERY_DEFAULT;
     g_loraTransEvery = LORA_TRANS_EVERY_DEFAULT;
     g_storeCount = 0;
@@ -1186,6 +1244,7 @@ void setup() {
   // this tick owes. Counting in setup() rather than loop() matters: loop() runs
   // many times per wake, so incrementing there would race through the thresholds
   // in milliseconds instead of once per 10s tick.
+  if (g_burstCount < 0xFFFF) g_burstCount++;
   if (g_sensorReadCount < 0xFFFF) g_sensorReadCount++;
   if (g_loraTransCount < 0xFFFF) g_loraTransCount++;
   // Reset reason FIRST - before any bail-out can skip it. This costs one line per
@@ -1203,6 +1262,7 @@ void setup() {
 
   g_readDue = (g_sensorReadCount >= g_sensorReadEvery);
   g_txDue = (g_loraTransCount >= g_loraTransEvery);
+  g_burstDue = (g_burstCount >= g_burstEvery);
 
   // ---- Idle tick: power nothing, go straight back to sleep ----
   // This decision used to live in loop(), which meant every wake first switched on
@@ -1217,7 +1277,12 @@ void setup() {
   // The rails are still off here (deep sleep latched them off and nothing has
   // driven them since), so there is nothing to undo - just sleep again.
 #if SLEEP_ENABLED
-  if (!g_readDue && !g_txDue && !isColdBoot()) {
+  // EVERY schedule must be listed here. Omitting one does not merely skip a tick -
+  // that work never happens at all, because the bail-out sleeps before any rail is
+  // powered. g_burstDue was missed when the burst schedule was added, which would
+  // have meant the expensive sensor group never ran on a tick that owed nothing
+  // else.
+  if (!g_readDue && !g_txDue && !g_burstDue && !isColdBoot()) {
     enterDeepSleep("nothing due - no rails powered");
     return;  // unreachable: enterDeepSleep does not return
   }
@@ -1948,6 +2013,50 @@ static void recoverRailsAfterHeater() {
   delay(BMV080_STARTUP_DELAY_MS);
 }
 
+// SENTINEL read - every tick, and deliberately cheap.
+//
+// BME690 with the heater OFF (a couple of hundred milliseconds instead of 10.8
+// seconds) plus CO. Nothing here switches a rail or fires a laser, so the whole
+// thing costs roughly what the wake itself costs.
+//
+// The CO sensor is read here only when it is enabled and initialised. It is
+// excluded from the sleeping cycle at present because of its 210s settle - once it
+// is powered continuously (which needs the 5V rail to stay up, a board change) it
+// becomes the fastest signal the node has.
+static void readSentinels() {
+  uint32_t t0 = millis();
+
+  if (bmeReady && g_bmeEnabled) {
+    Reading env = bme690.readFast();
+    g_bmeSt = env.status;
+    if (env.ok()) {
+      g_bmeFresh = true;
+      g_temp = env.values[0];
+      g_hum = env.values[1];
+      g_pres = env.values[2];
+      // gas deliberately NOT written - readFast() takes no gas measurement, and
+      // overwriting the cached value with 0 would look like a collapse to the
+      // alarm logic.
+    }
+  }
+
+  if (sen0466Ready && g_sen0466Enabled) {
+    Reading co = sen0466.read();
+    g_coSt = co.status;
+    if (co.ok()) {
+      g_coFresh = true;
+      g_co = co.values[0];
+      g_coTemp = co.values[1];
+    }
+  }
+
+  Serial.printf("[sentinel] bme=%s(T%.1f H%.1f) co=%s(%.2f)  (%lums)\n",
+                statusName(g_bmeSt), g_temp, g_hum, statusName(g_coSt), g_co,
+                (unsigned long)(millis() - t0));
+  Serial.flush();
+}
+
+// BURST read - the expensive sensors, on their own slow schedule.
 static void readFastSensorsOnce() {
   uint32_t t0 = millis();
   char pending[64];
@@ -2090,29 +2199,67 @@ void loop() {
   // Decided in setup(), before anything was powered - see the idle-tick bail-out.
   bool readDue = g_readDue;
   bool txDue = g_txDue;
+  bool burstDue = g_burstDue;
 
-  if (readDue) {
-    g_sensorReadCount = 0;
-    readFastSensorsOnce();
+  // ALL OF THIS TICK'S WORK RUNS EXACTLY ONCE, however many times loop() is
+  // entered.
+  //
+  // loop() runs repeatedly whenever the node is awake without sleeping: throughout
+  // the 30s cold-boot window, and continuously in pre-alarm. The due-flags are
+  // decided once in setup() and do not change within a boot, so without this guard
+  // every pass repeats the whole tick. Measured before the fix: 17 sentinel reads
+  // and SIX IDENTICAL TRANSMITS inside a single cold-boot window - wasted radio
+  // energy and duplicate rows arriving at Module B.
+  //
+  // (The repeated transmits predate the sentinel work; splitting the schedules
+  // simply made them visible.)
+  //
+  // A plain static is the right scope: every tick is a fresh boot out of deep
+  // sleep, so this starts false each tick by construction.
+  static bool tickWorkDone = false;
+  if (!tickWorkDone) {
+    tickWorkDone = true;
+
+    // Sentinels first - cheap, and the signals that move first in a fire, so the
+    // alarm check sees fresh temperature and CO even on a tick that owes nothing
+    // else.
+    readSentinels();
+
+    // The expensive group on its own slow schedule. Before the alarm check, so a
+    // burst tick decides with particulates and gas included rather than on
+    // sentinels alone.
+    if (burstDue) {
+      g_burstCount = 0;
+      readFastSensorsOnce();
+    }
+
     updateAlarmState();
-    storeCurrentReading();
-    if (g_alarmState == ALARM_PREALARM) return;  // just tripped - stay awake
+
+    // Store on a burst tick (a complete set) or a scheduled read tick. A
+    // sentinel-only tick does not store: it would fill the batch with rows whose
+    // PM and CO2 are just the previous burst's values repeated.
+    if (burstDue || readDue) {
+      g_sensorReadCount = 0;
+      storeCurrentReading();
+    }
+
+    if (txDue) {
+      g_loraTransCount = 0;
+      ledWorking();  // white for the transmit itself
+      transmitStore();
+      transmitStatus();
+    }
+
+    // A burst tick is the only one where the PM and CO2 statuses mean anything, so
+    // the full health check waits for it rather than judging on sentinels alone.
+    if (burstDue && sensorsDegraded()) {
+      Serial.println("[health] a sensor that was expected did not read - LED red");
+      Serial.flush();
+      ledTrouble();
+    }
   }
 
-  if (txDue) {
-    g_loraTransCount = 0;
-    ledWorking();  // white for the transmit itself
-    transmitStore();
-    transmitStatus();
-  }
-
-  // Only judge health on a tick that actually READ something. On a transmit-only
-  // tick the statuses refer to no reads at all, and every sensor would look failed.
-  if (readDue && sensorsDegraded()) {
-    Serial.println("[health] a sensor that was expected did not read - LED red");
-    Serial.flush();
-    ledTrouble();
-  }
+  if (g_alarmState == ALARM_PREALARM) return;  // stay awake - handled above
 
   if (coldBootWindowOpen()) {
     delay(SAMPLE_GAP_MS);

@@ -124,7 +124,50 @@ void Bme690Sensor::primeAndMark() {
   _chipIdMode = 0;
 }
 
+// The gas heater is the whole cost of a BME690 reading. Toggling it is a config
+// write over I2C, so the state is cached and only written on an actual change -
+// the sentinel path calls this every 10 seconds.
+//
+// 320C / 150ms are the library's own defaults, restored when re-enabling so the
+// gas figures stay comparable with those taken before the heater was ever toggled.
+bool Bme690Sensor::setHeater(bool on) {
+  if (_heaterOn == on) return true;
+  if (!_sensor.setHeater(on, 320, 150)) return false;
+  _heaterOn = on;
+  return true;
+}
+
+// Temperature, humidity and pressure with the heater OFF - see the header.
+Reading Bme690Sensor::readFast() {
+  Reading r;
+
+  if (!setHeater(false)) {
+    r.status = ReadingStatus::NotReady;
+    return r;
+  }
+
+  float t, h, pr, g;
+  for (int attempt = 0; attempt < 2; attempt++) {
+    if (_sensor.getData(t, h, pr, g)) {
+      r.status = ReadingStatus::Ok;
+      r.values[0] = t;
+      r.values[1] = h;
+      r.values[2] = pr;
+      r.values[3] = 0.0f;  // no gas reading was taken - do not pass off as real
+      r.count = 3;
+      return r;
+    }
+    delay(20);
+  }
+
+  r.status = ReadingStatus::Timeout;
+  return r;
+}
+
 Reading Bme690Sensor::read() {
+  // The full read needs the heater; readFast() may have switched it off.
+  setHeater(true);
+
   Reading r;
   float temperature, humidity, pressure, gas;
 
