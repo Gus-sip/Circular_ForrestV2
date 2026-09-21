@@ -337,11 +337,28 @@ void loop() {
         tok = strtok(nullptr, ",");
       }
 
-      if (pct >= 0) {
-        nodeChargeRemember(msg.senderAddr, pct, mv);
-        Serial.printf("  node health: charge %d%% (%d mV at the sense pin)\n", pct, mv);
+      // THREE outcomes here, not two. A node that sends no charge fields at all
+      // and a node that sends them as "unknown" are different problems, and
+      // collapsing them sends someone hunting a firmware version that is fine.
+      //
+      // pct == -1 is the NORMAL state today: it means SUPERCAP_CALIBRATED is 0 on
+      // the node because the GPIO14 divider ratio has never been measured. Every
+      // node reports that. It is not old firmware.
+      if (field <= 7) {
+        // Genuinely short packet - the mV/percentage fields do not exist.
+        Serial.printf("  STAT has only %d fields - node predates the charge report\n", field);
       } else {
-        Serial.println("  STAT without a charge field - older node firmware?");
+        // The fields are present. Remember them EVEN WHEN pct is -1: the raw
+        // millivolts are what the calibration will be derived from, so throwing
+        // them away because the percentage is unknown discards the one number
+        // that would let us work the percentage out.
+        nodeChargeRemember(msg.senderAddr, pct, mv);
+        if (pct >= 0) {
+          Serial.printf("  node health: charge %d%% (%d mV at the sense pin)\n", pct, mv);
+        } else {
+          Serial.printf("  node health: %d mV at the sense pin, percentage not yet "
+                        "calibrated (SUPERCAP_CALIBRATED=0 on the node)\n", mv);
+        }
       }
       continue;
     }

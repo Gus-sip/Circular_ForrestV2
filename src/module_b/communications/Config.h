@@ -193,7 +193,10 @@ inline void nbiotResolveNodeName(uint16_t addr, char *outName, size_t outCap) {
 // 2026-08-28 with "Is gateway" enabled to replace the earlier
 // "CON-MODB_TEST") token, not any individual node's - the hub publishes on
 // nodes' behalf via the Gateway API (see modem_nbiot_mqtt.h).
-#define MQTT_ACCESS_TOKEN "QRPJgyk5COJPCavycmpp"
+// Module B #2 (MAC 28:84:85:6f:88:94) got its own gateway device and token on
+// 2026-09-21. The previous board's token was QRPJgyk5COJPCavycmpp - if this
+// build is ever flashed back onto board #1, the token has to go back with it.
+#define MQTT_ACCESS_TOKEN "lIdRdiuBluhDbApBaPmJ"
 #define MQTT_CLIENT_IDX 0  // AT+QMTOPEN/QMTCONN/QMTPUB client index - only one MQTT client is ever open, so a fixed 0 is fine
 
 // ---------- MQTT batching / publish cadence (ModemNBIoTMqtt) ----------

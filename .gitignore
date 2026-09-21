@@ -7,3 +7,4 @@ logs/*.csv
 .claude/settings.local.json
 logs/overnight_stdout.txt
 logs/overnight_stderr.txt
+backups/
