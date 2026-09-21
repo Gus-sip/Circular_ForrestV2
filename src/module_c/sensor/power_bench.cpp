@@ -85,6 +85,38 @@ enum class Mode : uint8_t {
   LoraTx
 };
 
+// ---------------------------------------------------------------------------
+// CPU FREQUENCY HAS TO SURVIVE A REBOOT, because requesting it can CAUSE one.
+//
+// On the ESP32-S3 the USB-Serial/JTAG peripheral is clocked from the system
+// clock, so calling setCpuFrequencyMhz() while USB CDC is the console can drop
+// the port and reset the board. Observed 2026-09-21: pressing 'l' for 80 MHz
+// reset the node, which came back at the default 240 MHz with the mode timer
+// restarted - and the meter reading taken afterwards was therefore a 240 MHz
+// reading being compared against 240 MHz. It looked like lowering the clock had
+// RAISED the current by 4 mA.
+//
+// RTC_NOINIT survives both deep sleep and a reset, so the request is recorded
+// here and re-applied on the next boot. If the reset happens anyway, the board
+// comes back at the frequency that was asked for and the measurement is still
+// the one intended. The magic word guards against reading uninitialised RTC RAM
+// on a genuinely cold first boot.
+// ---------------------------------------------------------------------------
+#define CPU_REQ_MAGIC 0xC1F05EE1UL
+RTC_NOINIT_ATTR uint32_t g_cpuReqMagic;
+RTC_NOINIT_ATTR uint32_t g_cpuReqMhz;
+
+static void requestCpuMhz(uint32_t mhz) {
+  g_cpuReqMagic = CPU_REQ_MAGIC;
+  g_cpuReqMhz = mhz;
+  Serial.printf("\n[CPU -> %lu MHz requested; it is remembered across a reset, because\n"
+                " asking for it can itself reset the board on USB]\n",
+                (unsigned long)mhz);
+  Serial.flush();
+  delay(50);
+  setCpuFrequencyMhz(mhz);
+}
+
 static Mode g_mode = Mode::AllOff;
 static bool g_quiet = false;
 static uint32_t g_modeEnteredMs = 0;
@@ -378,15 +410,8 @@ static void handleKey(char c) {
       Serial.flush();
       break;
 
-    case 'l':
-      setCpuFrequencyMhz(80);
-      Serial.printf("\n[CPU -> %lu MHz]\n", (unsigned long)getCpuFrequencyMhz());
-      break;
-
-    case 'h':
-      setCpuFrequencyMhz(240);
-      Serial.printf("\n[CPU -> %lu MHz]\n", (unsigned long)getCpuFrequencyMhz());
-      break;
+    case 'l': requestCpuMhz(80); break;
+    case 'h': requestCpuMhz(240); break;
 
     case 's':
       Serial.printf("\n[state] %s | %lus in this mode | CPU %lu MHz | supercap %d mV\n",
@@ -419,9 +444,22 @@ void setup() {
 
   analogReadResolution(12);
 
+  // Re-apply a remembered clock request. See requestCpuMhz(): asking for a
+  // frequency can reset the board, and a silent return to 240 MHz turns the next
+  // meter reading into a comparison of 240 MHz against itself.
+  if (g_cpuReqMagic == CPU_REQ_MAGIC && g_cpuReqMhz != 0 &&
+      g_cpuReqMhz != getCpuFrequencyMhz()) {
+    setCpuFrequencyMhz(g_cpuReqMhz);
+  } else if (g_cpuReqMagic != CPU_REQ_MAGIC) {
+    g_cpuReqMagic = CPU_REQ_MAGIC;
+    g_cpuReqMhz = getCpuFrequencyMhz();
+  }
+
   Serial.println();
   Serial.println("CHIP FOREST - Module C power bench");
   Serial.println("No sleep, no scheduler. One sensor at a time, held indefinitely.");
+  Serial.printf("Boot: reset reason %d, CPU %lu MHz\n",
+                (int)esp_reset_reason(), (unsigned long)getCpuFrequencyMhz());
   printMenu();
 
   enterMode(Mode::AllOff);
@@ -438,9 +476,13 @@ void loop() {
 
   if (!g_quiet && millis() - g_lastBeatMs >= 2000) {
     g_lastBeatMs = millis();
-    Serial.printf("[%3lus] %-38s n=%-4lu %-28s cap=%d mV\n",
+    // CPU MHz is on every line on purpose: a reset silently restores 240 MHz,
+    // and without it on screen an 80 MHz measurement can quietly become a
+    // 240 MHz one between two readings.
+    Serial.printf("[%3lus] %-38s %3luMHz n=%-4lu %-26s cap=%d mV\n",
                   (unsigned long)((millis() - g_modeEnteredMs) / 1000),
-                  modeName(g_mode), (unsigned long)g_opCount, g_lastValue, supercapMv());
+                  modeName(g_mode), (unsigned long)getCpuFrequencyMhz(),
+                  (unsigned long)g_opCount, g_lastValue, supercapMv());
   }
 
   delay(10);  // yields to the idle task - the Task WDT watches CPU0 and panics at 5s
