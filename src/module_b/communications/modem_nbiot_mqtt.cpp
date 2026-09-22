@@ -536,8 +536,7 @@ void ModemNBIoTMqtt::enterError(const char *reason) {
   setState(State::ERROR);
 }
 
-void ModemNBIoTMqtt::powerCycle() {
-  setLastError("power cycling modem (last resort)");
+void ModemNBIoTMqtt::powerDown() {
   // Release TX before cutting VIN - otherwise the module is still being fed
   // through it and this is not a power cycle at all.
   releaseUart();
@@ -547,6 +546,11 @@ void ModemNBIoTMqtt::powerCycle() {
   _attached = false;
   _mqttConnected = false;
   _powerCycleSettleUntilMs = millis() + NBIOT_POWER_OFF_SETTLE_MS;
+}
+
+void ModemNBIoTMqtt::powerCycle() {
+  setLastError("power cycling modem (last resort)");
+  powerDown();
   setState(State::OFF);
 }
 
@@ -1123,6 +1127,29 @@ void ModemNBIoTMqtt::tickRpcReply() {
 
 void ModemNBIoTMqtt::tickError() {
   if (millis() < _backoffUntilMs) return;
+
+  // A RETRY MUST ACTUALLY REMOVE POWER, and this did not.
+  //
+  // The loop was ERROR -> OFF -> enterPowering() -> POWERING -> WAIT_AT -> ERROR.
+  // enterPowering() only ASSERTS the EN and channel gates - which were already
+  // asserted, because nothing on this path ever dropped them - and then pulses
+  // PWRKEY. powerCycle(), the one function that actually cuts VIN, is reachable
+  // only from RecoveryLevel::POWER and was never on this path, so
+  // _powerCycleSettleUntilMs stayed 0 and tickOff() fell straight through.
+  //
+  // PWRKEY ON A QUECTEL MODULE TOGGLES. A pulse at a powered-off module turns it
+  // on; the same pulse at a RUNNING module turns it OFF. So every "retry" was
+  // pulsing PWRKEY at a module whose power state was unknown and, after the
+  // first attempt, probably on - meaning the retry was as likely to switch the
+  // modem off as to start it. That also explains why the fault sometimes cleared
+  // "by itself" after several cycles, and why it hit both boards identically:
+  // it is parity, not hardware.
+  //
+  // Dropping VIN first makes the PWRKEY pulse unambiguous - the module is known
+  // to be off, so a pulse can only mean "turn on". NBIOT_POWER_OFF_SETTLE_MS
+  // (4s) then gives the rail time to actually fall before it comes back up;
+  // tickOff() waits on the timer powerDown() arms.
+  powerDown();
   setState(State::OFF);
 }
 

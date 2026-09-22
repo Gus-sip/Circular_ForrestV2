@@ -168,6 +168,12 @@ private:
   void enterPowering();
   void enterError(const char *reason);
   void powerCycle();
+
+  // The electrical half of a power cycle: TX released, VIN and the channel gate
+  // dropped, PWRKEY parked inactive, and the off-settle timer armed. Shared by
+  // powerCycle() and by the ERROR->OFF retry path, which MUST remove power
+  // rather than just pulse PWRKEY again - see tickError().
+  void powerDown();
   void handleFailureAtLevel(RecoveryLevel level, const char *reason);
   void applyBackoffAndSetState(State s);
   uint32_t computeBackoff(uint32_t attempt) const;

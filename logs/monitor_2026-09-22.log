@@ -1,0 +1,11 @@
+# monitor COM10 durante 1500s, iniciado 2026-09-22T13:05:29.065565+00:00
+13:05:33 [nbiot-mqtt] ERROR: modem never responded to AT
+13:05:45 STAT addr=1  wake=31    reset=8 boots=0 | bme=1 bmv=0 co2=1 co=0 wind=0 |  2080 mV | pct=-1
+13:06:34 STAT addr=3  wake=227   reset=8 boots=0 | bme=1 bmv=1 co2=1 co=0 wind=0 |    97 mV | pct=-1
+13:06:56 STAT addr=1  wake=35    reset=8 boots=0 | bme=1 bmv=0 co2=1 co=0 wind=0 |  2093 mV | pct=-1
+13:07:46 STAT addr=3  wake=231   reset=8 boots=0 | bme=1 bmv=1 co2=1 co=0 wind=0 |    99 mV | pct=-1
+13:08:06 [nbiot-mqtt] ERROR: modem never responded to AT
+13:08:07 STAT addr=1  wake=39    reset=8 boots=0 | bme=1 bmv=0 co2=1 co=0 wind=0 |  2106 mV | pct=-1
+13:08:57 STAT addr=3  wake=235   reset=8 boots=0 | bme=1 bmv=1 co2=1 co=0 wind=0 |    98 mV | pct=-1
+13:09:19 STAT addr=1  wake=43    reset=8 boots=0 | bme=1 bmv=0 co2=1 co=0 wind=0 |  2117 mV | pct=-1
+13:10:09 STAT addr=3  wake=239   reset=8 boots=0 | bme=1 bmv=1 co2=1 co=0 wind=0 |    97 mV | pct=-1
