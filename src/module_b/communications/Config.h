@@ -193,10 +193,16 @@ inline void nbiotResolveNodeName(uint16_t addr, char *outName, size_t outCap) {
 // 2026-08-28 with "Is gateway" enabled to replace the earlier
 // "CON-MODB_TEST") token, not any individual node's - the hub publishes on
 // nodes' behalf via the Gateway API (see modem_nbiot_mqtt.h).
-// Module B #2 (MAC 28:84:85:6f:88:94) got its own gateway device and token on
-// 2026-09-21. The previous board's token was QRPJgyk5COJPCavycmpp - if this
-// build is ever flashed back onto board #1, the token has to go back with it.
-#define MQTT_ACCESS_TOKEN "lIdRdiuBluhDbApBaPmJ"
+// EACH MODULE B BOARD HAS ITS OWN GATEWAY DEVICE AND ITS OWN TOKEN, and the token
+// is compiled in - so this line has to match the board being flashed, or telemetry
+// silently lands on the other board's device with no error at either end.
+//
+//   Module B #1  MAC 28:84:85:6F:8F:DC   QRPJgyk5COJPCavycmpp   <-- set below
+//   Module B #2  MAC 28:84:85:6f:88:94   lIdRdiuBluhDbApBaPmJ
+//
+// Check the MAC before flashing (esptool prints it, and pyserial reports it as
+// serial_number). The two boards' MACs differ only in the last three bytes.
+#define MQTT_ACCESS_TOKEN "QRPJgyk5COJPCavycmpp"
 #define MQTT_CLIENT_IDX 0  // AT+QMTOPEN/QMTCONN/QMTPUB client index - only one MQTT client is ever open, so a fixed 0 is fine
 
 // ---------- MQTT batching / publish cadence (ModemNBIoTMqtt) ----------
