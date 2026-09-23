@@ -1996,6 +1996,19 @@ static void transmitStore() {
 // NOTE this is the UPDATED PCB. An older board has no divider fitted at all and
 // its pin floats at ~100 mV whatever the pack is doing; that is not a flat battery
 // and not a bug. Check the revision before reading anything into the millivolts.
+//
+// KNOWN LIMITATION AT THE TOP OF THE RANGE. This divider barely divides - it
+// scales by 0.863 - so a full 3.8V pack puts 3280 mV on the pin. The ESP32-S3's
+// ADC at the default 11dB attenuation is specified to about 3100 mV and is already
+// losing linearity well before that, so the last stretch of charge reads
+// compressed and eventually clips: above roughly 3.59V at the terminals the pin
+// saturates and the gauge stops climbing, likely topping out near 90% rather than
+// 100%.
+//
+// So "not quite reaching 100%" is expected here and is not a charging fault. The
+// bottom and middle of the range, which is where the useful information is, are
+// unaffected. Fixing it properly means a divider with more attenuation - roughly
+// 2:1 would put a full pack near 1.9V, comfortably inside the accurate region.
 #define SUPERCAP_DIVIDER_RATIO 1.15870f
 
 // Set to 1 once SUPERCAP_DIVIDER_RATIO above is a MEASURED number.
@@ -2008,25 +2021,32 @@ static void transmitStore() {
 // its trend before calibration.
 #define SUPERCAP_CALIBRATED 1
 
-// THE VOLTAGE WINDOW WAS ALSO WRONG, and a correct ratio alone would not have
-// saved it. These were 3.7V/2.5V, carried over from an assumed pack that is not
-// the one fitted. The measured full-charge terminal voltage is ~2.67V, i.e. two
-// 350F cells in PARALLEL (700F, 2.7V), not in series.
+// The pack is rated 3.8V - stated 2026-09-23.
 //
-// With the old window a FULLY CHARGED pack computed to 12%:
-//
-//     (2.67^2 - 2.5^2) / (3.7^2 - 2.5^2) = 0.879 / 7.44 = 11.8%
-//
-// which is the kind of wrong that gets acted on - someone replaces a healthy pack.
-#define SUPERCAP_V_FULL 2.7f
+// WORTH RECORDING HOW THIS WAS BRIEFLY GOT WRONG, because the mistake is easy to
+// repeat: the highest terminal voltage observed during a day's testing was ~2.67V,
+// and that was taken as "fully charged", which put the pack at 2.7V and implied
+// two cells in parallel. It was not full - the caps were being charged from empty
+// all that day and simply never reached the top. A reading is only the top of the
+// range if something says the charge had finished. Nothing did.
+#define SUPERCAP_V_FULL 3.8f
 
-// LESS CERTAIN THAN THE OTHER TWO - revisit after a controlled discharge.
+// STILL THE LEAST CERTAIN NUMBER HERE - it decides where the gauge reads zero.
 //
-// Derived from one observation: on 2026-09-22 the board brownout-looped with the
-// pin at ~1629 mV, i.e. ~1.89V at the terminals, so the rail gives up somewhere
-// around there. A single data point taken while a bench supply was also
-// misbehaving is weak evidence, so treat the low end of the scale as approximate.
-// Raising this makes the node report empty sooner, which is the safe direction.
+// Two conflicting pieces of evidence:
+//   - The original constant claimed the regulator gives up at 2.5V, unsourced.
+//   - Observed 2026-09-22: the board brownout-looped with the pin at ~1629 mV,
+//     i.e. ~1.89V at the terminals - so it was still running below 2.5V, though
+//     that was measured while a bench supply was also misbehaving.
+//
+// 1.9V is used because it is the one figure actually observed rather than assumed,
+// but it is probably too low to be the right ANSWER even if it is the right
+// measurement: a 3.8V pack is likely a lithium-ion capacitor, and LICs are damaged
+// by discharge below roughly 2.2V. If these are LICs, the floor should protect the
+// cell, not just the regulator - raising this to ~2.2V costs a little reported
+// capacity and stops the node draining them into damage.
+//
+// Raising it makes the node report empty sooner, which is the safe direction.
 #define SUPERCAP_V_EMPTY 1.9f
 
 // Below this, the reading is not a flat pack - it is a missing divider.
