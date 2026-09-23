@@ -34,7 +34,10 @@ public:
   // alternate, so the caller cannot otherwise know which is live - and that
   // matters when a sensor reports OK at init but returns nothing afterwards.
   uint8_t address() const { return _addr; }
-  void sleep() override {}
+  // Was an empty stub, which made "put the sensor to sleep" a no-op. The heater
+  // IS the BME690's power consumption - everything else is negligible - so
+  // sleeping it means turning the heater off and leaving it off.
+  void sleep() override;
   const char *name() const override { return "BME690"; }
 
   // Raw value of the chip-ID register (0xD0) read directly when begin() fails,

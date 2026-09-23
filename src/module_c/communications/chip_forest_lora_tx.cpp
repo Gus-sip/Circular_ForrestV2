@@ -406,6 +406,62 @@ static void ledReading() {
 // so they would sit at 1/3 forever and nothing would ever be sent.
 #define NOSLEEP_TX_GAP_MS 15000UL
 #define SLEEP_CYCLE_SECONDS 10UL        // one tick; work is scheduled in ticks, not seconds
+// Were the sensor rails brought up on this wake?
+//
+// Tracked with a flag rather than read back off the pins: these are outputs, and
+// on an idle or hibernation wake nothing has driven them since deep sleep latched
+// them off, so a pin read would describe the latch rather than this boot.
+static bool g_railsUp = false;
+static bool railsArePowered() { return g_railsUp; }
+
+
+// Below this, the reading is not a flat pack - it is a missing divider.
+//
+// The board cannot run from a pack this low (the rail collapses around 1.9V), so
+// a node that is transmitting this packet while reporting 0.5V is telling us about
+// its wiring, not its energy. An older PCB with no divider fitted floats at
+// ~100 mV, which is ~0.12V through the ratio and lands well under this.
+#define SUPERCAP_V_SANITY_FLOOR 0.8f
+
+// ---- LOW-BATTERY HIBERNATION ----
+//
+// Below HIB_ENTER_V the node stops being a sensor node and becomes a voltmeter
+// that sleeps: no sensor reads, both rails off, the radio off and silent. It wakes
+// only to look at the pack, and resumes normal operation once charging has brought
+// it back to HIB_EXIT_V.
+//
+// THE POINT IS THE CELLS, NOT THE UPTIME. A 3.8V supercapacitor pack of this kind
+// is damaged by being run down hard, so hibernation is a protective stop: better a
+// node that pauses and comes back than one that flattens its pack and needs the
+// hardware replaced.
+//
+// The gap between the two thresholds is hysteresis and is not optional. Without
+// it, a pack hovering at the limit would resume, draw current, sag below the limit,
+// hibernate, recover, resume... thrashing between the two at exactly the moment it
+// has least energy to waste. 0.3V is wide enough that only real charging crosses it.
+#define HIB_ENTER_V 2.2f
+#define HIB_EXIT_V 2.5f
+
+// How often hibernation wakes to look at the pack.
+//
+// There is no analog wake-on-threshold on the ESP32-S3 - nothing can interrupt the
+// chip when a voltage crosses a level - so "wait until charged" has to be polling.
+// A check is a boot, one ADC read and back to sleep with no rail powered: roughly
+// 400ms. At 10 minutes that is about 0.8 mAh per day against a ~176 mAh pack.
+//
+// Longer saves little and costs responsiveness: the node would sit hibernating
+// through the first part of a sunny morning with a full pack.
+#define HIB_CHECK_SECONDS 600UL
+
+// One STAT as the node enters hibernation, before it goes quiet.
+//
+// Hibernation itself transmits NOTHING - that is the whole point. But a node that
+// simply stops, with no last word, is indistinguishable at Module A from a node
+// that has died, and the cost of telling those apart is someone walking into a
+// forest. One packet on the way down turns a mystery into a status.
+//
+// Set to 0 for true silence from the moment the threshold is crossed.
+#define HIB_ANNOUNCE_ENTRY 1
 
 // How long to hold before sleeping so the host can drain the USB CDC buffer.
 //
@@ -563,7 +619,12 @@ RYLR998 radio(Serial0, LORA_RX_PIN, LORA_TX_PIN);  // UART0 is free - UART1/UART
 // the RTC domain powered, and is only lost on genuine power loss - which is
 // exactly the distinction being measured. It starts as garbage at true power-on,
 // hence the magic word.
-#define BOOTCOUNT_MAGIC 0xC0FFEE04UL  // bumped: re-seeds thresholds + re-syncs counters
+// BUMPED TO 05 because g_hibernating is a NEW RTC_NOINIT variable. RTC_NOINIT
+// memory survives both deep sleep and a reset, and is only re-seeded when this word
+// changes - so without the bump a board with existing state would come up with
+// g_hibernating holding whatever junk was in that address, and could hibernate
+// immediately on a full pack. This trap has cost three debugging sessions already.
+#define BOOTCOUNT_MAGIC 0xC0FFEE05UL  // bumped: seeds g_hibernating
 RTC_NOINIT_ATTR uint32_t g_bootMagic;
 RTC_NOINIT_ATTR uint32_t g_bootCount;
 
@@ -583,6 +644,10 @@ RTC_NOINIT_ATTR uint32_t g_wakeCount;
 // because RTC_NOINIT does.
 RTC_NOINIT_ATTR uint32_t g_sleepFlag;
 #define SLEEP_FLAG_MAGIC 0x5EEDBEEFUL
+
+// True while the node is in low-battery hibernation. RTC_NOINIT so it survives the
+// deep sleep between checks - the whole state machine is one bool plus the ADC.
+RTC_NOINIT_ATTR bool g_hibernating;
 RTC_NOINIT_ATTR uint32_t g_txPeriodMsPersist;
 
 // Tick counters and their end-user thresholds. Counters advance every tick and
@@ -1049,6 +1114,7 @@ static void enableRails(bool safeMode) {
   // dies during the delay that follows. Those are different faults.
   Serial.println("3V3: about to assert");
   Serial.flush();
+  g_railsUp = true;  // so hibernation knows whether the sensors can still be told to sleep
   digitalWrite(PIN_PCB_EN_A, PIN_PCB_EN_A_ACTIVE);
   Serial.println("3V3: asserted");
   Serial.flush();
@@ -1103,6 +1169,46 @@ static bool g_safeMode = false;
 // usual reason for being in safe mode in the first place - and sends one packet
 // saying so. Without this a node in safe mode is indistinguishable from a dead
 // one, which is exactly how node C1 cost days of investigation.
+
+// One packet on the way into hibernation, then silence.
+//
+// Modelled on sendSafeModeDistress() and for the same reason: a node that simply
+// stops looks exactly like a node that has died. Deliberately NOT the telemetry
+// format, so it can never be mistaken for a reading - Module B logs an
+// unrecognised payload verbatim, so it surfaces as kind=other rather than being
+// dropped.
+//
+// Brings up ONLY the LoRa rail. Sensors stay off; the pack is already low and the
+// whole purpose of this state is to stop drawing from it.
+static void sendHibernationNotice(float volts) {
+  Serial.println("[HIBERNATE] sending one notice, then going silent");
+  Serial.flush();
+
+  pinMode(PIN_LORA_EN, OUTPUT);
+  digitalWrite(PIN_LORA_EN, PIN_LORA_EN_ACTIVE);
+  delay(PIN_LORA_EN_SETTLE_MS);
+
+  if (!radio.begin(LORA_MY_ADDR, LORA_NETWORK_ID, LORA_BAND_HZ,
+                   {LORA_PARAM_SF, LORA_PARAM_BW, LORA_PARAM_CR, LORA_PARAM_PREAMBLE},
+                   &Serial)) {
+    Serial.println("[HIBERNATE] radio init failed - hibernating unannounced");
+    Serial.flush();
+    return;
+  }
+
+  char msg[64];
+  int len = snprintf(msg, sizeof(msg), "HIB,%d,%d,%lu", (int)(volts * 1000.0f),
+                     (int)(HIB_EXIT_V * 1000.0f), (unsigned long)g_wakeCount);
+  if (len < 0) len = 0;
+  if (len >= (int)sizeof(msg)) len = (int)sizeof(msg) - 1;
+
+  bool ok = radio.send(LORA_RX_ADDR, msg, (uint8_t)len);
+  Serial.printf("[HIBERNATE] %s (%s)\n", msg, ok ? "sent" : "FAILED");
+  Serial.flush();
+
+  digitalWrite(PIN_LORA_EN, (PIN_LORA_EN_ACTIVE == LOW) ? HIGH : LOW);
+}
+
 static void sendSafeModeDistress() {
   Serial.println("[safe mode] sending distress packet (radio only, sensors stay off)");
   Serial.flush();
@@ -1134,7 +1240,14 @@ static void sendSafeModeDistress() {
 }
 
 // Defined below, but setup() must be able to sleep before it ever powers a rail.
-static void enterDeepSleep(const char *why);
+static void enterDeepSleep(const char *why, uint32_t seconds = SLEEP_CYCLE_SECONDS);
+
+// Reads the supercapacitor divider. Declared here because the hibernation check
+// runs at the very top of setup(), long before the definition further down.
+// Defined further down, next to the supercap helpers it depends on.
+static void enterHibernation(float volts, bool announce);
+static int readSupercapMv();
+static float supercapVolts();
 
 // A cold boot always initialises fully and stays awake, whatever the counters say:
 // that is the window in which the board can be reflashed, and skipping init there
@@ -1226,6 +1339,9 @@ void setup() {
     // (15 minutes by default) transmitting gas/PM/CO2 as zeros, which is
     // indistinguishable from three dead sensors at the receiving end.
     g_burstEvery = BURST_EVERY_DEFAULT;
+    // A freshly seeded node starts awake. If the pack really is low, the check in
+    // setup() puts it straight back into hibernation on this same boot.
+    g_hibernating = false;
     g_burstCount = g_burstEvery;
     g_sensorReadEvery = SENSOR_READ_EVERY_DEFAULT;
     g_loraTransEvery = LORA_TRANS_EVERY_DEFAULT;
@@ -1270,6 +1386,49 @@ void setup() {
   // Green: woke up. Before the idle bail-out below, so every wake flashes -
   // including the two ticks in three that go straight back to sleep.
   ledFlashWake();
+
+  // ---- LOW-BATTERY HIBERNATION: decided before anything is powered ----
+  //
+  // Measured here, at the top of the wake, for a specific reason: the rail SAGS
+  // under load. A reading taken after a LoRa burst or a sensor slot would be a
+  // measurement of the dip, not of the pack, and would park a healthy node for
+  // hours. At this point in the wake nothing has been switched on since deep sleep
+  // latched it all off, so this is the pack at rest - the fairest number available.
+  //
+  // The divider sits directly across the pack and needs no rail of its own, so
+  // this costs one ADC read.
+  float packV = supercapVolts();
+
+  if (g_hibernating) {
+    // In hibernation the ONLY job is to decide whether charging has brought it
+    // back. No sensors, no radio, no rails - just look and sleep again.
+    if (packV >= HIB_EXIT_V) {
+      Serial.printf("[HIBERNATE] pack recovered to %.2fV (>= %.2fV) - resuming normal operation\n",
+                    packV, (double)HIB_EXIT_V);
+      Serial.flush();
+      g_hibernating = false;
+      // Falls through into a normal tick from here.
+    } else {
+      Serial.printf("[HIBERNATE] pack %.2fV, waiting for %.2fV - back to sleep for %lus\n",
+                    packV, (double)HIB_EXIT_V, HIB_CHECK_SECONDS);
+      Serial.flush();
+      enterDeepSleep("still hibernating", HIB_CHECK_SECONDS);
+      return;  // unreachable
+    }
+  } else if (packV <= HIB_ENTER_V && packV >= SUPERCAP_V_SANITY_FLOOR && !isColdBoot()) {
+    // SANITY FLOOR GUARD: an older PCB has no divider and reads ~0.12V, which would
+    // otherwise hibernate every such board permanently on its first wake. A reading
+    // that low means "no divider fitted", not "flat pack" - see the same guard in
+    // transmitStatus().
+    //
+    // COLD BOOT EXCLUDED so a node with a flat pack can still be reflashed. Deep
+    // sleep drops the USB port; hibernating immediately on power-up would leave no
+    // window to reprogram it, and a node you cannot reprogram is worse than one
+    // that drains a little faster. The 30s cold-boot window runs first, then loop()
+    // hibernates at the end of it.
+    enterHibernation(packV, true);
+    return;  // unreachable
+  }
 
   g_readDue = (g_sensorReadCount >= g_sensorReadEvery);
   g_txDue = (g_loraTransCount >= g_loraTransEvery);
@@ -1442,7 +1601,7 @@ void setup() {
 // Powers everything down and sleeps. Rails are switched OFF and their gates
 // latched, so nothing downstream draws during the sleep - that gating, not the
 // MCU's own ~10uA, is where the saving actually comes from.
-static void enterDeepSleep(const char *why) {
+static void enterDeepSleep(const char *why, uint32_t seconds) {
 #if !SLEEP_ENABLED
   (void)why;
   return;
@@ -1452,7 +1611,7 @@ static void enterDeepSleep(const char *why) {
   // meaningless.
   ledOff();
 
-  Serial.printf("\n[sleep] %s - sleeping %lus\n", why, (unsigned long)SLEEP_CYCLE_SECONDS);
+  Serial.printf("\n[sleep] %s - sleeping %lus\n", why, (unsigned long)seconds);
 
   // Quiesce each device before its rail disappears, rather than yanking power
   // from underneath a laser or a warming heater.
@@ -1479,7 +1638,7 @@ static void enterDeepSleep(const char *why) {
   delay(SLEEP_USB_DRAIN_MS);
 
   g_sleepFlag = SLEEP_FLAG_MAGIC;  // so the next boot knows it came from sleep
-  esp_sleep_enable_timer_wakeup((uint64_t)SLEEP_CYCLE_SECONDS * 1000000ULL);
+  esp_sleep_enable_timer_wakeup((uint64_t)seconds * 1000000ULL);
   esp_deep_sleep_start();
   // never returns
 #endif
@@ -1621,6 +1780,7 @@ static const char *slotName(int slot) {
 // does before sleeping, and enterDeepSleep() switches them off anyway. On a tick
 // that both reads and transmits, the read has already finished by this point.
 static void powerDownSensorRails() {
+  g_railsUp = false;
   digitalWrite(PIN_PCB_EN_A, (PIN_PCB_EN_A_ACTIVE == LOW) ? HIGH : LOW);
   digitalWrite(PIN_PCB_EN_B, (PIN_PCB_EN_B_ACTIVE == LOW) ? HIGH : LOW);
   Serial.println("[tx] sensor rails off for the transmit");
@@ -2047,15 +2207,21 @@ static void transmitStore() {
 // capacity and stops the node draining them into damage.
 //
 // Raising it makes the node report empty sooner, which is the safe direction.
-#define SUPERCAP_V_EMPTY 1.9f
-
-// Below this, the reading is not a flat pack - it is a missing divider.
+// TIED TO THE HIBERNATION FLOOR, deliberately.
 //
-// The board cannot run from a pack this low (the rail collapses around 1.9V), so
-// a node that is transmitting this packet while reporting 0.5V is telling us about
-// its wiring, not its energy. An older PCB with no divider fitted floats at
-// ~100 mV, which is ~0.12V through the ratio and lands well under this.
-#define SUPERCAP_V_SANITY_FLOOR 0.8f
+// This was 1.9V, the voltage at which the board was once seen to brown out. But
+// the node now stops at HIB_ENTER_V to protect the cells, so energy below that is
+// not usable energy - it is energy we have decided not to take. Reporting a
+// percentage against 1.9V would have the node hibernate at a displayed 11%, which
+// reads as a bug.
+//
+// With the two equal, 0% and "hibernating now" are the same point and the gauge
+// means what an operator assumes it means: how much is left before it stops.
+#define SUPERCAP_V_EMPTY HIB_ENTER_V
+
+
+
+
 
 // Percent of USABLE energy remaining, not percent of voltage.
 //
@@ -2085,6 +2251,51 @@ static int readSupercapMv() {
     delay(2);
   }
   return (int)(sum / kSamples);
+}
+
+// Pack terminal voltage, through the calibrated divider.
+static float supercapVolts() {
+  return (readSupercapMv() / 1000.0f) * SUPERCAP_DIVIDER_RATIO;
+}
+
+// ---- Low-battery hibernation ----
+//
+// Quiesce, cut everything, and sleep long. Called when the pack has fallen to
+// HIB_ENTER_V. Sensors are told to sleep BEFORE their rail disappears rather than
+// having power yanked mid-measurement - the same courtesy the normal sleep path
+// pays the BMV080 and CM1106.
+//
+// Sensor sleep() calls are nearly free here because the rail is about to go anyway
+// - an unpowered part draws nothing. They exist so shutdown is orderly, and
+// because two of them (BME690, SEN0466) used to be empty stubs that made "tell the
+// sensors to sleep" quietly mean nothing at all.
+static void enterHibernation(float volts, bool announce) {
+  Serial.printf("\n[HIBERNATE] pack at %.2fV, below %.2fV - stopping to protect the cells\n",
+                volts, (double)HIB_ENTER_V);
+  Serial.flush();
+
+  if (railsArePowered()) {
+    if (bmeReady) bme690.sleep();
+    if (sen0466Ready) sen0466.sleep();
+    if (bmvReady) bmv080.stopMeasurement();
+    cm1106.sleep();
+  }
+
+#if HIB_ANNOUNCE_ENTRY
+  // The ONE transmit hibernation ever makes, and only on the way in. Silence from
+  // here is deliberate, but silence with no explanation is indistinguishable at
+  // Module A from a dead node - and telling those apart otherwise costs a trip
+  // into a forest. Skipped if the radio was never brought up on this wake.
+  if (announce) {
+    sendHibernationNotice(volts);
+  }
+#else
+  (void)announce;
+#endif
+
+  g_hibernating = true;
+  ledOff();
+  enterDeepSleep("hibernating - low battery", HIB_CHECK_SECONDS);
 }
 
 static void transmitStatus() {
@@ -2189,6 +2400,7 @@ static void recoverRailsAfterHeater() {
   digitalWrite(PIN_PCB_EN_B, (PIN_PCB_EN_B_ACTIVE == LOW) ? HIGH : LOW);
   delay(HEATER_RECOVERY_OFF_MS);
 
+  g_railsUp = true;
   digitalWrite(PIN_PCB_EN_A, PIN_PCB_EN_A_ACTIVE);
   digitalWrite(PIN_PCB_EN_B, PIN_PCB_EN_B_ACTIVE);
   delay(PIN_PCB_EN_SETTLE_MS);

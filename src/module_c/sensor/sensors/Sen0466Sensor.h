@@ -18,7 +18,9 @@ public:
 
   bool begin() override;
   Reading read() override;
-  void sleep() override {}
+  // See the .cpp - this one is close to honest-but-useless, and says so there
+  // rather than pretending.
+  void sleep() override;
   const char *name() const override { return "SEN0466"; }
 
 private:

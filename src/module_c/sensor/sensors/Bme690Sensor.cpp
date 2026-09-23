@@ -130,6 +130,16 @@ void Bme690Sensor::primeAndMark() {
 //
 // 320C / 150ms are the library's own defaults, restored when re-enabling so the
 // gas figures stay comparable with those taken before the heater was ever toggled.
+// Sleep = heater off. The heater is the whole cost of this sensor; the rest of
+// the die draws microamps. Called on the way into hibernation BEFORE the 3V3 rail
+// is cut, so the part is quiesced rather than having power yanked mid-measurement.
+//
+// Cutting the rail dominates this by a wide margin - an unpowered sensor draws
+// nothing at all - so the value here is orderly shutdown, not the saving.
+void Bme690Sensor::sleep() {
+  setHeater(false);
+}
+
 bool Bme690Sensor::setHeater(bool on) {
   if (_heaterOn == on) return true;
   if (!_sensor.setHeater(on, 320, 150)) return false;
