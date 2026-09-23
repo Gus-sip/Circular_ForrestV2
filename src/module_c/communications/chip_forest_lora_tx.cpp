@@ -1975,15 +1975,28 @@ static void transmitStore() {
 // charge state on every status packet.
 // ---- Supercapacitor charge, as a percentage of USABLE ENERGY ----
 //
-// CALIBRATION REQUIRED. SUPERCAP_DIVIDER_RATIO is the factor from the voltage at
-// the ADC pin to the voltage at the supercap terminals. It defaults to 1.0, which
-// is certainly WRONG - it is a placeholder until the divider is known. Either read
-// the resistor values off the board (ratio = (Rtop + Rbottom) / Rbottom) or put a
-// meter on the supercap at the same moment as a STAT packet and divide.
+// CALIBRATED 2026-09-23 from the resistor values on the updated PCB.
 //
-// Until then the percentage is not trustworthy in absolute terms, though its TREND
-// over a discharge still is.
-#define SUPERCAP_DIVIDER_RATIO 1.0f
+// The sense point is the junction of a two-resistor divider across the pack:
+//
+//     Vcap --[ 51.1k ]--+-- GPIO14
+//                       |
+//                    [ 322k ]
+//                       |
+//                      GND
+//
+// so the pin sees the LOWER leg and the factor back to the terminals is
+//
+//     ratio = (Rtop + Rbottom) / Rbottom = (51.1 + 322) / 322 = 1.15870
+//
+// Sanity check against real readings: a pin reading of 2304 mV - the highest seen
+// on a fully charged pack - maps to 2670 mV at the terminals, which is a 2.7V
+// supercapacitor cell at full charge. It agrees.
+//
+// NOTE this is the UPDATED PCB. An older board has no divider fitted at all and
+// its pin floats at ~100 mV whatever the pack is doing; that is not a flat battery
+// and not a bug. Check the revision before reading anything into the millivolts.
+#define SUPERCAP_DIVIDER_RATIO 1.15870f
 
 // Set to 1 once SUPERCAP_DIVIDER_RATIO above is a MEASURED number.
 //
@@ -1993,12 +2006,36 @@ static void transmitStore() {
 // flat when it is fully charged is worse than a node admitting it does not know.
 // The raw millivolts are still sent either way, so a discharge can be followed by
 // its trend before calibration.
-#define SUPERCAP_CALIBRATED 0
+#define SUPERCAP_CALIBRATED 1
 
-// Full and empty, from the node strategy: charged to 3.7V, regulator gives up at
-// 2.5V. Everything below 2.5V is energy that cannot be used.
-#define SUPERCAP_V_FULL 3.7f
-#define SUPERCAP_V_EMPTY 2.5f
+// THE VOLTAGE WINDOW WAS ALSO WRONG, and a correct ratio alone would not have
+// saved it. These were 3.7V/2.5V, carried over from an assumed pack that is not
+// the one fitted. The measured full-charge terminal voltage is ~2.67V, i.e. two
+// 350F cells in PARALLEL (700F, 2.7V), not in series.
+//
+// With the old window a FULLY CHARGED pack computed to 12%:
+//
+//     (2.67^2 - 2.5^2) / (3.7^2 - 2.5^2) = 0.879 / 7.44 = 11.8%
+//
+// which is the kind of wrong that gets acted on - someone replaces a healthy pack.
+#define SUPERCAP_V_FULL 2.7f
+
+// LESS CERTAIN THAN THE OTHER TWO - revisit after a controlled discharge.
+//
+// Derived from one observation: on 2026-09-22 the board brownout-looped with the
+// pin at ~1629 mV, i.e. ~1.89V at the terminals, so the rail gives up somewhere
+// around there. A single data point taken while a bench supply was also
+// misbehaving is weak evidence, so treat the low end of the scale as approximate.
+// Raising this makes the node report empty sooner, which is the safe direction.
+#define SUPERCAP_V_EMPTY 1.9f
+
+// Below this, the reading is not a flat pack - it is a missing divider.
+//
+// The board cannot run from a pack this low (the rail collapses around 1.9V), so
+// a node that is transmitting this packet while reporting 0.5V is telling us about
+// its wiring, not its energy. An older PCB with no divider fitted floats at
+// ~100 mV, which is ~0.12V through the ratio and lands well under this.
+#define SUPERCAP_V_SANITY_FLOOR 0.8f
 
 // Percent of USABLE energy remaining, not percent of voltage.
 //
@@ -2040,7 +2077,28 @@ static void transmitStatus() {
 
   int vmv = readSupercapMv();
   float vcap = (vmv / 1000.0f) * SUPERCAP_DIVIDER_RATIO;
-  int pct = SUPERCAP_CALIBRATED ? supercapPercent(vcap) : -1;
+
+  // NO DIVIDER FITTED -> SAY "UNKNOWN", NEVER "0%".
+  //
+  // Only the updated PCB has the 51.1k/322k divider. On an older board GPIO14
+  // floats and reads ~100 mV no matter what the pack is doing - and once the
+  // ratio is calibrated, that floats straight through the energy formula and
+  // comes out as a confident 0%.
+  //
+  // A node that is plainly alive and transmitting while reporting a flat battery
+  // is worse than one admitting it does not know: it invites someone to replace a
+  // healthy pack, and it would fire a low-battery alarm on every old board.
+  //
+  // The node cannot be running at all from a pack this low - the rail gave up
+  // around 1.9V - so a reading under SUPERCAP_V_SANITY_FLOOR means the sense line
+  // is absent, not that the energy is gone. One firmware then behaves correctly
+  // on both PCB revisions instead of needing a per-board build.
+  int pct;
+  if (!SUPERCAP_CALIBRATED || vcap < SUPERCAP_V_SANITY_FLOOR) {
+    pct = -1;
+  } else {
+    pct = supercapPercent(vcap);
+  }
 
   char msg[96];
   int len = snprintf(msg, sizeof(msg), "STAT,%lu,%d,%lu,%d%d%d%d%d,%lu,%d,%d",
@@ -2052,13 +2110,17 @@ static void transmitStatus() {
   if (len >= (int)sizeof(msg)) len = (int)sizeof(msg) - 1;
 
   bool ok = radio.send(LORA_RX_ADDR, msg, (uint8_t)len);
-  if (SUPERCAP_CALIBRATED) {
+  if (!SUPERCAP_CALIBRATED) {
+    Serial.printf("[stat] %s  (%d mV at the pin; %% UNCALIBRATED - set the divider ratio) (%s)\n",
+                  msg, vmv, ok ? "sent" : "FAILED");
+  } else if (pct < 0) {
+    Serial.printf("[stat] %s  (%d mV at the pin = %.2fV, below the %.1fV sanity floor - "
+                  "no divider fitted? older PCB) (%s)\n",
+                  msg, vmv, vcap, (double)SUPERCAP_V_SANITY_FLOOR, ok ? "sent" : "FAILED");
+  } else {
     Serial.printf("[stat] %s  (cap %.2fV = %d%% usable, flags from wake %lu, %lu tick(s) ago) (%s)\n",
                   msg, vcap, pct, (unsigned long)g_lastReadWake, ageTicks,
                   ok ? "sent" : "FAILED");
-  } else {
-    Serial.printf("[stat] %s  (%d mV at the pin; %% UNCALIBRATED - set the divider ratio) (%s)\n",
-                  msg, vmv, ok ? "sent" : "FAILED");
   }
   Serial.flush();
 }
