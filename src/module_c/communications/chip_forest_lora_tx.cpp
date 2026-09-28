@@ -172,49 +172,16 @@
 #define BMV080_SETTLE_MS 2000UL            // laser preheat before frames are meaningful
 
 // ---------- Fire detection thresholds ----------
-// PLACEHOLDER VALUES - these are NOT from the project's alarma/prealarma
-// spreadsheet, which was never transcribed into this repo. They are deliberately
-// conservative starting points so the state machine can be exercised; replace
-// them with the real figures before this means anything in the field.
+// ---- Fire thresholds ----
 //
-// The CM1106 is deliberately NOT a trigger: its CO2 field freezes within a boot
-// and only changes across power cycles (see Cm1106Sensor::frozenValueRun), so a
-// fire trigger hung on it would be worthless in both directions - blind to a real
-// fire and liable to latch on a stale number.
-#define ALARM_PM25_UGM3 50.0f        // smoke: BMV080 PM2.5
-#define ALARM_TEMP_C 50.0f           // BME690 temperature
-// BME690 gas-resistance drop as a fire trigger - DISABLED (0 = off).
-//
-// This fired a FALSE PRE-ALARM on the bench on 2026-09-14 with no smoke anywhere
-// near the board:
-//
-//   *** PRE-ALARM: BME690 gas resistance drop *** staying awake, all sensors
-//   [alarm] clean read 1/5 ... 5/5 -> cleared
-//
-// The rule compares gas resistance against a rolling baseline, but this sensor's
-// gas resistance CLIMBS STEADILY as its heater stabilises - measured going
-// 6k -> 20k -> 45k within a single session. A baseline learned while the heater was
-// hot therefore makes every later cold-start reading look like a 50% collapse.
-// Under the sleep cycle the heater starts from cold on every single read tick, so
-// the comparison is between values that were never measured under the same
-// conditions.
-//
-// It is disabled rather than retuned because the fix is not a better constant: the
-// baseline has to be conditioned on heater state (or on a fixed settling time
-// after power-up) before any threshold on it means anything. The other triggers -
-// PM2.5, temperature, CO - are unaffected and still active.
-//
-// This matters beyond a nuisance alarm: PRE-ALARM DELIBERATELY DOES NOT SLEEP, so
-// a false trigger pins the node awake continuously. On battery that is the
-// difference between a node that runs overnight and one that is flat by morning.
-//
-// Set back above 0 only alongside a heater-aware baseline AND the real figures
-// from the alarma/prealarma spreadsheet.
-#define ALARM_GAS_DROP_FRAC 0.0f
-#define ALARM_CO_PPM 50.0f           // SEN0466, only while it is in the cycle
+// The real figures from the project's alarma/prealarma spreadsheet were
+// transcribed on 2026-09-28 and live in kAlarmRules[], next to the state machine
+// that uses them - they have to be declared after the reading globals they point
+// at. See that table for the numbers, the per-magnitude direction, and the reason
+// each disabled rule is disabled.
 
-// Consecutive all-sensor reads below every threshold before pre-alarm auto-clears.
-// More than one, so a single dip does not end an alarm during a real fire.
+// Consecutive reads with every rule clear before a level auto-clears. More than
+// one, so a single dip cannot end an alarm during a real fire.
 #define ALARM_CLEAR_CONSECUTIVE 5
 
 // ---------- Activity LED ----------
@@ -680,7 +647,13 @@ RTC_NOINIT_ATTR uint32_t g_storeDropped;  // readings lost to a full store
 
 // Pre-alarm. Continuous all-sensor operation until the readings settle or Module A
 // clears it. Held in RTC so an alarm survives the sleeps it will mostly prevent.
-enum AlarmState : uint8_t { ALARM_NORMAL = 0, ALARM_PREALARM = 1 };
+// Three levels now, matching the spreadsheet. ALARM_FIRE is new - the firmware
+// previously had no full-alarm state at all, only pre-alarm.
+//
+// Ordered so "at least pre-alarm" is a >= test: several places must treat both
+// raised states the same way (stay awake, do not sleep), and >= cannot silently
+// miss the new state the way a chain of == would.
+enum AlarmState : uint8_t { ALARM_NORMAL = 0, ALARM_PREALARM = 1, ALARM_FIRE = 2 };
 RTC_NOINIT_ATTR uint8_t g_alarmState;
 RTC_NOINIT_ATTR uint16_t g_alarmClearRun;   // consecutive clean reads while in pre-alarm
 RTC_NOINIT_ATTR float g_gasBaseline;        // BME690 gas resistance in clean air
@@ -1948,57 +1921,194 @@ static void storeCurrentReading() {
                 (unsigned)READING_STORE_MAX, (unsigned long)g_wakeCount);
 }
 
-// Does the newest reading look like fire? Kept separate from the state machine so
-// the criteria stay readable and in one place.
-static bool readingsIndicateFire(const char **whyOut) {
-  if (bmvReady && g_bmvEnabled && g_pm25 >= ALARM_PM25_UGM3) { *whyOut = "PM2.5"; return true; }
-  if (bmeReady && g_bmeEnabled) {
-    if (g_temp >= ALARM_TEMP_C) { *whyOut = "temperature"; return true; }
-    // Gas RESISTANCE falls as VOCs rise, so a drop below a fraction of the clean-air
-    // baseline is the smoke signal. Needs a baseline first, hence the guard.
-    // ALARM_GAS_DROP_FRAC of 0 disables this trigger entirely - see its definition
-    // for why. Without this guard a fraction of 0 would mean "fire whenever gas is
-    // below baseline", which is half the time.
-    if (ALARM_GAS_DROP_FRAC > 0.0f && g_gasBaseline > 0.0f && g_gas > 0.0f &&
-        g_gas < g_gasBaseline * (1.0f - ALARM_GAS_DROP_FRAC)) {
-      *whyOut = "BME690 gas resistance drop";
-      return true;
-    }
+// ---- FIRE THRESHOLDS, from the project's alarma/prealarma spreadsheet ----
+//
+// Transcribed 2026-09-28. Four numbers per magnitude, matching the sheet's four
+// columns: an ON threshold to ENTER each level, an OFF threshold to LEAVE it. The
+// gap between them is hysteresis - without it a reading sitting on a limit would
+// toggle the node in and out of pre-alarm on sensor noise alone, and pre-alarm
+// does not sleep.
+//
+// DIRECTION IS PER MAGNITUDE and is not cosmetic. Temperature, particulates, CO
+// and wind trip when they RISE. HUMIDITY TRIPS WHEN IT FALLS - dry air is the fire
+// indicator - so its thresholds descend (25 -> 20 -> 15 -> 10) and the comparison
+// inverts with them. Getting that backwards would leave a node silent in exactly
+// the conditions it exists to detect.
+//
+// ONE magnitude crossing is enough to change level (OR, not AND).
+//
+// A table rather than scattered #defines so it can be read straight down against
+// the spreadsheet and checked - the only way this stays honest as numbers change.
+struct AlarmRule {
+  const char *name;
+  const float *value;
+  uint8_t source;       // which sensor must have read this cycle - see ruleHasData()
+  bool higherIsWorse;
+  float preOff, preOn;
+  float almOff, almOn;
+  bool enabled;
+};
+
+#define ALARM_SRC_BME 0
+#define ALARM_SRC_BMV 1
+#define ALARM_SRC_CO 2
+#define ALARM_SRC_CO2 3
+#define ALARM_SRC_WIND 4
+
+static const AlarmRule kAlarmRules[] = {
+    // name        value         source          higher  preOff    preOn   almOff    almOn  on
+    {"temp",      &g_temp,      ALARM_SRC_BME,  true,    45.0f,   50.0f,   55.0f,   60.0f, true},
+    {"rh",        &g_hum,       ALARM_SRC_BME,  false,   25.0f,   20.0f,   15.0f,   10.0f, true},
+    {"pm1",       &g_pm1,       ALARM_SRC_BMV,  true,    90.0f,  100.0f,  225.0f,  250.0f, true},
+    {"pm25",      &g_pm25,      ALARM_SRC_BMV,  true,    90.0f,  100.0f,  225.0f,  250.0f, true},
+    {"pm10",      &g_pm10,      ALARM_SRC_BMV,  true,    90.0f,  100.0f,  225.0f,  250.0f, true},
+    {"co",        &g_co,        ALARM_SRC_CO,   true,     6.0f,    8.0f,   15.0f,   20.0f, true},
+    {"windSpeed", &g_windSpeed, ALARM_SRC_WIND, true,     2.0f,    5.0f,    8.0f,   10.0f, true},
+
+    // ---- DISABLED, each for a measured reason rather than an oversight ----
+    //
+    // gas: the sheet gives 15000/7000 ohm, but BME690 gas resistance climbs from
+    // ~6k cold to ~45k as the heater stabilises, and under the sleep cycle EVERY
+    // burst starts cold. Nodes C2 and C3 read 5685 ohm in clean air - below the
+    // sheet's full-alarm figure - while C1 reads 47033. The same sensor in the same
+    // room spans both, so an absolute threshold cannot separate a cold heater from
+    // smoke. Needs a heater-settled reading before any number here means anything.
+    {"gas",  &g_gas,  ALARM_SRC_BME, false, 18000.0f, 15000.0f, 9000.0f, 7000.0f, false},
+
+    // co2: the sheet gives 800/1000 ppm, but all three nodes read 1104-1517 ppm in
+    // clean indoor air, already above full alarm; the sheet's own reference is 555.
+    // Separately the CM1106's reading FREEZES within a boot and only changes across
+    // power cycles, so a trigger on it would be blind to a real fire and liable to
+    // latch on a stale number.
+    {"co2",  &g_co2,  ALARM_SRC_CO2, true,   750.0f,  800.0f,  900.0f, 1000.0f, false},
+
+    // pres: all four cells in the sheet are 1031 hPa - no hysteresis, no gap
+    // between levels, no stated direction. The sheet's reference is 970 and the
+    // nodes read 943-950. As written it would never fire or always fire.
+    {"pres", &g_pres, ALARM_SRC_BME, true,  1031.0f, 1031.0f, 1031.0f, 1031.0f, false},
+};
+
+#define ALARM_RULE_COUNT (sizeof(kAlarmRules) / sizeof(kAlarmRules[0]))
+
+// Did this rule's sensor actually produce a reading this cycle?
+//
+// THIS GUARD IS LOAD-BEARING, not defensive tidiness. The reading globals hold 0.0
+// when a sensor has not read, and humidity trips on LOW values - so an unread
+// BME690 would present rh = 0.0, which is below even the full-alarm threshold of
+// 10, and every node with a dead humidity sensor would sit in permanent fire
+// alarm. A rule whose sensor is absent, disabled or stale is SKIPPED, never
+// evaluated against a zero.
+static bool ruleHasData(uint8_t source) {
+  switch (source) {
+    case ALARM_SRC_BME:  return bmeReady && g_bmeEnabled && g_bmeFresh;
+    case ALARM_SRC_BMV:  return bmvReady && g_bmvEnabled && g_bmvFresh;
+    case ALARM_SRC_CO:   return sen0466Ready && g_sen0466Enabled && g_coFresh;
+    case ALARM_SRC_CO2:  return g_cm1106Enabled && g_co2Fresh;
+    case ALARM_SRC_WIND: return g_calypsoEnabled && g_calFresh && g_windValid;
   }
-  if (sen0466Ready && g_sen0466Enabled && g_co >= ALARM_CO_PPM) { *whyOut = "CO"; return true; }
   return false;
 }
 
-// Runs after every sensor read. Enters pre-alarm on a trip; leaves it only after
-// ALARM_CLEAR_CONSECUTIVE consecutive clean reads, so one dip mid-fire cannot end
-// it. Module A can also force-clear via CFG,ALARM=0.
-static void updateAlarmState() {
-  const char *why = "";
-  bool fire = readingsIndicateFire(&why);
+// Has this rule crossed the ON threshold for the given level? Direction-aware.
+static bool ruleTripped(const AlarmRule &r, float v, bool fireLevel) {
+  const float on = fireLevel ? r.almOn : r.preOn;
+  return r.higherIsWorse ? (v >= on) : (v <= on);
+}
 
-  if (g_alarmState == ALARM_NORMAL) {
-    // Learn the clean-air gas baseline only while nothing looks wrong, or a fire
-    // would teach the node that smoke is normal.
-    if (!fire && bmeReady && g_gas > 0.0f) {
-      g_gasBaseline = (g_gasBaseline <= 0.0f) ? g_gas : (g_gasBaseline * 0.9f + g_gas * 0.1f);
+// Has it fallen back past the OFF threshold? The gap between OFF and ON is the
+// hysteresis - a value between them holds whatever state it is already in.
+static bool ruleCleared(const AlarmRule &r, float v, bool fireLevel) {
+  const float off = fireLevel ? r.almOff : r.preOff;
+  return r.higherIsWorse ? (v < off) : (v > off);
+}
+
+// Highest level any single rule is calling for. OR across magnitudes: one is
+// enough. Returns ALARM_NORMAL if nothing is tripped.
+static AlarmState evaluateRules(const char **whyOut) {
+  AlarmState worst = ALARM_NORMAL;
+  for (size_t i = 0; i < ALARM_RULE_COUNT; i++) {
+    const AlarmRule &r = kAlarmRules[i];
+    if (!r.enabled || !ruleHasData(r.source)) continue;
+    const float v = *r.value;
+    if (ruleTripped(r, v, true)) {
+      *whyOut = r.name;
+      return ALARM_FIRE;  // nothing outranks this, stop looking
     }
-    if (fire) {
-      g_alarmState = ALARM_PREALARM;
-      g_alarmClearRun = 0;
-      Serial.printf("\n*** PRE-ALARM: %s ***  staying awake, all sensors continuous\n", why);
-    }
-  } else {
-    if (fire) {
-      g_alarmClearRun = 0;
-    } else if (++g_alarmClearRun >= ALARM_CLEAR_CONSECUTIVE) {
-      g_alarmState = ALARM_NORMAL;
-      g_alarmClearRun = 0;
-      Serial.printf("\n*** PRE-ALARM CLEARED after %d clean reads - back to the tick cycle ***\n",
-                    ALARM_CLEAR_CONSECUTIVE);
-    } else {
-      Serial.printf("[alarm] clean read %u/%d\n", (unsigned)g_alarmClearRun, ALARM_CLEAR_CONSECUTIVE);
+    if (worst == ALARM_NORMAL && ruleTripped(r, v, false)) {
+      *whyOut = r.name;
+      worst = ALARM_PREALARM;
     }
   }
+  return worst;
+}
+
+// Are ALL enabled rules back below the OFF threshold for the level we are in?
+// Every rule must agree before a level clears - one still tripped holds it.
+static bool allRulesCleared(bool fireLevel) {
+  for (size_t i = 0; i < ALARM_RULE_COUNT; i++) {
+    const AlarmRule &r = kAlarmRules[i];
+    if (!r.enabled || !ruleHasData(r.source)) continue;
+    if (!ruleCleared(r, *r.value, fireLevel)) return false;
+  }
+  return true;
+}
+
+static const char *alarmStateName(AlarmState st) {
+  switch (st) {
+    case ALARM_NORMAL:   return "NORMAL";
+    case ALARM_PREALARM: return "PRE-ALARM";
+    case ALARM_FIRE:     return "ALARM";
+  }
+  return "?";
+}
+
+// Runs after every sensor read. Raises immediately on a trip; lowers only after
+// ALARM_CLEAR_CONSECUTIVE consecutive reads with every rule clear, so one dip
+// mid-fire cannot end it. Module A can force-clear via CFG,ALARM=0.
+//
+// Raising is instant and lowering is slow, deliberately: the cost of being late to
+// a fire is not symmetric with the cost of staying alert a few reads too long.
+static void updateAlarmState() {
+  const char *why = "";
+  const AlarmState want = evaluateRules(&why);
+
+  // Escalation is immediate at any level.
+  if (want > g_alarmState) {
+    const AlarmState from = (AlarmState)g_alarmState;
+    g_alarmState = want;
+    g_alarmClearRun = 0;
+    Serial.printf("\n*** %s: %s *** (was %s) - staying awake, all sensors continuous\n",
+                  alarmStateName(want), why, alarmStateName(from));
+    Serial.flush();
+    return;
+  }
+
+  if (g_alarmState == ALARM_NORMAL) return;
+
+  // Still tripped at the current level - reset the clean-read run.
+  if (want >= g_alarmState) {
+    g_alarmClearRun = 0;
+    return;
+  }
+
+  // Step down one level at a time, and only after a run of clean reads.
+  const bool leavingFire = (g_alarmState == ALARM_FIRE);
+  if (!allRulesCleared(leavingFire)) {
+    g_alarmClearRun = 0;
+    return;
+  }
+
+  if (++g_alarmClearRun < ALARM_CLEAR_CONSECUTIVE) {
+    Serial.printf("[alarm] %s, clean read %u/%d\n", alarmStateName((AlarmState)g_alarmState),
+                  (unsigned)g_alarmClearRun, ALARM_CLEAR_CONSECUTIVE);
+    return;
+  }
+
+  g_alarmClearRun = 0;
+  g_alarmState = leavingFire ? ALARM_PREALARM : ALARM_NORMAL;
+  Serial.printf("\n*** dropped to %s after %d clean reads ***\n",
+                alarmStateName((AlarmState)g_alarmState), ALARM_CLEAR_CONSECUTIVE);
+  Serial.flush();
 }
 
 // Sends everything in the store, then empties it. One stored reading emits the
@@ -2559,7 +2669,7 @@ void loop() {
   // The node stays awake and keeps reading until the readings settle or Module A
   // clears it. Transmits still follow the lora_trans schedule so the link is not
   // flooded, but each transmit's listen window is also how a clear arrives.
-  if (g_alarmState == ALARM_PREALARM) {
+  if (g_alarmState >= ALARM_PREALARM) {
     readFastSensorsOnce();
     updateAlarmState();
     storeCurrentReading();
@@ -2657,7 +2767,7 @@ void loop() {
     }
   }
 
-  if (g_alarmState == ALARM_PREALARM) return;  // stay awake - handled above
+  if (g_alarmState >= ALARM_PREALARM) return;  // stay awake - handled above
 
   if (coldBootWindowOpen()) {
     delay(SAMPLE_GAP_MS);
