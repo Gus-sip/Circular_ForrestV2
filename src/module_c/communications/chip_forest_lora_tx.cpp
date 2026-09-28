@@ -195,6 +195,18 @@
 // one, so a single dip cannot end an alarm during a real fire.
 #define ALARM_CLEAR_CONSECUTIVE 5
 
+// ---- PRE-ALARM CONFIRMATION WINDOW ----
+//
+// Pre-alarm is a question, not a verdict. The node holds it for this long and then
+// decides: anything still over its threshold when the window expires escalates to
+// full ALARM, because a condition that lasts ten minutes is not sensor noise.
+// Everything back under clears to NORMAL before then, via the usual clean-read run.
+//
+// An ALARM-level reading still escalates IMMEDIATELY and does not wait for this.
+// Waiting ten minutes on a 60 C reading would be absurd: the window exists to
+// confirm a doubtful signal, not to delay an obvious one.
+#define PREALARM_CONFIRM_MS 600000UL  // 10 minutes
+
 // ---------- Activity LED ----------
 // The ESP32-S3 module's own RGB LED (WS2812 on GPIO48, PIN_NEOPIXEL in the
 // esp32s3 variant). Lit only while the node is actually doing something: from the
@@ -602,7 +614,7 @@ RYLR998 radio(Serial0, LORA_RX_PIN, LORA_TX_PIN);  // UART0 is free - UART1/UART
 // changes - so without the bump a board with existing state would come up with
 // g_hibernating holding whatever junk was in that address, and could hibernate
 // immediately on a full pack. This trap has cost three debugging sessions already.
-#define BOOTCOUNT_MAGIC 0xC0FFEE05UL  // bumped: seeds g_hibernating
+#define BOOTCOUNT_MAGIC 0xC0FFEE06UL  // bumped: seeds g_prealarmMs
 RTC_NOINIT_ATTR uint32_t g_bootMagic;
 RTC_NOINIT_ATTR uint32_t g_bootCount;
 
@@ -667,6 +679,17 @@ RTC_NOINIT_ATTR uint32_t g_storeDropped;  // readings lost to a full store
 enum AlarmState : uint8_t { ALARM_NORMAL = 0, ALARM_PREALARM = 1, ALARM_FIRE = 2 };
 RTC_NOINIT_ATTR uint8_t g_alarmState;
 RTC_NOINIT_ATTR uint16_t g_alarmClearRun;   // consecutive clean reads while in pre-alarm
+
+// Milliseconds accumulated in pre-alarm, and why it is not just a millis() stamp.
+//
+// g_alarmState is RTC_NOINIT and survives a reset, so a node that browns out
+// mid-pre-alarm comes back still in pre-alarm - but millis() restarts at zero. A
+// stored start-time would therefore hand it a fresh ten minutes on every reset,
+// and a node resetting under the 35mA continuous load that pre-alarm imposes could
+// postpone a real fire alarm indefinitely without anything looking wrong.
+//
+// Accumulating instead means the window survives whatever the node does.
+RTC_NOINIT_ATTR uint32_t g_prealarmMs;
 RTC_NOINIT_ATTR float g_gasBaseline;        // BME690 gas resistance in clean air
 
 // Which sensors read OK on the most recent READ tick, as a 5-bit field
@@ -1333,6 +1356,7 @@ void setup() {
     g_storeDropped = 0;
     g_alarmState = ALARM_NORMAL;
     g_alarmClearRun = 0;
+    g_prealarmMs = 0;
     g_gasBaseline = 0.0f;
     g_lastReadHealth = 0;
     g_lastReadWake = 0;
@@ -2083,11 +2107,31 @@ static void updateAlarmState() {
   const char *why = "";
   const AlarmState want = evaluateRules(&why);
 
+  // THE CONFIRMATION WINDOW EXPIRING IS ITSELF AN ESCALATION.
+  //
+  // Checked before the normal comparison, because "still tripped at pre-alarm
+  // level after ten minutes" does not raise `want` on its own - the reading has
+  // not got any worse, it has simply not gone away, and that is the whole point.
+  // Without this the node would sit in pre-alarm indefinitely on a real fire that
+  // never quite reached the alarm threshold.
+  if (g_alarmState == ALARM_PREALARM && want >= ALARM_PREALARM &&
+      g_prealarmMs >= PREALARM_CONFIRM_MS) {
+    g_alarmState = ALARM_FIRE;
+    g_alarmClearRun = 0;
+    Serial.printf("\n*** ALARM: %s still over threshold after %lu min - confirmed ***\n",
+                  why, (unsigned long)(PREALARM_CONFIRM_MS / 60000UL));
+    Serial.flush();
+    return;
+  }
+
   // Escalation is immediate at any level.
   if (want > g_alarmState) {
     const AlarmState from = (AlarmState)g_alarmState;
     g_alarmState = want;
     g_alarmClearRun = 0;
+    // The window starts at the initial cause, so it restarts only on a genuine
+    // entry into pre-alarm from normal - not on an escalation to full alarm.
+    if (from == ALARM_NORMAL) g_prealarmMs = 0;
     Serial.printf("\n*** %s: %s *** (was %s) - staying awake, all sensors continuous\n",
                   alarmStateName(want), why, alarmStateName(from));
     Serial.flush();
@@ -2117,6 +2161,9 @@ static void updateAlarmState() {
 
   g_alarmClearRun = 0;
   g_alarmState = leavingFire ? ALARM_PREALARM : ALARM_NORMAL;
+  // Dropping back into pre-alarm from alarm gets a fresh window rather than
+  // inheriting an already-expired one, which would re-escalate on the next read.
+  g_prealarmMs = 0;
   Serial.printf("\n*** dropped to %s after %d clean reads ***\n",
                 alarmStateName((AlarmState)g_alarmState), ALARM_CLEAR_CONSECUTIVE);
   Serial.flush();
@@ -2693,6 +2740,15 @@ void loop() {
   // transmitting hard and still have no idea it was in alarm. That is the whole
   // path from "this node detected a fire" to "somebody is told".
   if (g_alarmState >= ALARM_PREALARM) {
+    // Accumulate before evaluating, so the window is current when updateAlarmState
+    // tests it. Only pre-alarm is timed; full alarm has nothing left to confirm.
+    static uint32_t lastAccumMs = 0;
+    const uint32_t nowMs = millis();
+    if (lastAccumMs != 0 && g_alarmState == ALARM_PREALARM) {
+      g_prealarmMs += (nowMs - lastAccumMs);
+    }
+    lastAccumMs = nowMs;
+
     readFastSensorsOnce();
     updateAlarmState();
     storeCurrentReading();
