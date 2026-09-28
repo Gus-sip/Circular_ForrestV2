@@ -270,6 +270,39 @@ static void nodeChargeRemember(uint16_t addr, int pct, int mv) {
   }
 }
 
+// Last fire state heard from each node, by LoRa address. Same shape as the charge
+// store and for the same reason: STAT and telemetry are separate packets that
+// arrive at different times, and either may be the one that gets through.
+struct NodeAlarm {
+  uint16_t addr;
+  int8_t state;
+};
+static NodeAlarm g_nodeAlarm[8];
+static uint8_t g_nodeAlarmCount = 0;
+
+static void nodeAlarmRemember(uint16_t addr, int state) {
+  for (uint8_t i = 0; i < g_nodeAlarmCount; i++) {
+    if (g_nodeAlarm[i].addr == addr) {
+      g_nodeAlarm[i].state = (int8_t)state;
+      return;
+    }
+  }
+  if (g_nodeAlarmCount < (uint8_t)(sizeof(g_nodeAlarm) / sizeof(g_nodeAlarm[0]))) {
+    g_nodeAlarm[g_nodeAlarmCount].addr = addr;
+    g_nodeAlarm[g_nodeAlarmCount].state = (int8_t)state;
+    g_nodeAlarmCount++;
+  }
+}
+
+static void nodeAlarmAttach(SensorSnapshot &snap) {
+  for (uint8_t i = 0; i < g_nodeAlarmCount; i++) {
+    if (g_nodeAlarm[i].addr == snap.senderAddr) {
+      snap.alarmState = g_nodeAlarm[i].state;
+      return;
+    }
+  }
+}
+
 static void nodeChargeAttach(SensorSnapshot &snap) {
   for (uint8_t i = 0; i < g_nodeChargeCount; i++) {
     if (g_nodeCharge[i].addr == snap.senderAddr) {
@@ -328,13 +361,36 @@ void loop() {
 
       // Fields 7 and 8 (0-based 6 and 7) are the sense reading and the percentage.
       int field = 0;
-      int mv = -1, pct = -1;
+      int mv = -1, pct = -1, alarm = -1;
       char *tok = strtok(buf, ",");
       while (tok) {
         if (field == 6) mv = atoi(tok);
         if (field == 7) pct = atoi(tok);
+        if (field == 8) alarm = atoi(tok);  // 0 normal, 1 pre-alarm, 2 alarm
         field++;
         tok = strtok(nullptr, ",");
+      }
+
+      // FIRE STATE - the reason this whole path exists.
+      //
+      // Remembered per node and attached to that node's next telemetry publish,
+      // and when raised it also short-circuits the batch window so it goes out now
+      // rather than up to a minute later. Batching is right for telemetry and
+      // wrong for a fire.
+      //
+      // Field 8 is absent on older node firmware, which leaves alarm at -1 and is
+      // reported as unknown rather than as NORMAL. A dashboard confidently showing
+      // NORMAL for a node that never said is worse than one showing nothing.
+      if (alarm >= 0) {
+        nodeAlarmRemember(msg.senderAddr, alarm);
+        if (alarm > 0) {
+          char who[32];
+          nbiotResolveNodeName(msg.senderAddr, who, sizeof(who));
+          Serial.printf("  *** %s EN %s - publicando YA ***\n", who,
+                        alarm >= 2 ? "ALARMA" : "PRE-ALARMA");
+          Serial.flush();
+          modem.requestFlush();
+        }
       }
 
       // THREE outcomes here, not two. A node that sends no charge fields at all
@@ -402,6 +458,7 @@ void loop() {
       snap.rssi = msg.rssi;
       snap.snr = msg.snr;
       nodeChargeAttach(snap);  // most recent STAT from this node, if any
+      nodeAlarmAttach(snap);
       g_latest = snap;
       modem.enqueue(snap);
 

@@ -40,4 +40,11 @@ struct SensorSnapshot {
   // has not said anything yet would be alarming for no reason.
   int16_t chargePct = -1;
   int16_t capMv = -1;
+
+  // Fire state as reported by the node in its STAT packet: 0 normal, 1 pre-alarm,
+  // 2 alarm. -1 means the node never said - an older node whose STAT has only
+  // eight fields. "Unknown" and "normal" must stay distinct: a dashboard showing
+  // a confident NORMAL for a node that is not reporting at all is worse than one
+  // showing nothing.
+  int8_t alarmState = -1;
 };

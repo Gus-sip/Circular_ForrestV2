@@ -69,6 +69,14 @@ public:
   // already full, the oldest reading is dropped and droppedCount() goes up.
   void enqueue(const SensorSnapshot &snap);
 
+  // Publish at the next opportunity instead of waiting for the batch window.
+  //
+  // Batching exists to keep the NB-IoT link and the SIM's data budget sane, and
+  // for telemetry that is right. A fire is not telemetry: a node reporting one
+  // every 5s while Module B sits on the packet for the rest of a 60s window is a
+  // minute of silence at the only moment the system exists for.
+  void requestFlush() { _flushRequested = true; }
+
   // ---------- Observability - surfaced on the dashboard ----------
   State state() const { return _state; }
   // The modem UART is deliberately NOT held open across power cycles - a driven
@@ -100,6 +108,8 @@ public:
   // value actually applied, so a clamped command is visible to the caller (and
   // gets reported back in the RPC response) instead of silently assumed away.
   uint32_t setBatchSeconds(uint32_t seconds);
+
+  bool _flushRequested = false;
   uint16_t setBatchReadings(uint16_t readings);
 
   // ---------- Downlink relay to a child node ----------

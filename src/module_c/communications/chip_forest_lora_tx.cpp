@@ -162,6 +162,17 @@
 //              stopping it. This is what g_txPeriodMs / CFG,INTERVAL now sets.
 #define LORA_TX_MIN_GAP_MS 15000UL      // never transmit more often than this
 
+// While in pre-alarm or alarm the node transmits far more often - a fire is the
+// one situation where latency matters more than airtime.
+//
+// DUTY CYCLE, STATED PLAINLY: at SF7 a ~116-byte packet is roughly 0.2 s on air.
+// At 5 s that is about 4%, which is OVER the 1% EU868 limit for this band. It is
+// deliberate and it is bounded - it only happens while a node is reporting a fire,
+// not in normal operation, and a node in alarm that nobody hears is useless. If
+// that trade is not acceptable for a given deployment, raise this; the alarm still
+// works, it just reports less often.
+#define ALARM_TX_MIN_GAP_MS 5000UL
+
 // ---------- BMV080 duty cycling ----------
 // The laser draws ~68mA - the largest load in the system by an order of magnitude,
 // and notes/power_budget.md budgets it at 20s per 30 min, not continuously. This
@@ -2442,11 +2453,16 @@ static void transmitStatus() {
   }
 
   char msg[96];
-  int len = snprintf(msg, sizeof(msg), "STAT,%lu,%d,%lu,%d%d%d%d%d,%lu,%d,%d",
+  // Alarm state is APPENDED as a ninth field rather than inserted, so a Module B
+  // running older firmware keeps reading the eight it knows by index and simply
+  // ignores the extra one. Inserting it would have shifted every field after it
+  // and silently corrupted the charge readings - the same class of bug as the
+  // batch-parse corruption that shifted every value by two.
+  int len = snprintf(msg, sizeof(msg), "STAT,%lu,%d,%lu,%d%d%d%d%d,%lu,%d,%d,%d",
                      (unsigned long)g_wakeCount, (int)esp_reset_reason(),
                      (unsigned long)nvsBoots,
                      (h >> 4) & 1, (h >> 3) & 1, (h >> 2) & 1, (h >> 1) & 1, h & 1,
-                     ageTicks, vmv, pct);
+                     ageTicks, vmv, pct, (int)g_alarmState);
   if (len < 0) len = 0;
   if (len >= (int)sizeof(msg)) len = (int)sizeof(msg) - 1;
 
@@ -2665,22 +2681,30 @@ void loop() {
     return;
   }
 
-  // ---- PRE-ALARM: no sleeping, every sensor, continuously ----
+  // ---- PRE-ALARM / ALARM: no sleeping, every sensor, continuously ----
+  //
   // The node stays awake and keeps reading until the readings settle or Module A
-  // clears it. Transmits still follow the lora_trans schedule so the link is not
-  // flooded, but each transmit's listen window is also how a clear arrives.
+  // clears it, and transmits on ALARM_TX_MIN_GAP_MS rather than the normal
+  // schedule - a fire is the one case where latency beats airtime. Each transmit's
+  // listen window is also how a clear arrives.
+  //
+  // STAT goes out alongside the readings, which it previously did not: STAT is the
+  // packet that carries the alarm state, so without it Module B could see a node
+  // transmitting hard and still have no idea it was in alarm. That is the whole
+  // path from "this node detected a fire" to "somebody is told".
   if (g_alarmState >= ALARM_PREALARM) {
     readFastSensorsOnce();
     updateAlarmState();
     storeCurrentReading();
 
     static uint32_t lastAlarmTxMs = 0;
-    if (millis() - lastAlarmTxMs >= LORA_TX_MIN_GAP_MS) {
+    if (millis() - lastAlarmTxMs >= ALARM_TX_MIN_GAP_MS) {
       lastAlarmTxMs = millis();
       transmitStore();
+      transmitStatus();
     }
     delay(SAMPLE_GAP_MS);
-    return;  // never falls through to the sleep path while in pre-alarm
+    return;  // never falls through to the sleep path while raised
   }
 
 #if !SLEEP_ENABLED

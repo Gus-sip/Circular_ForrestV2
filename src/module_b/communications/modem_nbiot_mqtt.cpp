@@ -1035,7 +1035,11 @@ void ModemNBIoTMqtt::tickIdle() {
     return;
   }
 
-  bool batchDue = _ringCount > 0 && (_ringCount >= _batchReadingsTarget ||
+  // _flushRequested short-circuits the batch window - see requestFlush(). It is
+  // cleared on a successful publish, not here, so a flush that fails to go out is
+  // retried rather than quietly forgotten.
+  bool batchDue = _ringCount > 0 && (_flushRequested ||
+                                      _ringCount >= _batchReadingsTarget ||
                                       (millis() - _oldestPendingMs) >= _batchSecondsTarget * 1000UL);
   if (batchDue) {
     setState(State::PUBLISHING);
@@ -1155,6 +1159,7 @@ void ModemNBIoTMqtt::tickError() {
 
 void ModemNBIoTMqtt::onPublishSucceeded() {
   _packetsSent++;
+  _flushRequested = false;  // only once it has actually left
   _consecutiveFailures = 0;
   _publishRetries = 0;
   popSentReadings();
@@ -1247,17 +1252,17 @@ size_t ModemNBIoTMqtt::buildGatewayPayload(uint8_t *out, size_t cap, uint8_t max
       if (!firstReading) append(",");
       firstReading = false;
 
-      char keys[470];  // +2 keys for chargePct/capMv
+      char keys[500];  // +3 keys for chargePct/capMv/alarmState
       snprintf(keys, sizeof(keys),
                "{"
                "\"temp\":%.2f,\"rh\":%.2f,\"pres\":%.2f,\"gas\":%.2f,"
                "\"pm1\":%.2f,\"pm25\":%.2f,\"pm10\":%.2f,\"co2\":%.2f,"
                "\"co\":%.2f,\"coTemp\":%.2f,\"windAngle\":%.2f,\"windSpeed\":%.2f,"
                "\"windValid\":%s,\"rssi\":%d,\"snr\":%d,"
-               "\"chargePct\":%d,\"capMv\":%d}",
+               "\"chargePct\":%d,\"capMv\":%d,\"alarmState\":%d}",
                snap.temp, snap.hum, snap.pres, snap.gas, snap.pm1, snap.pm25, snap.pm10, snap.co2, snap.co,
                snap.coTemp, snap.windAngle, snap.windSpeed, snap.windValid ? "true" : "false", (int)snap.rssi,
-               (int)snap.snr, (int)snap.chargePct, (int)snap.capMv);
+               (int)snap.snr, (int)snap.chargePct, (int)snap.capMv, (int)snap.alarmState);
 
       if (_haveNetTime) {
         int64_t ts = _netEpochMsAtSync + (int64_t)(int32_t)(snap.lastHeardMs - _netSyncLocalMs);
