@@ -77,6 +77,24 @@ public:
   // minute of silence at the only moment the system exists for.
   void requestFlush() { _flushRequested = true; }
 
+  // Stamp a node's CURRENT fire state onto readings already waiting to go out.
+  //
+  // Without this the alarm flush publishes a stale state, which makes it theatre.
+  // A node transmits its readings FIRST and its STAT about two seconds later, so
+  // by the time Module B learns the node has gone into alarm, that cycle's reading
+  // is already queued carrying the PREVIOUS state. requestFlush() would then rush
+  // out a packet saying alarmState 0 - the one packet whose whole purpose was to
+  // say otherwise - and the true state would arrive on the next batch, up to a
+  // minute later.
+  //
+  // Confirmed on hardware 2026-09-28: all three nodes published alarmState -1 on
+  // one batch and 0 on the next, one cycle behind their STATs throughout.
+  void applyAlarmToQueued(uint16_t addr, int8_t state) {
+    for (uint8_t i = 0; i < _ringCount; i++) {
+      if (_ring[i].senderAddr == addr) _ring[i].alarmState = state;
+    }
+  }
+
   // ---------- Observability - surfaced on the dashboard ----------
   State state() const { return _state; }
   // The modem UART is deliberately NOT held open across power cycles - a driven

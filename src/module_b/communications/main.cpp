@@ -383,6 +383,10 @@ void loop() {
       // NORMAL for a node that never said is worse than one showing nothing.
       if (alarm >= 0) {
         nodeAlarmRemember(msg.senderAddr, alarm);
+        // Readings for this node are already queued carrying the previous state -
+        // the node sends telemetry before its STAT. Restamp them, or the flush
+        // below publishes the very value it exists to correct.
+        modem.applyAlarmToQueued(msg.senderAddr, (int8_t)alarm);
         if (alarm > 0) {
           char who[32];
           nbiotResolveNodeName(msg.senderAddr, who, sizeof(who));
