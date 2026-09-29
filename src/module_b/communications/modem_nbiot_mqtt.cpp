@@ -364,8 +364,19 @@ void ModemNBIoTMqtt::handleGatewayRpc(const NbiotProtocol::MqttMessage &msg) {
 
   char method[24] = {0};
   NbiotProtocol::jsonString(data, "method", method, sizeof(method));
-  if (strcmp(method, "cfg") != 0) {
-    replyErr("unknown method, expected 'cfg'");
+
+  // BOTH method names are accepted on BOTH topics.
+  //
+  // Which topic a command arrives on depends entirely on which ThingsBoard device
+  // Module A addresses: the gateway CON-1 lands on v1/devices/me/rpc/request/<id>,
+  // a child device lands here on v1/gateway/rpc. The protocol document specifies
+  // configurarModuloC and describes the gateway path, but a dashboard built per
+  // node will naturally address the node - and rejecting it for the sake of a name
+  // would be a refusal on a technicality, when the intent is unambiguous.
+  //
+  // Both carry the same thing: a target node and a set of keys to apply.
+  if (strcmp(method, "cfg") != 0 && strcmp(method, "configurarModuloC") != 0) {
+    replyErr("unknown method, expected 'configurarModuloC' or 'cfg'");
     return;
   }
 
