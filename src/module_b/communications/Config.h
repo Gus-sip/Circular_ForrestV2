@@ -282,21 +282,30 @@ inline void nbiotResolveNodeName(uint16_t addr, char *outName, size_t outCap) {
 // falls back to the flat no-"ts" form automatically.
 #define NBIOT_MIN_VALID_EPOCH_MS 1672531200000LL  // 2023-01-01T00:00:00Z - anything earlier = "no network time"
 
-// Keepalive set comfortably above NBIOT_BATCH_DEFAULT_SECONDS (below) rather
-// than pinging between real sends - see project memory
-// "project_thingsboard_mqtt_plan" for why: a PINGREQ cadence tight enough to
-// matter (e.g. every 90s) would run ~13x the actual telemetry traffic, all
-// of it spent saying nothing, against the SIM's data allowance and Module
-// B's battery. Instead: if the MQTT session is found dead at send time
-// (either +QMTSTAT fired, or nothing was ever connected), reconnect lazily
-// right there before publishing - reconnecting once per batch is cheap,
-// holding a connection open with pings is not. Set to the maximum
-// AT+QMTCFG="keepalive" allows (3600s) rather than just above the batch
-// interval - a higher value costs nothing (it only controls how long the
-// broker waits before giving up on us; our own PUBLISH traffic resets its
-// timer every send regardless), and it buys margin against a delayed/
-// retried send pushing past a tighter value.
-#define MQTT_KEEPALIVE_S 3600UL
+// KEEPALIVE: short, because Module B has to be LISTENING, not merely reachable.
+//
+// This was 3600s - the maximum - with the reasoning that pinging between real
+// sends was wasteful: "a PINGREQ cadence tight enough to matter (e.g. every 90s)
+// would run ~13x the actual telemetry traffic". That arithmetic was done when
+// batching was every 10-20 minutes. MQTT_BATCH_SECONDS is now 60, and the figure
+// is wrong by four orders of magnitude:
+//
+//   PINGREQ + PINGRESP = 4 bytes, every 120s   ->    120 B/hour
+//   one telemetry payload ~1100 bytes, every 60s -> 66000 B/hour
+//
+//   pings are 0.18% of telemetry - about 1 MB per YEAR
+//
+// The old value was fine for UPLINK, where a dead session is discovered at the
+// next send and rebuilt lazily. It is wrong for DOWNLINK. With a 3600s keepalive
+// neither end questions a silently dropped TCP connection for up to an hour:
+// Module B believes it is connected, the broker believes the client is alive, and
+// every command sent meanwhile goes nowhere. Nothing in the logs looks wrong.
+//
+// At 120s the modem sends PINGREQ itself (no AT traffic from us - it is handled
+// inside the module from this setting), so a dead link is detected within a couple
+// of minutes and rebuilt, and the session is held open through carrier NAT
+// timeouts even when the nodes have nothing to say.
+#define MQTT_KEEPALIVE_S 120UL
 
 // JSON is far more verbose than the legacy binary batch frame (~15 fields/
 // reading as "key":value text runs well over 100 bytes/reading, vs. the
