@@ -207,6 +207,11 @@
 // confirm a doubtful signal, not to delay an obvious one.
 #define PREALARM_CONFIRM_MS 600000UL  // 10 minutes
 
+// Defined further down, beside kAlarmRules which they depend on. Declared here
+// because the CFG parser and the boot-seed block both run long before that.
+static void seedThresholds();
+static bool setThresholdByName(const char *key, float value);
+
 // ---------- Activity LED ----------
 // The ESP32-S3 module's own RGB LED (WS2812 on GPIO48, PIN_NEOPIXEL in the
 // esp32s3 variant). Lit only while the node is actually doing something: from the
@@ -614,7 +619,7 @@ RYLR998 radio(Serial0, LORA_RX_PIN, LORA_TX_PIN);  // UART0 is free - UART1/UART
 // changes - so without the bump a board with existing state would come up with
 // g_hibernating holding whatever junk was in that address, and could hibernate
 // immediately on a full pack. This trap has cost three debugging sessions already.
-#define BOOTCOUNT_MAGIC 0xC0FFEE06UL  // bumped: seeds g_prealarmMs
+#define BOOTCOUNT_MAGIC 0xC0FFEE07UL  // bumped: seeds g_thr[][] from kAlarmRules
 RTC_NOINIT_ATTR uint32_t g_bootMagic;
 RTC_NOINIT_ATTR uint32_t g_bootCount;
 
@@ -897,6 +902,20 @@ static bool applyConfigCommand(const char *payload, uint8_t len, char *ackPayloa
       } else if (strcmp(key, "CALYPSO") == 0) {
         g_calypsoEnabled = atoi(valueStr) != 0;
         snprintf(appliedKv, sizeof(appliedKv), "CALYPSO=%d", g_calypsoEnabled ? 1 : 0);
+
+      // ---- Fire thresholds, e.g. CFG,temp_pre_on=50 ----
+      //
+      // Tried LAST, after every fixed key, so a threshold name can never shadow a
+      // config key. The names are the rule names from kAlarmRules suffixed with
+      // _pre_on / _pre_off / _alarma_on / _alarma_off, which is exactly what the
+      // Module A dashboard sends.
+      //
+      // The ACK echoes back the value the node STORED, so a dashboard showing a
+      // threshold is showing what the node is really using rather than what it was
+      // asked to use.
+      } else if (setThresholdByName(key, (float)atof(valueStr))) {
+        snprintf(appliedKv, sizeof(appliedKv), "%s=%s", key, valueStr);
+
       } else {
         matched = false;
       }
@@ -1357,6 +1376,7 @@ void setup() {
     g_alarmState = ALARM_NORMAL;
     g_alarmClearRun = 0;
     g_prealarmMs = 0;
+    seedThresholds();
     g_gasBaseline = 0.0f;
     g_lastReadHealth = 0;
     g_lastReadWake = 0;
@@ -2025,6 +2045,67 @@ static const AlarmRule kAlarmRules[] = {
 
 #define ALARM_RULE_COUNT (sizeof(kAlarmRules) / sizeof(kAlarmRules[0]))
 
+// ---- LIVE THRESHOLDS ----
+//
+// kAlarmRules above is now the DEFAULTS. The values actually compared against
+// live here, in RTC memory, so Module A can change one over the air without a
+// reflash - which is the whole point of the umbral command.
+//
+// RTC_NOINIT so a change survives deep sleep: a node that forgot its thresholds
+// on every wake would silently revert to the compiled defaults ten seconds after
+// being configured, and the dashboard would show a value the node was not using.
+//
+// Order matches kAlarmRules exactly. [0]=preOff [1]=preOn [2]=almOff [3]=almOn.
+#define THR_PRE_OFF 0
+#define THR_PRE_ON 1
+#define THR_ALM_OFF 2
+#define THR_ALM_ON 3
+RTC_NOINIT_ATTR float g_thr[ALARM_RULE_COUNT][4];
+
+// Copies the compiled defaults over the live values. Called only when the boot
+// magic changes - see the BOOTCOUNT_MAGIC block.
+static void seedThresholds() {
+  for (size_t i = 0; i < ALARM_RULE_COUNT; i++) {
+    g_thr[i][THR_PRE_OFF] = kAlarmRules[i].preOff;
+    g_thr[i][THR_PRE_ON] = kAlarmRules[i].preOn;
+    g_thr[i][THR_ALM_OFF] = kAlarmRules[i].almOff;
+    g_thr[i][THR_ALM_ON] = kAlarmRules[i].almOn;
+  }
+}
+
+// Sets one threshold by its dashboard name, e.g. "temp_pre_on" or
+// "pm25_alarma_off". Returns false if the name matches no rule, so an unknown key
+// is reported rather than silently accepted - a threshold that looks applied but
+// is not is the worst outcome available here.
+static bool setThresholdByName(const char *key, float value) {
+  static const struct { const char *suffix; uint8_t idx; } kSuffix[] = {
+      {"_pre_off", THR_PRE_OFF},
+      {"_pre_on", THR_PRE_ON},
+      {"_alarma_off", THR_ALM_OFF},
+      {"_alarma_on", THR_ALM_ON},
+      // The protocol document uses these instead of the spreadsheet's names.
+      // Both are accepted rather than guessing which Module A will send.
+      {"_alarm_off", THR_ALM_OFF},
+      {"_alarm_on", THR_ALM_ON},
+  };
+
+  const size_t klen = strlen(key);
+  for (size_t sfx = 0; sfx < sizeof(kSuffix) / sizeof(kSuffix[0]); sfx++) {
+    const size_t slen = strlen(kSuffix[sfx].suffix);
+    if (klen <= slen) continue;
+    if (strcmp(key + klen - slen, kSuffix[sfx].suffix) != 0) continue;
+
+    const size_t namelen = klen - slen;
+    for (size_t i = 0; i < ALARM_RULE_COUNT; i++) {
+      if (strlen(kAlarmRules[i].name) != namelen) continue;
+      if (strncmp(kAlarmRules[i].name, key, namelen) != 0) continue;
+      g_thr[i][kSuffix[sfx].idx] = value;
+      return true;
+    }
+  }
+  return false;
+}
+
 // Did this rule's sensor actually produce a reading this cycle?
 //
 // THIS GUARD IS LOAD-BEARING, not defensive tidiness. The reading globals hold 0.0
@@ -2045,15 +2126,15 @@ static bool ruleHasData(uint8_t source) {
 }
 
 // Has this rule crossed the ON threshold for the given level? Direction-aware.
-static bool ruleTripped(const AlarmRule &r, float v, bool fireLevel) {
-  const float on = fireLevel ? r.almOn : r.preOn;
+static bool ruleTripped(const AlarmRule &r, float v, bool fireLevel, size_t idx) {
+  const float on = g_thr[idx][fireLevel ? THR_ALM_ON : THR_PRE_ON];
   return r.higherIsWorse ? (v >= on) : (v <= on);
 }
 
 // Has it fallen back past the OFF threshold? The gap between OFF and ON is the
 // hysteresis - a value between them holds whatever state it is already in.
-static bool ruleCleared(const AlarmRule &r, float v, bool fireLevel) {
-  const float off = fireLevel ? r.almOff : r.preOff;
+static bool ruleCleared(const AlarmRule &r, float v, bool fireLevel, size_t idx) {
+  const float off = g_thr[idx][fireLevel ? THR_ALM_OFF : THR_PRE_OFF];
   return r.higherIsWorse ? (v < off) : (v > off);
 }
 
@@ -2065,11 +2146,11 @@ static AlarmState evaluateRules(const char **whyOut) {
     const AlarmRule &r = kAlarmRules[i];
     if (!r.enabled || !ruleHasData(r.source)) continue;
     const float v = *r.value;
-    if (ruleTripped(r, v, true)) {
+    if (ruleTripped(r, v, true, i)) {
       *whyOut = r.name;
       return ALARM_FIRE;  // nothing outranks this, stop looking
     }
-    if (worst == ALARM_NORMAL && ruleTripped(r, v, false)) {
+    if (worst == ALARM_NORMAL && ruleTripped(r, v, false, i)) {
       *whyOut = r.name;
       worst = ALARM_PREALARM;
     }
@@ -2083,7 +2164,7 @@ static bool allRulesCleared(bool fireLevel) {
   for (size_t i = 0; i < ALARM_RULE_COUNT; i++) {
     const AlarmRule &r = kAlarmRules[i];
     if (!r.enabled || !ruleHasData(r.source)) continue;
-    if (!ruleCleared(r, *r.value, fireLevel)) return false;
+    if (!ruleCleared(r, *r.value, fireLevel, i)) return false;
   }
   return true;
 }

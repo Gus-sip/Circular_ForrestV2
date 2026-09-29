@@ -551,13 +551,32 @@ void ModemNBIoTMqtt::handleConfigurarModuloC(const NbiotProtocol::MqttMessage &m
     snprintf(cfg, sizeof(cfg), "CFG,INTERVAL=%u", secs);
 
   } else if (strcmp(action, "umbral") == 0) {
-    // NOT YET POSSIBLE ON THE NODE, and refused plainly rather than accepted and
-    // quietly dropped. Module C's thresholds live in a `static const` table
-    // (kAlarmRules) compiled into the firmware; changing one at runtime needs a
-    // mutable copy in RTC memory and CFG keys to address it. Answering "enviado"
-    // for a command that can never be applied would be worse than refusing.
-    refuse("umbral not supported yet - node thresholds are compile-time");
-    return;
+    // Every key except the routing fields is forwarded verbatim as CFG,K=V. The
+    // node owns its own vocabulary: it applies what it recognises and ACKs only
+    // that, so Module B never has to know the threshold names and cannot drift
+    // out of step with them when a magnitude is added.
+    //
+    // Accepts both naming schemes seen so far - the dashboard's temp_pre_on and
+    // the protocol document's umbral_pre_on - because the node matches on suffix.
+    const char *cur = params;
+    char k[32], v[32];
+    size_t pos = (size_t)snprintf(cfg, sizeof(cfg), "CFG");
+    bool any = false;
+    while (NbiotProtocol::jsonNextPair(cur, k, sizeof(k), v, sizeof(v))) {
+      if (strcmp(k, "moduloC_id") == 0 || strcmp(k, "action") == 0 ||
+          strcmp(k, "variable") == 0 || strcmp(k, "value") == 0) {
+        continue;  // routing, not a threshold
+      }
+      int n = snprintf(cfg + pos, sizeof(cfg) - pos, ",%s=%s", k, v);
+      if (n > 0 && (size_t)n < sizeof(cfg) - pos) {
+        pos += (size_t)n;
+        any = true;
+      }
+    }
+    if (!any) {
+      refuse("umbral with no threshold keys");
+      return;
+    }
 
   } else {
     refuse("unknown action, expected 'frecuencia' or 'umbral'");
