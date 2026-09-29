@@ -1149,14 +1149,49 @@ void ModemNBIoTMqtt::tickMqttConnect() {
         if (consumeOutcome() != CmdOutcome::OK)
           Serial.println("[nbiot-mqtt] subscribe to the gateway RPC topic FAILED - no remote config of the nodes");
         else
-          Serial.println("[nbiot-mqtt] downlink live - listening for RPC from Module A");
-        setState(State::IDLE);
+          Serial.println("[nbiot-mqtt] downlink live - announcing the nodes next");
+        _announceIdx = 0;
+        _mqttConnectSub = MqttConnectSub::ANNOUNCE;
         return;
       }
       char cmd[96];
       snprintf(cmd, sizeof(cmd), "AT+QMTSUB=%d,%u,\"%s\",%d", MQTT_CLIENT_IDX, _subMsgId++,
                MQTT_TOPIC_GATEWAY_RPC, MQTT_DOWNLINK_QOS);
       issueCommand(cmd, NBIOT_TIMEOUT_SOCKET_MS, CmdKind::QMTSUB);
+      return;
+    }
+
+    case MqttConnectSub::ANNOUNCE: {
+      // One v1/gateway/connect per node, one per pass through this state.
+      //
+      // WITHOUT THIS, RPC TO A NODE NEVER ARRIVES. ThingsBoard only routes a
+      // command to a gateway's child device once the gateway has said that device
+      // is connected through it. Telemetry needs no such announcement, so the
+      // nodes showed up populated and healthy while every command to them was
+      // dropped server-side - the failure looked like a firmware bug at this end
+      // for two sessions.
+      //
+      // Re-sent on every MQTT connect, because the announcement is scoped to the
+      // session: a reconnect silently un-registers every node otherwise.
+      if (_cmd.outcome != CmdOutcome::NONE) {
+        consumeOutcome();  // a failed announce is not fatal - telemetry still flows
+        _announceIdx++;
+      }
+
+      const size_t nodeCount = sizeof(NBIOT_NODE_NAMES) / sizeof(NBIOT_NODE_NAMES[0]);
+      if (_announceIdx >= nodeCount) {
+        Serial.printf("[nbiot-mqtt] %u node(s) announced - downlink live\n", (unsigned)nodeCount);
+        setState(State::IDLE);
+        return;
+      }
+
+      const char *name = NBIOT_NODE_NAMES[_announceIdx].name;
+      _publishPayloadLen = (size_t)snprintf((char *)_publishPayload, sizeof(_publishPayload),
+                                            "{\"device\":\"%s\"}", name);
+      char header[96];
+      snprintf(header, sizeof(header), "AT+QMTPUB=%d,0,0,0,\"v1/gateway/connect\"", MQTT_CLIENT_IDX);
+      Serial.printf("[nbiot-mqtt] announcing %s to the gateway\n", name);
+      issueCommand(header, NBIOT_TIMEOUT_SEND_MS, CmdKind::QMTPUB, _publishPayload, _publishPayloadLen);
       return;
     }
   }

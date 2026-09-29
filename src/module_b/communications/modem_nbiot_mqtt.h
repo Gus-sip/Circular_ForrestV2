@@ -173,7 +173,17 @@ private:
   // SUB_DEVICE/SUB_GATEWAY run after CONN so downlink is live before IDLE.
   // Both are best-effort: a failed subscribe loses remote control but must not
   // stop telemetry, which is the module's actual job.
-  enum class MqttConnectSub : uint8_t { CLOSE_FIRST, KEEPALIVE_CFG, OPEN, CONN, SUB_DEVICE, SUB_GATEWAY };
+  // ANNOUNCE comes last, after both subscriptions, and is not optional.
+  //
+  // ThingsBoard will not route an RPC to a gateway's child device until the
+  // gateway has announced it on v1/gateway/connect. Telemetry does NOT require
+  // this - publishing to v1/gateway/telemetry auto-creates the device - which is
+  // exactly why the omission was invisible: the nodes appeared in ThingsBoard
+  // with live readings while every command sent to them died on the server,
+  // before it ever reached the modem.
+  enum class MqttConnectSub : uint8_t {
+    CLOSE_FIRST, KEEPALIVE_CFG, OPEN, CONN, SUB_DEVICE, SUB_GATEWAY, ANNOUNCE
+  };
   enum class RecoveryLevel : uint8_t { PUBLISH, MQTT_CONNECT, ATTACH };
 
   struct PendingCmd {
@@ -300,6 +310,7 @@ private:
 
   MqttConnectSub _mqttConnectSub = MqttConnectSub::KEEPALIVE_CFG;
   uint8_t _mqttConnectRetries = 0;
+  uint8_t _announceIdx = 0;  // which node is being announced on v1/gateway/connect
   bool _mqttConnected = false;
   uint32_t _mqttReconnects = 0;
 
