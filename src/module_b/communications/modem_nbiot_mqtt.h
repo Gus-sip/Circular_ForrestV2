@@ -182,7 +182,7 @@ private:
   // with live readings while every command sent to them died on the server,
   // before it ever reached the modem.
   enum class MqttConnectSub : uint8_t {
-    CLOSE_FIRST, KEEPALIVE_CFG, OPEN, CONN, SUB_DEVICE, SUB_GATEWAY, ANNOUNCE
+    CLOSE_FIRST, KEEPALIVE_CFG, SESSION_CFG, OPEN, CONN, SUB_DEVICE, SUB_GATEWAY, ANNOUNCE
   };
   enum class RecoveryLevel : uint8_t { PUBLISH, MQTT_CONNECT, ATTACH };
 

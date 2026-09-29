@@ -1072,12 +1072,43 @@ void ModemNBIoTMqtt::tickMqttConnect() {
 
     case MqttConnectSub::KEEPALIVE_CFG: {
       if (_cmd.outcome != CmdOutcome::NONE) {
-        consumeOutcome();  // best-effort - proceed to OPEN even if QMTCFG was rejected
-        _mqttConnectSub = MqttConnectSub::OPEN;
+        consumeOutcome();  // best-effort - proceed even if QMTCFG was rejected
+        _mqttConnectSub = MqttConnectSub::SESSION_CFG;
         return;
       }
       char cmd[48];
       snprintf(cmd, sizeof(cmd), "AT+QMTCFG=\"keepalive\",%d,%lu", MQTT_CLIENT_IDX, (unsigned long)MQTT_KEEPALIVE_S);
+      issueCommand(cmd, NBIOT_AT_CMD_TIMEOUT_MS);
+      return;
+    }
+
+        case MqttConnectSub::SESSION_CFG: {
+      // PERSISTENT SESSION - setCleanSession(false) in the protocol document.
+      //
+      // clean_session = 0 tells the broker to KEEP this client's session across a
+      // disconnect: its subscriptions survive, and QoS 1 messages published while
+      // it is briefly away are QUEUED rather than discarded.
+      //
+      // That matters here more than it would on a wired link. This module sends no
+      // PINGREQ - see MQTT_KEEPALIVE_S - so the connection is kept warm only by its
+      // own telemetry, and an NB-IoT link that drops between publishes is not
+      // noticed until the next send. With a clean session every command sent in
+      // that gap is thrown away by the broker and nobody is told. With a persistent
+      // session it is waiting when the link comes back.
+      //
+      // Best-effort: a modem that rejects the setting still gets a working uplink,
+      // and refusing to connect over it would trade a fragile downlink for no link
+      // at all.
+      if (_cmd.outcome != CmdOutcome::NONE) {
+        if (consumeOutcome() != CmdOutcome::OK) {
+          Serial.println("[nbiot-mqtt] persistent session REJECTED - commands sent while "
+                         "briefly offline will be lost");
+        }
+        _mqttConnectSub = MqttConnectSub::OPEN;
+        return;
+      }
+      char cmd[48];
+      snprintf(cmd, sizeof(cmd), "AT+QMTCFG=\"session\",%d,0", MQTT_CLIENT_IDX);
       issueCommand(cmd, NBIOT_AT_CMD_TIMEOUT_MS);
       return;
     }
