@@ -274,8 +274,24 @@ void ModemNBIoTMqtt::handleOwnRpc(const NbiotProtocol::MqttMessage &msg) {
   char params[160] = {0};
   char reply[224];
 
+  // ---- configurarModuloC: the agreed A -> C protocol ----
+  //
+  // Module A addresses the GATEWAY and names the target node inside params, rather
+  // than using the gateway-RPC topic. The reply is sent IMMEDIATELY - "enviado" -
+  // and the real outcome follows later as a commandLog record.
+  //
+  // That immediate ack is the point of the design, not a shortcut. A node is
+  // asleep between uplink windows and can be minutes from hearing anything; an RPC
+  // held open that long times out in ThingsBoard and reports a failure for a
+  // command that was in fact delivered and applied.
+  if (strcmp(method, "configurarModuloC") == 0) {
+    handleConfigurarModuloC(msg, idStr);
+    return;
+  }
+
   if (strcmp(method, "cfg") != 0) {
-    snprintf(reply, sizeof(reply), "{\"error\":\"unknown method '%s', expected 'cfg'\"}", method);
+    snprintf(reply, sizeof(reply),
+             "{\"error\":\"unknown method '%s', expected 'configurarModuloC' or 'cfg'\"}", method);
     queueRpcReply(topic, reply);
     return;
   }
@@ -411,10 +427,14 @@ void ModemNBIoTMqtt::onNodeCommandAck(const char *ackPayload) {
   // "ACK,INTERVAL=300,BMV080=0" -> report the applied (post-clamp) values back
   // as the RPC result, so a clamp on the node is visible in ThingsBoard.
   const char *body = strncmp(ackPayload, "ACK,", 4) == 0 ? ackPayload + 4 : ackPayload;
-  char reply[224];
-  snprintf(reply, sizeof(reply), "{\"device\":\"%s\",\"id\":%ld,\"data\":{\"applied\":\"%s\"}}",
-           _nodeCmd.device, _nodeCmd.rpcId, body);
-  queueRpcReply(MQTT_TOPIC_GATEWAY_RPC, reply);
+  if (_nodeCmd.viaCommandLog) {
+    publishCommandLog(_nodeCmd.rpcId, "confirmado");
+  } else {
+    char reply[224];
+    snprintf(reply, sizeof(reply), "{\"device\":\"%s\",\"id\":%ld,\"data\":{\"applied\":\"%s\"}}",
+             _nodeCmd.device, _nodeCmd.rpcId, body);
+    queueRpcReply(MQTT_TOPIC_GATEWAY_RPC, reply);
+  }
 
   Serial.printf("[nbiot-mqtt] %s acked: %s\n", _nodeCmd.device, body);
   _nodeCmd = NodeCommand{};
@@ -424,14 +444,144 @@ void ModemNBIoTMqtt::tickNodeCommandTimeout() {
   if (!_nodeCmd.pending) return;
   if (millis() - _nodeCmd.queuedMs < DOWNLINK_QUEUE_TIMEOUT_MS) return;
 
-  char reply[224];
-  snprintf(reply, sizeof(reply), "{\"device\":\"%s\",\"id\":%ld,\"data\":{\"error\":\"%s\"}}", _nodeCmd.device,
-           _nodeCmd.rpcId,
-           _nodeCmd.awaitingAck ? "delivered but the node never acked" : "node never uplinked - not delivered");
-  queueRpcReply(MQTT_TOPIC_GATEWAY_RPC, reply);
+  if (_nodeCmd.viaCommandLog) {
+    publishCommandLog(_nodeCmd.rpcId, "timeout");
+  } else {
+    char reply[224];
+    snprintf(reply, sizeof(reply), "{\"device\":\"%s\",\"id\":%ld,\"data\":{\"error\":\"%s\"}}", _nodeCmd.device,
+             _nodeCmd.rpcId,
+             _nodeCmd.awaitingAck ? "delivered but the node never acked" : "node never uplinked - not delivered");
+    queueRpcReply(MQTT_TOPIC_GATEWAY_RPC, reply);
+  }
   Serial.printf("[nbiot-mqtt] command for %s timed out (%s)\n", _nodeCmd.device,
                 _nodeCmd.awaitingAck ? "no ACK" : "never delivered");
   _nodeCmd = NodeCommand{};
+}
+
+static size_t appendI64(char *out, int64_t v);  // defined below, near the payload builder
+
+// The outcome half of the agreed protocol. The RPC itself was answered "enviado"
+// when it arrived; this is what actually says whether the node did the thing.
+//
+// Published as TELEMETRY, not as an RPC response, because the RPC was closed
+// minutes ago - a node can be a whole uplink window away from hearing a command,
+// and holding an RPC open that long is what made commands look like failures when
+// they were merely slow.
+void ModemNBIoTMqtt::publishCommandLog(long requestId, const char *status) {
+  // Built by hand rather than with one snprintf because the timestamp is an
+  // int64 and %lld is NOT reliably compiled into this toolchain's snprintf -
+  // nano newlib often omits it, which is why appendI64() exists at all. A %llu
+  // here would have emitted a literal "llu" or garbage into live telemetry.
+  char payload[192];
+  int n = snprintf(payload, sizeof(payload),
+                   "{\"commandLog\":{\"requestId\":%ld,\"status\":\"%s\"", requestId, status);
+  if (n < 0) return;
+  size_t pos = (size_t)n;
+
+  if (_haveNetTime && pos + 40 < sizeof(payload)) {
+    pos += (size_t)snprintf(payload + pos, sizeof(payload) - pos, ",\"timestamp\":");
+    pos += appendI64(payload + pos, netNowMs());
+  }
+  // Without network time the field is OMITTED rather than sent as 0. A commandLog
+  // stamped 1970 would sort to the beginning of every dashboard and look like the
+  // oldest record in the system.
+  snprintf(payload + pos, sizeof(payload) - pos, "}}");
+
+  queueRpcReply(MQTT_TOPIC_DEVICE_TELEMETRY, payload);
+  Serial.printf("[nbiot-mqtt] commandLog %ld -> %s\n", requestId, status);
+}
+
+// {"method":"configurarModuloC",
+//  "params":{"moduloC_id":"NodoC-1","action":"frecuencia","value":"freq_alarma"}}
+//
+// Answers the RPC immediately with "enviado", then queues the command for the
+// node's next uplink window. The outcome arrives later as commandLog.
+void ModemNBIoTMqtt::handleConfigurarModuloC(const NbiotProtocol::MqttMessage &msg,
+                                             const char *idStr) {
+  const long requestId = strtol(idStr, nullptr, 10);
+
+  char respTopic[NbiotProtocol::kMqttTopicLen];
+  snprintf(respTopic, sizeof(respTopic), "%s%s", MQTT_TOPIC_DEVICE_RPC_RESP, idStr);
+
+  char params[224] = {0};
+  char device[24] = {0};
+  char action[24] = {0};
+  char value[32] = {0};
+  char reply[224];
+
+  auto refuse = [&](const char *err) {
+    // A refusal is answered on the RPC itself, not as commandLog: nothing was
+    // ever queued, so there is no outcome to report later.
+    snprintf(reply, sizeof(reply), "{\"status\":\"error\",\"error\":\"%s\"}", err);
+    queueRpcReply(respTopic, reply);
+    Serial.printf("[nbiot-mqtt] configurarModuloC %ld rechazado: %s\n", requestId, err);
+  };
+
+  if (!NbiotProtocol::jsonObject(msg.payload, "params", params, sizeof(params))) {
+    refuse("missing params");
+    return;
+  }
+  if (!NbiotProtocol::jsonString(params, "moduloC_id", device, sizeof(device))) {
+    refuse("missing moduloC_id");
+    return;
+  }
+  NbiotProtocol::jsonString(params, "action", action, sizeof(action));
+  NbiotProtocol::jsonString(params, "value", value, sizeof(value));
+
+  if (_nodeCmd.pending) {
+    refuse("busy: a command for a node is still in flight");
+    return;
+  }
+
+  // ---- action -> the CFG vocabulary Module C already parses ----
+  char cfg[128] = {0};
+  if (strcmp(action, "frecuencia") == 0) {
+    // The three named rates. THESE SECONDS ARE A CHOICE, NOT FROM THE SPEC, which
+    // names the presets without giving values - they are the sane mapping onto
+    // CFG,INTERVAL and are the obvious thing to revise once the real numbers are
+    // agreed. freq_alarma is the LORA_TX_PERIOD_MIN_MS floor.
+    unsigned secs = 0;
+    if (strcmp(value, "freq_normal") == 0) secs = 300;
+    else if (strcmp(value, "freq_prealarma") == 0) secs = 60;
+    else if (strcmp(value, "freq_alarma") == 0) secs = 15;
+    if (secs == 0) {
+      refuse("value must be freq_normal, freq_prealarma or freq_alarma");
+      return;
+    }
+    snprintf(cfg, sizeof(cfg), "CFG,INTERVAL=%u", secs);
+
+  } else if (strcmp(action, "umbral") == 0) {
+    // NOT YET POSSIBLE ON THE NODE, and refused plainly rather than accepted and
+    // quietly dropped. Module C's thresholds live in a `static const` table
+    // (kAlarmRules) compiled into the firmware; changing one at runtime needs a
+    // mutable copy in RTC memory and CFG keys to address it. Answering "enviado"
+    // for a command that can never be applied would be worse than refusing.
+    refuse("umbral not supported yet - node thresholds are compile-time");
+    return;
+
+  } else {
+    refuse("unknown action, expected 'frecuencia' or 'umbral'");
+    return;
+  }
+
+  strncpy(_nodeCmd.device, device, sizeof(_nodeCmd.device) - 1);
+  _nodeCmd.device[sizeof(_nodeCmd.device) - 1] = 0;
+  strncpy(_nodeCmd.cfg, cfg, sizeof(_nodeCmd.cfg) - 1);
+  _nodeCmd.cfg[sizeof(_nodeCmd.cfg) - 1] = 0;
+  _nodeCmd.rpcId = requestId;
+  _nodeCmd.queuedMs = millis();
+  _nodeCmd.awaitingAck = false;
+  _nodeCmd.viaCommandLog = true;   // outcome goes out as commandLog, not as this RPC
+  _nodeCmd.pending = true;
+
+  // ANSWER NOW. The node may be minutes from its next uplink window, and an RPC
+  // held open that long times out in ThingsBoard and reports a failure for a
+  // command that was delivered and applied.
+  snprintf(reply, sizeof(reply), "{\"status\":\"enviado\",\"requestId\":%ld}", requestId);
+  queueRpcReply(respTopic, reply);
+
+  Serial.printf("[nbiot-mqtt] configurarModuloC %ld -> %s: \"%s\" (enviado; esperando ventana)\n",
+                requestId, _nodeCmd.device, _nodeCmd.cfg);
 }
 
 void ModemNBIoTMqtt::queueRpcReply(const char *topic, const char *payload) {

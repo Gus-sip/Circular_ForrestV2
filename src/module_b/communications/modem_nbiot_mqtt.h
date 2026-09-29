@@ -77,6 +77,15 @@ public:
   // minute of silence at the only moment the system exists for.
   void requestFlush() { _flushRequested = true; }
 
+  // Publishes one commandLog record: the outcome of a command that was already
+  // acknowledged "enviado". Uses the same single publish slot as RPC replies.
+  void publishCommandLog(long requestId, const char *status);
+
+private:
+  void handleConfigurarModuloC(const NbiotProtocol::MqttMessage &msg, const char *idStr);
+
+public:
+
   // Stamp a node's CURRENT fire state onto readings already waiting to go out.
   //
   // Without this the alarm flush publishes a stale state, which makes it theatre.
@@ -311,6 +320,18 @@ private:
     char cfg[128] = {0};       // "CFG,INTERVAL=300,BMV080=0" as Module C expects it
     long rpcId = 0;
     uint32_t queuedMs = 0;
+
+    // Which protocol asked for this, and therefore how its OUTCOME is reported.
+    //
+    //   false - the gateway-RPC path: the RPC is held open and answered with the
+    //           result, so ThingsBoard blocks until the node replies or Tmax.
+    //   true  - the agreed A->C protocol: the RPC was already answered "enviado"
+    //           the moment it arrived, and the outcome goes out later as a
+    //           commandLog telemetry record carrying the same requestId.
+    //
+    // The distinction has to be carried on the command itself: by the time the ACK
+    // or the timeout arrives, the original message is long gone.
+    bool viaCommandLog = false;
   };
   NodeCommand _nodeCmd;
 

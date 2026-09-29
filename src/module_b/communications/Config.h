@@ -260,6 +260,12 @@ inline void nbiotResolveNodeName(uint16_t addr, char *outName, size_t outCap) {
 #define MQTT_TOPIC_DEVICE_RPC_SUB "v1/devices/me/rpc/request/+"
 #define MQTT_TOPIC_DEVICE_RPC_RESP "v1/devices/me/rpc/response/"
 #define MQTT_TOPIC_GATEWAY_RPC "v1/gateway/rpc"
+
+// Where commandLog goes. The agreed protocol (Protocolo_comandos_ModA_hacia_
+// ModC_por_B_v1) reports a command's OUTCOME as telemetry rather than as the RPC
+// response, because the RPC is answered immediately with "enviado" long before the
+// node has been reached. Two different messages, two different topics.
+#define MQTT_TOPIC_DEVICE_TELEMETRY "v1/devices/me/telemetry"
 #define MQTT_DOWNLINK_QOS 1
 
 // A node-directed command can only be delivered during the target node's
