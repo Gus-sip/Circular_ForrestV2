@@ -146,14 +146,26 @@ public:
   // Only one is held at a time - a second arriving before the first is
   // answered is rejected with a "busy" RPC error rather than queued, since a
   // deep queue of stale config pushes helps nobody.
-  bool nodeCommandPending() const { return _nodeCmd.pending && !_nodeCmd.awaitingAck; }
-  const char *nodeCommandDevice() const { return _nodeCmd.device; }
-  const char *nodeCommandCfg() const { return _nodeCmd.cfg; }
-  // Called by main.cpp once the CFG string has gone out over LoRa.
-  void onNodeCommandDelivered();
-  // Called by main.cpp when an "ACK,..." packet comes back from the node.
-  // Publishes the RPC response and clears the slot.
-  void onNodeCommandAck(const char *ackPayload);
+  // A PENDING LIST, as the protocol document specifies ("guardar comando en lista
+  // pendiente"), not a single slot.
+  //
+  // A node can only hear during the ~2s window after it uplinks, so a command may
+  // wait minutes for delivery. With one slot, every command queued during that
+  // wait was refused as "busy" - and the Module A dashboard has one row per
+  // magnitude, so setting temperature and then humidity meant the second was
+  // rejected for a reason the operator could not see or act on.
+  //
+  // Addressed by device throughout: a command for C-2 must never block one for
+  // C-3 just because C-2 has not woken up yet.
+  const char *nodeCommandCfgFor(const char *device) const {
+    const int i = undeliveredIndexFor(device);
+    return i < 0 ? nullptr : _nodeCmds[i].cfg;
+  }
+  // Called by main.cpp once that device's CFG string has gone out over LoRa.
+  void onNodeCommandDelivered(const char *device);
+  // Called by main.cpp when an "ACK,..." packet comes back from a node. Reports
+  // the outcome and frees that device's slot.
+  void onNodeCommandAck(const char *device, const char *ackPayload);
 
 private:
   enum class CmdKind : uint8_t { PLAIN, QMTOPEN, QMTCONN, QMTPUB, QMTSUB };
@@ -344,7 +356,41 @@ private:
     // or the timeout arrives, the original message is long gone.
     bool viaCommandLog = false;
   };
-  NodeCommand _nodeCmd;
+  // Six: enough for every magnitude on one node, or two each across three nodes.
+  // A full queue is REPORTED, never silently dropped.
+  // The CFG string is built here before a free slot is chosen, so a command that
+  // turns out to be unqueueable never half-writes into a real slot.
+  char _pendingCfgScratch[128] = {0};
+
+  static const uint8_t kNodeCmdQueue = 6;
+  NodeCommand _nodeCmds[kNodeCmdQueue];
+
+  int undeliveredIndexFor(const char *device) const {
+    for (uint8_t i = 0; i < kNodeCmdQueue; i++) {
+      if (_nodeCmds[i].pending && !_nodeCmds[i].awaitingAck &&
+          strcmp(_nodeCmds[i].device, device) == 0) {
+        return (int)i;
+      }
+    }
+    return -1;
+  }
+
+  int awaitingAckIndexFor(const char *device) const {
+    for (uint8_t i = 0; i < kNodeCmdQueue; i++) {
+      if (_nodeCmds[i].pending && _nodeCmds[i].awaitingAck &&
+          strcmp(_nodeCmds[i].device, device) == 0) {
+        return (int)i;
+      }
+    }
+    return -1;
+  }
+
+  int freeNodeCmdSlot() const {
+    for (uint8_t i = 0; i < kNodeCmdQueue; i++) {
+      if (!_nodeCmds[i].pending) return (int)i;
+    }
+    return -1;
+  }
 
   // One queued RPC response, published by RPC_REPLY then cleared.
   bool _rpcReplyPending = false;

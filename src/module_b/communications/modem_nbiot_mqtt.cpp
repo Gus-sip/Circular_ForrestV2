@@ -375,10 +375,9 @@ void ModemNBIoTMqtt::handleGatewayRpc(const NbiotProtocol::MqttMessage &msg) {
     return;
   }
 
-  if (_nodeCmd.pending) {
-    // One at a time - see nodeCommandPending() in the header for why this
-    // rejects instead of queueing.
-    replyErr("busy: a command for a node is still in flight");
+  const int slot = freeNodeCmdSlot();
+  if (slot < 0) {
+    replyErr("command queue full");
     return;
   }
 
@@ -389,40 +388,52 @@ void ModemNBIoTMqtt::handleGatewayRpc(const NbiotProtocol::MqttMessage &msg) {
   const char *cur = params;
   char key[24], value[24];
   size_t pos = 0;
-  pos += (size_t)snprintf(_nodeCmd.cfg, sizeof(_nodeCmd.cfg), "CFG");
+  pos += (size_t)snprintf(_pendingCfgScratch, sizeof(_pendingCfgScratch), "CFG");
   bool any = false;
   while (NbiotProtocol::jsonNextPair(cur, key, sizeof(key), value, sizeof(value))) {
-    int n = snprintf(_nodeCmd.cfg + pos, sizeof(_nodeCmd.cfg) - pos, ",%s=%s", key, value);
-    if (n > 0 && (size_t)n < sizeof(_nodeCmd.cfg) - pos) {
+    int n = snprintf(_pendingCfgScratch + pos, sizeof(_pendingCfgScratch) - pos, ",%s=%s", key, value);
+    if (n > 0 && (size_t)n < sizeof(_pendingCfgScratch) - pos) {
       pos += (size_t)n;
       any = true;
     }
   }
   if (!any) {
-    _nodeCmd.cfg[0] = '\0';
+    _pendingCfgScratch[0] = '\0';
     replyErr("params object was empty");
     return;
   }
 
-  strncpy(_nodeCmd.device, device, sizeof(_nodeCmd.device) - 1);
-  _nodeCmd.device[sizeof(_nodeCmd.device) - 1] = '\0';
-  _nodeCmd.rpcId = rpcId;
-  _nodeCmd.queuedMs = millis();
-  _nodeCmd.awaitingAck = false;
-  _nodeCmd.pending = true;
+  NodeCommand &nc = _nodeCmds[slot];
+  strncpy(nc.cfg, _pendingCfgScratch, sizeof(nc.cfg) - 1);
+  nc.cfg[sizeof(nc.cfg) - 1] = '\0';
+  strncpy(nc.device, device, sizeof(nc.device) - 1);
+  nc.device[sizeof(nc.device) - 1] = '\0';
+  nc.rpcId = rpcId;
+  nc.queuedMs = millis();
+  nc.awaitingAck = false;
+  nc.viaCommandLog = false;
+  nc.pending = true;
 
-  Serial.printf("[nbiot-mqtt] queued for %s: \"%s\" (waiting for its next uplink window)\n", _nodeCmd.device,
-                _nodeCmd.cfg);
+  Serial.printf("[nbiot-mqtt] queued for %s: \"%s\" (waiting for its next uplink window)\n", nc.device,
+                nc.cfg);
 }
 
-void ModemNBIoTMqtt::onNodeCommandDelivered() {
-  if (!_nodeCmd.pending) return;
-  _nodeCmd.awaitingAck = true;
-  Serial.printf("[nbiot-mqtt] sent to %s over LoRa, awaiting ACK\n", _nodeCmd.device);
+void ModemNBIoTMqtt::onNodeCommandDelivered(const char *device) {
+  const int i = undeliveredIndexFor(device);
+  if (i < 0) return;
+  _nodeCmds[i].awaitingAck = true;
+  Serial.printf("[nbiot-mqtt] sent to %s over LoRa, awaiting ACK\n", _nodeCmds[i].device);
 }
 
-void ModemNBIoTMqtt::onNodeCommandAck(const char *ackPayload) {
-  if (!_nodeCmd.pending) return;
+void ModemNBIoTMqtt::onNodeCommandAck(const char *device, const char *ackPayload) {
+  // Match the ACK to the command awaiting one FROM THAT NODE. With several
+  // commands in flight to different nodes, clearing the wrong one would report
+  // the wrong requestId as confirmed - a command would appear to have succeeded
+  // while another silently timed out.
+  int i = awaitingAckIndexFor(device);
+  if (i < 0) i = undeliveredIndexFor(device);  // ACK beat our delivery bookkeeping
+  if (i < 0) return;
+  NodeCommand &_nodeCmd = _nodeCmds[i];
 
   // "ACK,INTERVAL=300,BMV080=0" -> report the applied (post-clamp) values back
   // as the RPC result, so a clamp on the node is visible in ThingsBoard.
@@ -441,8 +452,12 @@ void ModemNBIoTMqtt::onNodeCommandAck(const char *ackPayload) {
 }
 
 void ModemNBIoTMqtt::tickNodeCommandTimeout() {
-  if (!_nodeCmd.pending) return;
-  if (millis() - _nodeCmd.queuedMs < DOWNLINK_QUEUE_TIMEOUT_MS) return;
+  // Every slot is timed independently: one node being unreachable must not keep
+  // another node's command alive past its own deadline.
+  for (uint8_t qi = 0; qi < kNodeCmdQueue; qi++) {
+    NodeCommand &_nodeCmd = _nodeCmds[qi];
+    if (!_nodeCmd.pending) continue;
+    if (millis() - _nodeCmd.queuedMs < DOWNLINK_QUEUE_TIMEOUT_MS) continue;
 
   if (_nodeCmd.viaCommandLog) {
     publishCommandLog(_nodeCmd.rpcId, "timeout");
@@ -453,9 +468,10 @@ void ModemNBIoTMqtt::tickNodeCommandTimeout() {
              _nodeCmd.awaitingAck ? "delivered but the node never acked" : "node never uplinked - not delivered");
     queueRpcReply(MQTT_TOPIC_GATEWAY_RPC, reply);
   }
-  Serial.printf("[nbiot-mqtt] command for %s timed out (%s)\n", _nodeCmd.device,
-                _nodeCmd.awaitingAck ? "no ACK" : "never delivered");
-  _nodeCmd = NodeCommand{};
+    Serial.printf("[nbiot-mqtt] command for %s timed out (%s)\n", _nodeCmd.device,
+                  _nodeCmd.awaitingAck ? "no ACK" : "never delivered");
+    _nodeCmd = NodeCommand{};
+  }
 }
 
 static size_t appendI64(char *out, int64_t v);  // defined below, near the payload builder
@@ -528,8 +544,9 @@ void ModemNBIoTMqtt::handleConfigurarModuloC(const NbiotProtocol::MqttMessage &m
   NbiotProtocol::jsonString(params, "action", action, sizeof(action));
   NbiotProtocol::jsonString(params, "value", value, sizeof(value));
 
-  if (_nodeCmd.pending) {
-    refuse("busy: a command for a node is still in flight");
+  const int slot = freeNodeCmdSlot();
+  if (slot < 0) {
+    refuse("command queue full");
     return;
   }
 
@@ -583,15 +600,16 @@ void ModemNBIoTMqtt::handleConfigurarModuloC(const NbiotProtocol::MqttMessage &m
     return;
   }
 
-  strncpy(_nodeCmd.device, device, sizeof(_nodeCmd.device) - 1);
-  _nodeCmd.device[sizeof(_nodeCmd.device) - 1] = 0;
-  strncpy(_nodeCmd.cfg, cfg, sizeof(_nodeCmd.cfg) - 1);
-  _nodeCmd.cfg[sizeof(_nodeCmd.cfg) - 1] = 0;
-  _nodeCmd.rpcId = requestId;
-  _nodeCmd.queuedMs = millis();
-  _nodeCmd.awaitingAck = false;
-  _nodeCmd.viaCommandLog = true;   // outcome goes out as commandLog, not as this RPC
-  _nodeCmd.pending = true;
+  NodeCommand &nc = _nodeCmds[slot];
+  strncpy(nc.device, device, sizeof(nc.device) - 1);
+  nc.device[sizeof(nc.device) - 1] = 0;
+  strncpy(nc.cfg, cfg, sizeof(nc.cfg) - 1);
+  nc.cfg[sizeof(nc.cfg) - 1] = 0;
+  nc.rpcId = requestId;
+  nc.queuedMs = millis();
+  nc.awaitingAck = false;
+  nc.viaCommandLog = true;   // outcome goes out as commandLog, not as this RPC
+  nc.pending = true;
 
   // ANSWER NOW. The node may be minutes from its next uplink window, and an RPC
   // held open that long times out in ThingsBoard and reports a failure for a
@@ -600,7 +618,7 @@ void ModemNBIoTMqtt::handleConfigurarModuloC(const NbiotProtocol::MqttMessage &m
   queueRpcReply(respTopic, reply);
 
   Serial.printf("[nbiot-mqtt] configurarModuloC %ld -> %s: \"%s\" (enviado; esperando ventana)\n",
-                requestId, _nodeCmd.device, _nodeCmd.cfg);
+                requestId, nc.device, nc.cfg);
 }
 
 void ModemNBIoTMqtt::queueRpcReply(const char *topic, const char *payload) {

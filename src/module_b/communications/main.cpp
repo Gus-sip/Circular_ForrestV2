@@ -325,14 +325,17 @@ void loop() {
     // fire it now. This uplink is the node's only listening moment - it opens
     // a ~2s window right after transmitting and then goes deaf until its next
     // send period. Anything we do before this send eats into that window.
-    if (modem.nodeCommandPending()) {
-      char name[24];
-      nbiotResolveNodeName(msg.senderAddr, name, sizeof(name));
-      if (strcmp(name, modem.nodeCommandDevice()) == 0) {
-        const char *cfg = modem.nodeCommandCfg();
+    char nodeName[24];
+    nbiotResolveNodeName(msg.senderAddr, nodeName, sizeof(nodeName));
+    {
+      // Ask by DEVICE, not "is anything pending": with a queue, the head may be
+      // for a different node that has not woken up, and that must not stop this
+      // one being served in the window it just opened.
+      const char *cfg = modem.nodeCommandCfgFor(nodeName);
+      if (cfg) {
         bool sent = radio.send(msg.senderAddr, cfg, (uint8_t)strlen(cfg));
-        Serial.printf("  -> downlink to %s: %s (%s)\n", name, cfg, sent ? "sent" : "SEND FAILED");
-        if (sent) modem.onNodeCommandDelivered();
+        Serial.printf("  -> downlink to %s: %s (%s)\n", nodeName, cfg, sent ? "sent" : "SEND FAILED");
+        if (sent) modem.onNodeCommandDelivered(nodeName);
       }
     }
 
@@ -340,7 +343,7 @@ void loop() {
     // so it can answer the original RPC, and don't try to parse it as a
     // reading (it would just be dropped as "wrong field count").
     if (msg.length >= 4 && strncmp(msg.payload, "ACK,", 4) == 0) {
-      modem.onNodeCommandAck(msg.payload);
+      modem.onNodeCommandAck(nodeName, msg.payload);
       continue;
     }
 
