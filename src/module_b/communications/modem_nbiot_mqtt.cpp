@@ -130,7 +130,15 @@ void ModemNBIoTMqtt::pumpSerial() {
     }
 
     if (c == '\n') {
-      if (_lineLen > 0) {
+      if (_lineOverflowed) {
+        // Say so. The previous code restarted the buffer mid-line and let the
+        // REMAINDER be handled as a complete line, which turned an oversized
+        // message into a plausible-looking fragment and hid the real fault.
+        Serial.printf("[nbiot-mqtt] URC LONGER THAN %u BYTES - DISCARDED. A command "
+                      "may have been lost; raise kLineBufLen\n",
+                      (unsigned)kLineBufLen);
+        _lineOverflowed = false;
+      } else if (_lineLen > 0) {
         _lineBuf[_lineLen] = '\0';
         handleLine(_lineBuf, _lineLen);
       }
@@ -139,7 +147,10 @@ void ModemNBIoTMqtt::pumpSerial() {
       if (_lineLen < sizeof(_lineBuf) - 1) {
         _lineBuf[_lineLen++] = c;
       } else {
-        _lineLen = 0;  // guard against a garbage/oversized line
+        // Drop the REST of this line rather than starting a new one inside it.
+        // A partial line is never valid input, and pretending otherwise is what
+        // fed JSON tails to the parser.
+        _lineOverflowed = true;
       }
     }
   }

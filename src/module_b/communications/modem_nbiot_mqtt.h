@@ -287,7 +287,29 @@ private:
 
   // ---------- Command engine ----------
   PendingCmd _cmd;
-  char _lineBuf[96];
+  // MUST hold a whole +QMTRECV line, payload included.
+  //
+  // This was 96 and it silently broke every downlink. A gateway RPC line is
+  //
+  //   +QMTRECV: 0,0,"v1/devices/me/rpc/request/123",{...json...}
+  //
+  // and the umbral command's JSON alone runs past 150 characters, so the line was
+  // always longer than the buffer. Worse than truncation: the overflow path reset
+  // the buffer and kept going, so the FRONT of the message was discarded and the
+  // TAIL was handed to the parser as though it were a complete line. parseQmtrecv
+  // failed on it, and the leftovers surfaced as
+  //
+  //   [nbiot-mqtt] urc: n":50,"umbral_alarm_off":55,"umbral_alarm_on":60}}"
+  //
+  // which looks like line noise and is in fact the end of a command. Every
+  // "nothing is arriving" conclusion drawn over several days came from grepping
+  // for the success message, which only prints on a successful parse.
+  //
+  // Sized for the largest thing that can arrive: topic (72) + payload (320) plus
+  // the +QMTRECV envelope, rounded up.
+  static const size_t kLineBufLen = 512;
+  char _lineBuf[kLineBufLen];
+  bool _lineOverflowed = false;
   uint8_t _lineLen = 0;
   bool _sawBootUrc = false;
 
