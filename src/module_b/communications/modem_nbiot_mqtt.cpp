@@ -526,7 +526,23 @@ void ModemNBIoTMqtt::tickNodeCommandTimeout() {
     if (millis() - _nodeCmd.queuedMs < DOWNLINK_QUEUE_TIMEOUT_MS) continue;
 
   if (_nodeCmd.viaCommandLog) {
-    publishCommandLog(_nodeCmd.rpcId, "timeout");
+    // SAY WHICH HALF FAILED. This used to publish a bare "timeout", throwing away
+    // the one fact the operator needs: whether the command was ever put on the
+    // air. Module B already knows - awaitingAck means the node uplinked, the
+    // downlink went out in its listen window, and it then said nothing; without
+    // it, the node never transmitted at all.
+    //
+    // The two call for opposite responses. "Delivered, no ACK" is a node that is
+    // alive and refusing or crashing - look at the node. "Never delivered" is a
+    // node that is not transmitting - look at the radio, the power or the siting.
+    // A single word for both sends you to the wrong half, and this is a tower in
+    // a forest, not a board on a desk.
+    //
+    // Carried in `detail`, which the protocol document leaves free, so the four
+    // documented status values are unchanged.
+    publishCommandLogApplied(_nodeCmd.rpcId, "timeout",
+                             _nodeCmd.awaitingAck ? "delivered to the node, no ACK"
+                                                  : "node never uplinked - not delivered");
   } else {
     char reply[224];
     snprintf(reply, sizeof(reply), "{\"device\":\"%s\",\"id\":%ld,\"data\":{\"error\":\"%s\"}}", _nodeCmd.device,
