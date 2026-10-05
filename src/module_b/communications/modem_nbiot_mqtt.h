@@ -85,7 +85,10 @@ public:
   // reason it refused. The protocol document defines requestId/status/timestamp;
   // this adds to that rather than changing it, so a dashboard reading only the
   // documented fields is unaffected.
-  void publishCommandLogApplied(long requestId, const char *status, const char *detail);
+  // `device` additionally mirrors the record onto that node's own telemetry, so
+  // it is readable whether a dashboard watches the gateway or the node.
+  void publishCommandLogApplied(long requestId, const char *status, const char *detail,
+                                const char *device = nullptr);
 
 private:
   void handleConfigurarModuloC(const NbiotProtocol::MqttMessage &msg, const char *idStr);
@@ -452,9 +455,30 @@ private:
   }
 
   // One queued RPC response, published by RPC_REPLY then cleared.
-  bool _rpcReplyPending = false;
-  char _rpcReplyTopic[NbiotProtocol::kMqttTopicLen] = {0};
-  char _rpcReplyPayload[224] = {0};
+  // A QUEUE, NOT ONE SLOT.
+  //
+  // This was a single slot that logged "dropping the older one" and threw a
+  // message away. Nothing had hit it yet only by luck - the modem happened to
+  // drain each reply before the next was queued - but two commands arriving in
+  // one tick is normal (requests 9 and 10 did exactly that on 2026-10-05), and
+  // the one discarded would have been an "enviado" that Module A was waiting on.
+  //
+  // Four deep: an outcome and its mirror for two commands at once.
+  static const uint8_t kRpcReplyQueue = 4;
+  struct RpcReply {
+    char topic[NbiotProtocol::kMqttTopicLen] = {0};
+    char payload[320] = {0};
+  };
+  RpcReply _rpcReplies[kRpcReplyQueue];
+  uint8_t _rpcReplyHead = 0;   // index of the next one to send
+  uint8_t _rpcReplyCount = 0;
+
+  bool rpcReplyPending() const { return _rpcReplyCount > 0; }
+  void popRpcReply() {
+    if (_rpcReplyCount == 0) return;
+    _rpcReplyHead = (uint8_t)((_rpcReplyHead + 1) % kRpcReplyQueue);
+    _rpcReplyCount--;
+  }
   bool _rpcReplyInFlight = false;
 
   uint16_t _subMsgId = 1;  // AT+QMTSUB message id, incremented per subscribe

@@ -484,7 +484,7 @@ void ModemNBIoTMqtt::onNodeCommandNack(const char *device, const char *reason) {
   NodeCommand &nc = _nodeCmds[i];
 
   if (nc.viaCommandLog) {
-    publishCommandLogApplied(nc.rpcId, "error", reason);
+    publishCommandLogApplied(nc.rpcId, "error", reason, nc.device);
   } else {
     char reply[224];
     snprintf(reply, sizeof(reply), "{\"device\":\"%s\",\"id\":%ld,\"data\":{\"error\":\"%s\"}}",
@@ -513,7 +513,7 @@ void ModemNBIoTMqtt::onNodeCommandAck(const char *device, const char *ackPayload
     // the keys it actually took, so this is the difference between Module A
     // believing a threshold changed and being able to show the value the node is
     // really using.
-    publishCommandLogApplied(_nodeCmd.rpcId, "confirmado", body);
+    publishCommandLogApplied(_nodeCmd.rpcId, "confirmado", body, _nodeCmd.device);
   } else {
     char reply[224];
     snprintf(reply, sizeof(reply), "{\"device\":\"%s\",\"id\":%ld,\"data\":{\"applied\":\"%s\"}}",
@@ -557,7 +557,7 @@ void ModemNBIoTMqtt::tickNodeCommandTimeout() {
     //
     // Carried in `detail`, which the protocol document leaves free, so the four
     // documented status values are unchanged.
-    publishCommandLogApplied(_nodeCmd.rpcId, "timeout", why);
+    publishCommandLogApplied(_nodeCmd.rpcId, "timeout", why, _nodeCmd.device);
   } else {
     char reply[224];
     snprintf(reply, sizeof(reply), "{\"device\":\"%s\",\"id\":%ld,\"data\":{\"error\":\"%s\"}}", _nodeCmd.device,
@@ -580,11 +580,11 @@ static size_t appendI64(char *out, int64_t v);  // defined below, near the paylo
 // and holding an RPC open that long is what made commands look like failures when
 // they were merely slow.
 void ModemNBIoTMqtt::publishCommandLog(long requestId, const char *status) {
-  publishCommandLogApplied(requestId, status, nullptr);
+  publishCommandLogApplied(requestId, status, nullptr, nullptr);
 }
 
 void ModemNBIoTMqtt::publishCommandLogApplied(long requestId, const char *status,
-                                              const char *detail) {
+                                              const char *detail, const char *device) {
   // Built by hand rather than with one snprintf because the timestamp is an
   // int64 and %lld is NOT reliably compiled into this toolchain's snprintf -
   // nano newlib often omits it, which is why appendI64() exists at all. A %llu
@@ -619,7 +619,48 @@ void ModemNBIoTMqtt::publishCommandLogApplied(long requestId, const char *status
   snprintf(payload + pos, sizeof(payload) - pos, "}}");
 
   queueRpcReply(MQTT_TOPIC_DEVICE_TELEMETRY, payload);
-  Serial.printf("[nbiot-mqtt] commandLog %ld -> %s\n", requestId, status);
+
+  // THE SAME RECORD, ALSO ON THE NODE'S OWN TELEMETRY.
+  //
+  // v1/devices/me/telemetry carries the gateway's access token, so `commandLog`
+  // lands on the GATEWAY device (CON-1) and never on NodoC-3. "enviado" goes to
+  // the node's RPC response topic, so a dashboard bound to the node sees the
+  // command leave and never sees it confirmed - it sits at "en transito al
+  // MODULO-C" indefinitely while Module B's log says confirmado and the broker
+  // acked the publish. Reported repeatedly on 2026-10-05 for requests 6..10.
+  //
+  // Which device the dashboard is actually bound to is not something this
+  // firmware can know, so the record goes to BOTH rather than being moved from
+  // one to the other - moving it would break whichever side is working today.
+  // Same key, same shape, no new vocabulary invented: that is what the last two
+  // bugs came from.
+  //
+  // `values` for the gateway topic is exactly the device-topic payload, so the
+  // object is reused rather than rebuilt - there is no second place for the two
+  // to drift apart.
+  if (device && *device) {
+    char mirror[320];
+    if (_haveNetTime) {
+      int m = snprintf(mirror, sizeof(mirror), "{\"%s\":[{\"ts\":", device);
+      if (m > 0 && (size_t)m < sizeof(mirror)) {
+        size_t mp = (size_t)m;
+        mp += appendI64(mirror + mp, netNowMs());
+        if (mp + strlen(payload) + 16 < sizeof(mirror)) {
+          snprintf(mirror + mp, sizeof(mirror) - mp, ",\"values\":%s}]}", payload);
+          queueRpcReply("v1/gateway/telemetry", mirror);
+        }
+      }
+    } else {
+      // No network clock: send it flat and let ThingsBoard stamp it on receipt,
+      // rather than emitting a 1970 timestamp that sorts to the top of every
+      // dashboard - the same reasoning as the omitted field above.
+      int m = snprintf(mirror, sizeof(mirror), "{\"%s\":[%s]}", device, payload);
+      if (m > 0 && (size_t)m < sizeof(mirror)) queueRpcReply("v1/gateway/telemetry", mirror);
+    }
+  }
+
+  Serial.printf("[nbiot-mqtt] commandLog %ld -> %s%s\n", requestId, status,
+                (device && *device) ? " (gateway + node)" : "");
 }
 
 // {"method":"configurarModuloC",
@@ -761,16 +802,19 @@ void ModemNBIoTMqtt::handleConfigurarModuloC(const NbiotProtocol::MqttMessage &m
 }
 
 void ModemNBIoTMqtt::queueRpcReply(const char *topic, const char *payload) {
-  if (_rpcReplyPending) {
-    // Only one reply slot. Dropping is better than blocking the state machine;
-    // ThingsBoard times the RPC out on its own side.
-    Serial.println("[nbiot-mqtt] rpc reply slot busy, dropping the older one");
+  if (_rpcReplyCount >= kRpcReplyQueue) {
+    // Full. The OLDEST goes, not the newest: a newer record supersedes an older
+    // one for the same command, and the newest is the one still worth sending.
+    Serial.println("[nbiot-mqtt] rpc reply queue full - dropping the oldest");
+    popRpcReply();
   }
-  strncpy(_rpcReplyTopic, topic, sizeof(_rpcReplyTopic) - 1);
-  _rpcReplyTopic[sizeof(_rpcReplyTopic) - 1] = '\0';
-  strncpy(_rpcReplyPayload, payload, sizeof(_rpcReplyPayload) - 1);
-  _rpcReplyPayload[sizeof(_rpcReplyPayload) - 1] = '\0';
-  _rpcReplyPending = true;
+  const uint8_t slot = (uint8_t)((_rpcReplyHead + _rpcReplyCount) % kRpcReplyQueue);
+  RpcReply &r = _rpcReplies[slot];
+  strncpy(r.topic, topic, sizeof(r.topic) - 1);
+  r.topic[sizeof(r.topic) - 1] = '\0';
+  strncpy(r.payload, payload, sizeof(r.payload) - 1);
+  r.payload[sizeof(r.payload) - 1] = '\0';
+  _rpcReplyCount++;
 }
 
 void ModemNBIoTMqtt::completeCommand(CmdOutcome outcome) {
@@ -1422,7 +1466,7 @@ void ModemNBIoTMqtt::tickIdle() {
   // An RPC response goes out ahead of the telemetry batch - it's what someone
   // is actively waiting on in the ThingsBoard UI, and the batch loses nothing
   // by waiting one more pass.
-  if (_rpcReplyPending && _mqttConnected) {
+  if (rpcReplyPending() && _mqttConnected) {
     setState(State::RPC_REPLY);
     return;
   }
@@ -1489,24 +1533,26 @@ void ModemNBIoTMqtt::tickPublishing() {
 // fails, the reply is dropped and ThingsBoard times the RPC out on its own -
 // retrying a stale command result is worse than not answering.
 void ModemNBIoTMqtt::tickRpcReply() {
-  if (!_rpcReplyPending) {
+  if (!rpcReplyPending()) {
     setState(State::IDLE);
     return;
   }
   if (!_mqttConnected) {
-    _rpcReplyPending = false;  // can't answer; let ThingsBoard time it out
+    popRpcReply();  // can't answer; let ThingsBoard time it out
     setState(State::IDLE);
     return;
   }
   if (_cmd.active) return;
 
+  RpcReply &r = _rpcReplies[_rpcReplyHead];
+
   if (!_rpcReplyInFlight) {
-    _publishPayloadLen = strlen(_rpcReplyPayload);
+    _publishPayloadLen = strlen(r.payload);
     if (_publishPayloadLen >= sizeof(_publishPayload)) _publishPayloadLen = sizeof(_publishPayload) - 1;
-    memcpy(_publishPayload, _rpcReplyPayload, _publishPayloadLen);
+    memcpy(_publishPayload, r.payload, _publishPayloadLen);
 
     char header[128];
-    snprintf(header, sizeof(header), "AT+QMTPUB=%d,0,0,0,\"%s\"", MQTT_CLIENT_IDX, _rpcReplyTopic);
+    snprintf(header, sizeof(header), "AT+QMTPUB=%d,0,0,0,\"%s\"", MQTT_CLIENT_IDX, r.topic);
     issueCommand(header, NBIOT_TIMEOUT_SEND_MS, CmdKind::QMTPUB, _publishPayload, _publishPayloadLen);
     _rpcReplyInFlight = true;
     return;
@@ -1517,8 +1563,10 @@ void ModemNBIoTMqtt::tickRpcReply() {
 
   if (outcome != CmdOutcome::OK) Serial.println("[nbiot-mqtt] rpc reply publish failed - dropped");
   _rpcReplyInFlight = false;
-  _rpcReplyPending = false;
-  setState(State::IDLE);
+  popRpcReply();
+  // Straight back out if more are waiting - IDLE re-enters this state anyway,
+  // but saying so keeps the queue draining in one pass rather than one per tick.
+  setState(rpcReplyPending() ? State::RPC_REPLY : State::IDLE);
 }
 
 void ModemNBIoTMqtt::tickError() {
