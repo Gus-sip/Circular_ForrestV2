@@ -157,6 +157,28 @@ void ModemNBIoTMqtt::pumpSerial() {
 }
 
 void ModemNBIoTMqtt::handleLine(const char *line, size_t len) {
+  // A DOWNLINK IS UNSOLICITED BY DEFINITION, SO IT IS TAKEN BEFORE ANYTHING ELSE.
+  //
+  // This used to sit below the command dispatch, which meant a +QMTRECV landing
+  // while a command was in flight was only rescued for the four commands whose
+  // real result arrives as an async URC (QMTOPEN/QMTCONN/QMTPUB/QMTSUB). During
+  // any other command - AT+CSQ, AT+QMTCFG, a QMTPUB still waiting for its OK -
+  // it fell through to the bottom of this function and was stored as the
+  // command's informational response line, i.e. silently discarded.
+  //
+  // Observed live on 2026-10-05: a command was delivered the instant we
+  // subscribed (the persistent session working as intended - the broker had it
+  // queued) and was swallowed by the AT+QMTSUB exchange itself. It appeared in
+  // the log as "<- +QMTRECV: ..." rather than "downlink on ...", which is the
+  // tell: the "<- " prefix means a command consumed it.
+  //
+  // The modem interleaves URCs with command responses whenever it feels like
+  // it, so there is no state in which ignoring one is correct.
+  if (strncmp(line, "+QMTRECV", 8) == 0) {
+    handleUrc(line, len);
+    return;
+  }
+
   if (!_cmd.active) {
     handleUrc(line, len);
     return;

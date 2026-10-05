@@ -1,0 +1,47 @@
+=== COM10 abierto, capturando 1800s (el open resetea la placa) ===
+[   3.7s] [nbiot-mqtt] -> AT+CSQ
+[   3.7s] [nbiot-mqtt] <- +CSQ: 31,0
+[   3.7s] [nbiot-mqtt] <- OK
+[  13.7s] +RCV addr=3 len=71 rssi=-66 snr=12 data="25.64,41.36,944.73,15522.68,0.00,0.00,0.00,722.00,0.00,0.00,0.00,0.00,0"
+[  20.8s] +RCV addr=4 len=108 rssi=-41 snr=12 data="B,2,25.1,45.8,944.7,0,0.0,0.0,0.0,770,0.0,0.0,0,0.0,0,3;25.1,45.8,944.6,0,0.0,0.0,0.0,770,0.0,0.0,0,0.0,0,0;"
+[  20.8s]   -> downlink to NodoC-3: CFG,temp_pre_off=48,temp_pre_on=50,temp_alarm_off=55,temp_alarm_on=60 (sent)
+[  20.8s] [nbiot-mqtt] sent to NodoC-3 over LoRa, awaiting ACK
+[  20.8s]   batch of 2 reading(s)
+[  21.1s] +RCV addr=4 len=69 rssi=-41 snr=13 data="ACK,temp_pre_off=48,temp_pre_on=50,temp_alarm_off=55,temp_alarm_on=60"
+[  21.1s] [nbiot-mqtt] commandLog 2 -> confirmado
+[  21.1s] [nbiot-mqtt] NodoC-3 acked: temp_pre_off=48,temp_pre_on=50,temp_alarm_off=55,temp_alarm_on=60
+[  21.1s] [nbiot-mqtt] state IDLE -> RPC_REPLY
+[  21.1s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/devices/me/telemetry"
+[  21.1s] [nbiot-mqtt] payload (155 bytes): {"commandLog":{"requestId":2,"status":"confirmado","detail":"temp_pre_off=48,temp_pre_on=50,temp_alarm_off=55,temp_alarm_on=60","timestamp":1791196165846}}
+[  21.1s] [nbiot-mqtt] <- OK
+[  21.1s] +RCV addr=4 len=30 rssi=-41 snr=12 data="STAT,62,0,1,00100,62,3120,86,0"
+[  21.1s]   node health: charge 86% (3120 mV at the sense pin)
+[  21.1s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[  21.1s] [nbiot-mqtt] state RPC_REPLY -> IDLE
+[  21.1s] [nbiot-mqtt] -> AT+CSQ
+[  21.1s] [nbiot-mqtt] <- +CSQ: 31,0
+[  21.1s] [nbiot-mqtt] <- OK
+[  24.8s] [nbiot-mqtt] state IDLE -> PUBLISHING
+[  24.8s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/gateway/telemetry"
+[  24.8s] [nbiot-mqtt] payload (1114 bytes): {"NodoC-1":[{"ts":1791196109568,"values":{"temp":22.10,"rh":56.00,"pres":945.00,"gas":27592.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":596.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-67,"snr":12,"chargePct":-1,"capMv":-1,"alarmState":0}},{"ts":1791196139568,"values":{"temp":22.10,"rh":55.90,"pres":945.00,"gas":27592.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":596.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-67,"snr":12,"chargePct":-1,"capMv":-1,"alarmState":0}}],"NodoC-2":[{"ts":1791196158518,"values":{"temp":25.64,"rh":41.36,"pres":944.73,"gas":15522.68,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":722.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-66,"snr":12,"chargePct":-1,"capMv":-1,"alarmState":-1}}],"NodoC-3":[{"ts":1791196135679,"values":{"temp":25.10,"rh":45.80,"pres":944.70,"gas":0.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":770.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-41,"snr":12,"chargePct":-1,"capMv":-1,"alarmState":0}}]}
+[  24.8s] [nbiot-mqtt] <- OK
+[  25.2s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[  25.2s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/gateway/telemetry"
+[  25.2s] [nbiot-mqtt] payload (279 bytes): {"NodoC-3":[{"ts":1791196165679,"values":{"temp":25.10,"rh":45.80,"pres":944.60,"gas":0.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":770.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-41,"snr":12,"chargePct":-1,"capMv":-1,"alarmState":0}}]}
+[  25.2s] [nbiot-mqtt] <- OK
+[  25.2s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[  25.2s] [nbiot-mqtt] state PUBLISHING -> IDLE
+[  25.2s] [nbiot-mqtt] -> AT+CSQ
+[  25.2s] [nbiot-mqtt] <- +CSQ: 31,0
+[  25.2s] [nbiot-mqtt] <- OK
+[  28.9s] [nbiot-mqtt] downlink on "v1/devices/me/rpc/request/6": {"method":"configurarModuloC","params":{"moduloC_id":"NodoC-3","action":"umbrales_de1variable","variable":"temp","umbral_pre_off":48,"umbral_pre_on":50,"umbral_alarm_off":55,"umbral_alarm_on":60}}
+[  28.9s] [nbiot-mqtt] configurarModuloC 6 -> NodoC-3: "CFG,temp_pre_off=48,temp_pre_on=50,temp_alarm_off=55,temp_alarm_on=60" (enviado; esperando ventana)
+[  28.9s] [nbiot-mqtt] state IDLE -> RPC_REPLY
+[  28.9s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/devices/me/rpc/response/6"
+[  28.9s] [nbiot-mqtt] payload (34 bytes): {"status":"enviado","requestId":6}
+[  28.9s] [nbiot-mqtt] <- OK
+[  28.9s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[  28.9s] [nbiot-mqtt] state RPC_REPLY -> IDLE
+[  28.9s] [nbiot-mqtt] -> AT+CSQ
+[  28.9s] [nbiot-mqtt] <- +CSQ: 31,0
+[  28.9s] [nbiot-mqtt] <- OK
