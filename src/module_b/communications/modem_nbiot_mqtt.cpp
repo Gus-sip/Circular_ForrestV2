@@ -463,10 +463,18 @@ void ModemNBIoTMqtt::handleGatewayRpc(const NbiotProtocol::MqttMessage &msg) {
 }
 
 void ModemNBIoTMqtt::onNodeCommandDelivered(const char *device) {
-  const int i = undeliveredIndexFor(device);
+  const int i = deliverableIndexFor(device);
   if (i < 0) return;
-  _nodeCmds[i].awaitingAck = true;
-  Serial.printf("[nbiot-mqtt] sent to %s over LoRa, awaiting ACK\n", _nodeCmds[i].device);
+  NodeCommand &nc = _nodeCmds[i];
+  nc.awaitingAck = true;
+  nc.lastSentMs = millis();
+  if (nc.attempts < 255) nc.attempts++;
+  if (nc.attempts == 1) {
+    Serial.printf("[nbiot-mqtt] sent to %s over LoRa, awaiting ACK\n", nc.device);
+  } else {
+    Serial.printf("[nbiot-mqtt] RESENT to %s over LoRa (attempt %u - no ACK to the "
+                  "previous one), awaiting ACK\n", nc.device, (unsigned)nc.attempts);
+  }
 }
 
 void ModemNBIoTMqtt::onNodeCommandNack(const char *device, const char *reason) {
@@ -525,6 +533,15 @@ void ModemNBIoTMqtt::tickNodeCommandTimeout() {
     if (!_nodeCmd.pending) continue;
     if (millis() - _nodeCmd.queuedMs < DOWNLINK_QUEUE_TIMEOUT_MS) continue;
 
+  // Built once, above the branch, because the serial line at the end of this
+  // loop reports it as well - whichever protocol the command arrived on.
+  char why[72];
+  if (_nodeCmd.awaitingAck) {
+    snprintf(why, sizeof(why), "delivered %u time(s), no ACK", (unsigned)_nodeCmd.attempts);
+  } else {
+    snprintf(why, sizeof(why), "node never uplinked - not delivered");
+  }
+
   if (_nodeCmd.viaCommandLog) {
     // SAY WHICH HALF FAILED. This used to publish a bare "timeout", throwing away
     // the one fact the operator needs: whether the command was ever put on the
@@ -540,9 +557,7 @@ void ModemNBIoTMqtt::tickNodeCommandTimeout() {
     //
     // Carried in `detail`, which the protocol document leaves free, so the four
     // documented status values are unchanged.
-    publishCommandLogApplied(_nodeCmd.rpcId, "timeout",
-                             _nodeCmd.awaitingAck ? "delivered to the node, no ACK"
-                                                  : "node never uplinked - not delivered");
+    publishCommandLogApplied(_nodeCmd.rpcId, "timeout", why);
   } else {
     char reply[224];
     snprintf(reply, sizeof(reply), "{\"device\":\"%s\",\"id\":%ld,\"data\":{\"error\":\"%s\"}}", _nodeCmd.device,
@@ -550,8 +565,7 @@ void ModemNBIoTMqtt::tickNodeCommandTimeout() {
              _nodeCmd.awaitingAck ? "delivered but the node never acked" : "node never uplinked - not delivered");
     queueRpcReply(MQTT_TOPIC_GATEWAY_RPC, reply);
   }
-    Serial.printf("[nbiot-mqtt] command for %s timed out (%s)\n", _nodeCmd.device,
-                  _nodeCmd.awaitingAck ? "no ACK" : "never delivered");
+    Serial.printf("[nbiot-mqtt] command for %s timed out (%s)\n", _nodeCmd.device, why);
     _nodeCmd = NodeCommand{};
   }
 }

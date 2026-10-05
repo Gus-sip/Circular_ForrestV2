@@ -274,6 +274,18 @@ inline void nbiotResolveNodeName(uint16_t addr, char *outName, size_t outCap) {
 // long rather than holding a command queued forever against a dead node.
 #define DOWNLINK_QUEUE_TIMEOUT_MS 900000UL  // 15 min = 3 missed windows at 5 min
 
+// Minimum gap between two delivery attempts of the SAME command.
+//
+// A node transmits more than once per window - telemetry, then STAT about 2s
+// later - and main.cpp runs its downlink hook on every frame it receives. Without
+// a floor here the retry would fire again on the STAT frame, spending every
+// attempt inside a single window while the node was already deaf.
+//
+// 10s sits above that intra-window spacing and below LORA_TX_PERIOD_MIN_MS (15s),
+// the shortest send period a node can be configured to, so one window can never
+// produce two attempts and no window is ever skipped.
+#define DOWNLINK_RETRY_MIN_GAP_MS 10000UL
+
 // Per-reading timestamps: without a "ts" ThingsBoard stamps every reading in
 // a batch at receipt time, collapsing a 2-min batch to one instant. Module B
 // has no RTC, so it reads network time once per attach via AT+CCLK? (needs

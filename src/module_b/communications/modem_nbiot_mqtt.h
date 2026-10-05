@@ -164,7 +164,7 @@ public:
   // Addressed by device throughout: a command for C-2 must never block one for
   // C-3 just because C-2 has not woken up yet.
   const char *nodeCommandCfgFor(const char *device) const {
-    const int i = undeliveredIndexFor(device);
+    const int i = deliverableIndexFor(device);
     return i < 0 ? nullptr : _nodeCmds[i].cfg;
   }
   // Called by main.cpp once that device's CFG string has gone out over LoRa.
@@ -376,6 +376,8 @@ private:
     char cfg[128] = {0};       // "CFG,INTERVAL=300,BMV080=0" as Module C expects it
     long rpcId = 0;
     uint32_t queuedMs = 0;
+    uint8_t attempts = 0;      // delivery attempts so far - reported, and retried
+    uint32_t lastSentMs = 0;   // when the last attempt went out, for the retry gap
 
     // Which protocol asked for this, and therefore how its OUTCOME is reported.
     //
@@ -404,6 +406,30 @@ private:
           strcmp(_nodeCmds[i].device, device) == 0) {
         return (int)i;
       }
+    }
+    return -1;
+  }
+
+  // A SLOT THIS NODE SHOULD BE SENT RIGHT NOW - which includes one already sent
+  // and still unacknowledged.
+  //
+  // The node uplinking is itself the evidence that a previous attempt failed: if
+  // it had received and applied the command it would have ACKed inside that
+  // window, and the slot would already be free. So an unacknowledged command is
+  // re-sent on the next window rather than sat on until the deadline.
+  //
+  // This is what the 15-minute deadline was always documented to mean - "3 missed
+  // windows at 5 min" - except nothing ever retried in those windows. One lost
+  // frame cost the full fifteen minutes and then reported a timeout for a command
+  // that had been delivered to a healthy node. Seen on requestId 7, 2026-10-05.
+  //
+  // The gap guard is load-bearing, not caution: see DOWNLINK_RETRY_MIN_GAP_MS.
+  int deliverableIndexFor(const char *device) const {
+    for (uint8_t i = 0; i < kNodeCmdQueue; i++) {
+      const NodeCommand &nc = _nodeCmds[i];
+      if (!nc.pending || strcmp(nc.device, device) != 0) continue;
+      if (!nc.awaitingAck) return (int)i;
+      if (millis() - nc.lastSentMs >= DOWNLINK_RETRY_MIN_GAP_MS) return (int)i;
     }
     return -1;
   }
