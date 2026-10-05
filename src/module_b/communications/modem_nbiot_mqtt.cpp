@@ -579,6 +579,61 @@ static size_t appendI64(char *out, int64_t v);  // defined below, near the paylo
 // minutes ago - a node can be a whole uplink window away from hearing a command,
 // and holding an RPC open that long is what made commands look like failures when
 // they were merely slow.
+// Turns the node's ACK body - "temp_pre_off=48,temp_pre_on=50" - into JSON
+// fields: ,"temp_pre_off":48,"temp_pre_on":50
+//
+// WHY AS SEPARATE KEYS AND NOT JUST THE STRING: Module A needs to know the
+// threshold the node is now using, and `detail` carries that only as text it
+// would have to parse. As telemetry keys each one is a value a dashboard can
+// bind to, plot and compare against what it asked for. The names are the node's
+// own vocabulary - magnitude plus suffix, exactly the spreadsheet's names - so
+// nothing new is invented here.
+//
+// Numbers go out bare so they are stored as numbers; anything that does not
+// parse cleanly as one is quoted instead of being emitted as broken JSON. These
+// pairs come off the radio, so they are not assumed to be well formed.
+static size_t appendKvAsJson(char *out, size_t cap, const char *kv) {
+  size_t pos = 0;
+  const char *p = kv;
+  while (*p && pos + 8 < cap) {
+    const char *comma = strchr(p, ',');
+    const char *end = comma ? comma : p + strlen(p);
+    const char *eq = nullptr;
+    for (const char *q = p; q < end; q++) {
+      if (*q == '=') { eq = q; break; }
+    }
+    if (eq && eq > p && (end - eq) > 1) {
+      const size_t klen = (size_t)(eq - p);
+      const size_t vlen = (size_t)(end - eq - 1);
+
+      // Numeric, by inspection rather than by trusting strtod's tail.
+      bool numeric = vlen > 0;
+      bool dot = false;
+      for (size_t i = 0; i < vlen && numeric; i++) {
+        const char c = eq[1 + i];
+        if (c == '-' && i == 0) continue;
+        if (c == '.' && !dot) { dot = true; continue; }
+        if (c < '0' || c > '9') numeric = false;
+      }
+
+      const size_t need = klen + vlen + (numeric ? 4 : 6);
+      if (pos + need >= cap) break;
+      out[pos++] = ',';
+      out[pos++] = '"';
+      memcpy(out + pos, p, klen); pos += klen;
+      out[pos++] = '"';
+      out[pos++] = ':';
+      if (!numeric) out[pos++] = '"';
+      memcpy(out + pos, eq + 1, vlen); pos += vlen;
+      if (!numeric) out[pos++] = '"';
+      out[pos] = 0;
+    }
+    if (!comma) break;
+    p = comma + 1;
+  }
+  return pos;
+}
+
 void ModemNBIoTMqtt::publishCommandLog(long requestId, const char *status) {
   publishCommandLogApplied(requestId, status, nullptr, nullptr);
 }
@@ -639,14 +694,35 @@ void ModemNBIoTMqtt::publishCommandLogApplied(long requestId, const char *status
   // object is reused rather than rebuilt - there is no second place for the two
   // to drift apart.
   if (device && *device) {
-    char mirror[320];
+    // The node mirror's values: the commandLog record, PLUS one field per
+    // threshold the node reported applying. Built by reopening the payload's
+    // closing brace rather than formatting the record twice, so the two copies
+    // cannot drift.
+    char vals[384];
+    size_t vp = 0;
+    const size_t plen = strlen(payload);
+    if (plen >= 2 && plen < sizeof(vals) - 2) {
+      memcpy(vals, payload, plen - 1);  // everything but the final '}'
+      vp = plen - 1;
+      vals[vp] = 0;
+      // Only a confirmation carries applied values. A timeout's detail is prose
+      // and an error's is a refusal reason - neither is a threshold.
+      if (detail && *detail && strcmp(status, "confirmado") == 0 && strchr(detail, '=')) {
+        vp += appendKvAsJson(vals + vp, sizeof(vals) - vp, detail);
+      }
+      if (vp + 2 < sizeof(vals)) { vals[vp++] = '}'; vals[vp] = 0; }
+    } else {
+      snprintf(vals, sizeof(vals), "%s", payload);
+    }
+
+    char mirror[480];
     if (_haveNetTime) {
       int m = snprintf(mirror, sizeof(mirror), "{\"%s\":[{\"ts\":", device);
       if (m > 0 && (size_t)m < sizeof(mirror)) {
         size_t mp = (size_t)m;
         mp += appendI64(mirror + mp, netNowMs());
-        if (mp + strlen(payload) + 16 < sizeof(mirror)) {
-          snprintf(mirror + mp, sizeof(mirror) - mp, ",\"values\":%s}]}", payload);
+        if (mp + strlen(vals) + 16 < sizeof(mirror)) {
+          snprintf(mirror + mp, sizeof(mirror) - mp, ",\"values\":%s}]}", vals);
           queueRpcReply("v1/gateway/telemetry", mirror);
         }
       }
@@ -654,13 +730,65 @@ void ModemNBIoTMqtt::publishCommandLogApplied(long requestId, const char *status
       // No network clock: send it flat and let ThingsBoard stamp it on receipt,
       // rather than emitting a 1970 timestamp that sorts to the top of every
       // dashboard - the same reasoning as the omitted field above.
-      int m = snprintf(mirror, sizeof(mirror), "{\"%s\":[%s]}", device, payload);
+      int m = snprintf(mirror, sizeof(mirror), "{\"%s\":[%s]}", device, vals);
       if (m > 0 && (size_t)m < sizeof(mirror)) queueRpcReply("v1/gateway/telemetry", mirror);
     }
   }
 
+  // THE DASHBOARD READS ATTRIBUTES, NOT TELEMETRY.
+  //
+  // Straight from the protocol document, under "Control del Comando en MODULOA":
+  //
+  //     MODULOA recibe la telemetria
+  //     Detecta "commandLog"
+  //     Copia automaticamente a atributos del ModC
+  //     Dashboard lee atributos (rapido)
+  //     Historico guardado en telemetria
+  //
+  // So the telemetry record above is the HISTORY, and the dashboard reads the
+  // node's ATTRIBUTES - with Module A responsible for copying one to the other
+  // via a ThingsBoard rule chain. If that copy is not configured, the telemetry
+  // arrives, the broker acks it, Module B's log says confirmado, and the
+  // dashboard sits at "en transito al MODULO-C" forever with nothing wrong
+  // anywhere in the firmware. That is exactly what was happening.
+  //
+  // Writing the attributes here removes the dependency on that rule chain
+  // existing. It does not replace the telemetry record, which the document
+  // requires and which remains the history.
+  //
+  // Key names: `commandLog` is the only name the document gives, so the same
+  // object goes in under the same name. The threshold keys are the node's own
+  // vocabulary, as echoed in its ACK. Nothing is invented - inventing names is
+  // what the action-name mismatch cost us.
+  if (device && *device) {
+    char attrs[480];
+    int a = snprintf(attrs, sizeof(attrs), "{\"%s\":{\"commandLog\":", device);
+    if (a > 0 && (size_t)a < sizeof(attrs)) {
+      size_t ap = (size_t)a;
+      // The record without its {"commandLog": wrapper - reuse, do not rebuild.
+      const char *inner = strstr(payload, "\"commandLog\":");
+      if (inner) {
+        inner += 15;  // past "commandLog":
+        const size_t ilen = strlen(inner);
+        if (ilen >= 1 && ap + ilen + 8 < sizeof(attrs)) {
+          memcpy(attrs + ap, inner, ilen - 1);  // drop payload's outer closing brace
+          ap += ilen - 1;
+          attrs[ap] = 0;
+          if (detail && *detail && strcmp(status, "confirmado") == 0 && strchr(detail, '=')) {
+            ap += appendKvAsJson(attrs + ap, sizeof(attrs) - ap, detail);
+          }
+          if (ap + 3 < sizeof(attrs)) {
+            attrs[ap++] = '}';
+            attrs[ap] = 0;
+            queueRpcReply("v1/gateway/attributes", attrs);
+          }
+        }
+      }
+    }
+  }
+
   Serial.printf("[nbiot-mqtt] commandLog %ld -> %s%s\n", requestId, status,
-                (device && *device) ? " (gateway + node)" : "");
+                (device && *device) ? " (gateway telemetry + node telemetry + node attributes)" : "");
 }
 
 // {"method":"configurarModuloC",

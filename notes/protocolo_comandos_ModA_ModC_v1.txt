@@ -1,0 +1,115 @@
+MODULO-B / Protocolo comandos AB
+Introducción
+El rol de B como intermediario entre ModA y ModC se puede representar en este flujo:
+MODULOA -> "RPC PETICION" -> MODULOB -> LoRa petición -> ModuloC
+ModuloC -> LoRa respuesta -> MODULOB -> RPC respuesta como Telemetría -> MODULOA
+Punto clave: La conexión TCP/MQTT entre MODULOB y TB es permanente y bidireccional. MODULOA publica comandos, MODULOB los recibe en tiempo real a través de esa conexión abierta.
+RPC (remote procedure call)  COMANDO. TB (ThingsBoard framework)
+Conexión MODULOB a MODULOA  (TB) para recibir comandos
+Librería MQTT
+	AsyncMqttClient (ya incluida en B)
+	Configuración Inicial
+mqttClient.connect("xxx.yyy.zzzz", NNNNN , "DEVICE_TOKEN")
+(como con la telemetría )
+....
+mqttClient.setCleanSession(false)           // ← Persistencia sesión
+mqttClient.subscribe("v1/devices/me/rpc/request/+", QoS=1)
+Siguientes tareas
+Abre conexión TCP permanente
+Se mantiene activa aunque no haya datos
+Se suscribe al "topic" (canal) de comandos
+Tiene que desmultiplexar los comandos y la telemetría. Todo se envía por la misma conexión
+Manejar las desconexiones (reconexión automática)
+Si desconexión:
+  Esperar N segundos
+  Reintentar conexión
+  Si WiFi está OK -> reconectar a MQTT
+  Si WiFi cae -> esperar a que se recupere
+Recibir Comandos desde MODULOA
+Topic a suscribirse
+v1/devices/me/rpc/request/{requestId}
+Ejemplo:
+v1/devices/me/rpc/request/12345
+El {requestId} es único para cada comando y generado por MODULOA. Guardar para respuesta final
+Payload ejemplo (JSON)
+{
+  "method": "configurarModuloC",
+  "params": {
+    "moduloC_id": "NodoC-1",
+    "action": "frecuencia" | "umbral | otros .,",
+    "value": "freq_normal" | "freq_prealarma" | "freq_alarma"
+    // O para umbrales:
+    // "variable": "temp",
+    // "umbral_pre_on": 40.0, "umbral_pre_off": 35.0,
+    // "umbral_alarm_on": 60.0, "umbral_alarm_off": 55.0
+  }
+}
+Procesamiento en MODULOB
+Al recibir RPC:
+Extraer {requestId} del topic para luego confirmar la respuesta de C
+Parsear JSON
+Responder a TB inmediatamente: "comando recibido"
+Guardar comando en lista pendiente
+Enviar comando a ModuloC
+Esperar respuesta
+Código conceptual:
+onMqttMessage(topic, payload):
+  if "rpc/request" en topic:
+    requestId = extraer_del_topic(topic)
+    comando = parsear_json(payload)
+    responder_rpc(requestId, "enviado")
+    guardar_pendiente(requestId, comando)
+    enviar_lora(requestId, comando)
+Comunicación MODULOB ↔ MODULOC (LoRa)
+MODULOB -> ModuloC:
+  Enviar por LoRa
+MODULOB recibe respuesta de C:
+  Parsear
+  Publicar la respuesta como telemetría en MODULOA con su requestID original
+  Eliminar de pendientes
+Cuando ModuloC responde (confirmado, error o timeout):
+ModuloB Publica en: v1/devices/me/telemetry
+Contenido:
+{
+  "commandLog": {
+    "requestId": 12345,
+    "status": "confirmado" | "error" | "timeout",
+    "timestamp": 1694857234000
+  }
+}
+Control del Comando en MODULOA
+MODULOA recibe la telemetría
+Detecta "commandLog"
+Copia automáticamente a atributos del ModC
+Dashboard lee atributos (rápido)
+Histórico guardado en telemetría
+Estados del Comando
+Estado
+	Significado
+	enviado
+	RPC recibido, en tránsito a ModuloC
+	↓
+	confirmado
+	ModuloC procesó correctamente
+	✓
+	error
+	ModuloC rechazó comando
+	✓
+	timeout
+	Sin respuesta tras Tmax
+	✓
+	Flujo Temporal
+t=0s:   TB publica RPC request/12345
+t=0.1s: MODULOB recibe
+        Responde: request/12345 -> "enviado"
+        Guarda en pendientes
+        Envía a ModuloC por LoRa
+t=0-Tmax: Espera respuesta ModuloC
+t < Tmax:ModuloC responde por LoRa
+        ModuloB  publica telemetría:
+        {commandLog: {12345, "confirmado", timestamp}}
+t=Xs: ModuloA  procesa
+        Guarda estado del comando e histórico del comando
+t=Ys: Dashboard se actualiza
+        Muestra "Último comando: confirmado"
+Definir un T=max: Si no llegó respuesta: status="timeout"

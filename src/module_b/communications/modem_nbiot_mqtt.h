@@ -463,11 +463,14 @@ private:
   // one tick is normal (requests 9 and 10 did exactly that on 2026-10-05), and
   // the one discarded would have been an "enviado" that Module A was waiting on.
   //
-  // Four deep: an outcome and its mirror for two commands at once.
-  static const uint8_t kRpcReplyQueue = 4;
+  // Eight deep. Each outcome now produces THREE publishes - commandLog on the
+  // gateway (what the protocol document specifies), the same record mirrored on
+  // the node, and the node's attributes - and two commands can land in one tick,
+  // as requests 9 and 10 did on 2026-10-05.
+  static const uint8_t kRpcReplyQueue = 8;
   struct RpcReply {
     char topic[NbiotProtocol::kMqttTopicLen] = {0};
-    char payload[320] = {0};
+    char payload[512] = {0};  // the node mirror carries commandLog + one field per threshold
   };
   RpcReply _rpcReplies[kRpcReplyQueue];
   uint8_t _rpcReplyHead = 0;   // index of the next one to send

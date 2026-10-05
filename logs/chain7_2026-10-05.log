@@ -1,0 +1,60 @@
+=== COM10 abierto, capturando 1800s (el open resetea la placa) ===
+[   1.9s] [nbiot-mqtt] -> AT+CEREG?
+[   1.9s] [nbiot-mqtt] <- +CEREG: 1,2
+[   1.9s] [nbiot-mqtt] <- OK
+[   3.7s] [nbiot-mqtt] -> AT+CEREG?
+[   3.7s] [nbiot-mqtt] <- +IP: 10.0.0.1
+[   3.7s] [nbiot-mqtt] <- +CEREG: 5
+[   3.7s] [nbiot-mqtt] <- +CEREG: 1,5
+[   3.7s] [nbiot-mqtt] <- OK
+[   3.7s] [nbiot-mqtt] -> AT+CGPADDR=0
+[   3.7s] [nbiot-mqtt] <- +CGPADDR: 0,"10.0.0.1"
+[   3.7s] [nbiot-mqtt] <- OK
+[   3.7s] [nbiot-mqtt] -> AT+CSQ
+[   3.7s] [nbiot-mqtt] <- +CSQ: 31,0
+[   3.7s] [nbiot-mqtt] <- OK
+[   3.7s] [nbiot-mqtt] -> AT+CCLK?
+[   3.7s] [nbiot-mqtt] <- +CCLK: 26/10/05,11:27:30+08
+[   3.7s] [nbiot-mqtt] <- OK
+[   3.7s] [nbiot-mqtt] network time acquired: epoch 1791199650000 ms - uplink readings will carry per-reading ts
+[   3.7s] [nbiot-mqtt] state ATTACHING -> MQTT_CONNECT
+[   3.7s] [nbiot-mqtt] -> AT+QMTCFG="keepalive",0,120
+[   3.7s] [nbiot-mqtt] <- OK
+[   3.7s] [nbiot-mqtt] -> AT+QMTCFG="session",0,0
+[   3.7s] [nbiot-mqtt] <- OK
+[   3.7s] [nbiot-mqtt] -> AT+QMTOPEN=0,"test-moduloa.home.kg",18831
+[   4.0s] [nbiot-mqtt] <- OK
+[   4.3s] [nbiot-mqtt] <- +QMTOPEN: 0,0
+[   4.3s] [nbiot-mqtt] -> AT+QMTCONN=0,"CON-1","QRPJgyk5COJPCavycmpp"
+[   4.3s] [nbiot-mqtt] <- OK
+[   5.3s] [nbiot-mqtt] <- +QMTCONN: 0,0,0
+[   5.3s] [nbiot-mqtt] -> AT+QMTSUB=0,1,"v1/devices/me/rpc/request/+",1
+[   5.3s] [nbiot-mqtt] <- OK
+[   5.9s] [nbiot-mqtt] <- +QMTSUB: 0,1,0,1
+[   5.9s] [nbiot-mqtt] -> AT+QMTSUB=0,2,"v1/gateway/rpc",1
+[   5.9s] [nbiot-mqtt] <- OK
+[   6.5s] [nbiot-mqtt] <- +QMTSUB: 0,2,0,1
+[   6.5s] [nbiot-mqtt] downlink live - announcing the nodes next
+[   6.5s] [nbiot-mqtt] announcing NodoC-1 to the gateway
+[   6.5s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/gateway/connect"
+[   6.5s] [nbiot-mqtt] payload (20 bytes): {"device":"NodoC-1"}
+[   6.5s] [nbiot-mqtt] <- OK
+[   6.8s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[   6.8s] [nbiot-mqtt] announcing NodoC-2 to the gateway
+[   6.8s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/gateway/connect"
+[   6.8s] [nbiot-mqtt] payload (20 bytes): {"device":"NodoC-2"}
+[   6.8s] [nbiot-mqtt] <- OK
+[   6.8s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[   6.8s] [nbiot-mqtt] announcing NodoC-3 to the gateway
+[   6.8s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/gateway/connect"
+[   6.8s] [nbiot-mqtt] payload (20 bytes): {"device":"NodoC-3"}
+[   6.8s] [nbiot-mqtt] <- OK
+[   7.1s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[   7.1s] [nbiot-mqtt] 3 node(s) announced - downlink live
+[   7.1s] [nbiot-mqtt] state MQTT_CONNECT -> IDLE
+[  21.5s] [nbiot-mqtt] -> AT+CSQ
+[  21.5s] [nbiot-mqtt] <- +CSQ: 31,0
+[  21.5s] [nbiot-mqtt] <- OK
+[  32.0s] +RCV addr=4 len=70 rssi=-43 snr=13 data="25.13,46.71,944.21,5684.85,0.00,0.00,0.00,637.00,0.00,0.00,0.00,0.00,0"
+[  34.2s] +RCV addr=4 len=30 rssi=-43 snr=12 data="STAT,54,0,1,10100,54,3120,86,0"
+[  34.2s]   node health: charge 86% (3120 mV at the sense pin)

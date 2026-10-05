@@ -248,6 +248,7 @@
 // because the CFG parser and the boot-seed block both run long before that.
 static void seedThresholds();
 static bool setThresholdByName(const char *key, float value);
+static float *thresholdSlot(const char *key);
 
 // ---------- Activity LED ----------
 // The ESP32-S3 module's own RGB LED (WS2812 on GPIO48, PIN_NEOPIXEL in the
@@ -955,8 +956,30 @@ static bool applyConfigCommand(const char *payload, uint8_t len, char *ackPayloa
       // The ACK echoes back the value the node STORED, so a dashboard showing a
       // threshold is showing what the node is really using rather than what it was
       // asked to use.
-      } else if (setThresholdByName(key, (float)atof(valueStr))) {
-        snprintf(appliedKv, sizeof(appliedKv), "%s=%s", key, valueStr);
+      // THE ACK REPORTS WHAT WAS STORED, NOT WHAT ARRIVED.
+      //
+      // This used to echo valueStr - the characters Module A sent - which proves
+      // only that the key matched a rule. The comment above has always claimed it
+      // echoed the stored value; now it does. Module A uses this to display the
+      // threshold the node is really using, so an echo of the request would make
+      // the dashboard agree with itself by construction and never reveal a
+      // disagreement.
+      //
+      // Formatted with %.2f and then trimmed, rather than %g: this toolchain's
+      // nano-newlib snprintf cannot be relied on for the rarer conversions - the
+      // same reason appendI64() exists instead of %lld - and a format specifier
+      // that silently emits nothing would put a malformed ACK on the air.
+      } else if (float *slot = thresholdSlot(key)) {
+        *slot = (float)atof(valueStr);
+        char num[20];
+        snprintf(num, sizeof(num), "%.2f", (double)*slot);
+        char *dot = strchr(num, '.');
+        if (dot) {
+          char *end = num + strlen(num) - 1;
+          while (end > dot && *end == '0') *end-- = '\0';
+          if (end == dot) *end = '\0';
+        }
+        snprintf(appliedKv, sizeof(appliedKv), "%s=%s", key, num);
 
       } else {
         matched = false;
@@ -2151,7 +2174,13 @@ static void seedThresholds() {
 // "pm25_alarma_off". Returns false if the name matches no rule, so an unknown key
 // is reported rather than silently accepted - a threshold that looks applied but
 // is not is the worst outcome available here.
-static bool setThresholdByName(const char *key, float value) {
+// Resolves "temp_pre_on" to the exact cell the alarm logic reads, or nullptr.
+//
+// Split out of setThresholdByName so the ACK can READ BACK what was stored
+// instead of echoing the string that arrived - see the call site. One lookup
+// for both directions means the value Module A is told cannot disagree with
+// the value this node compares against.
+static float *thresholdSlot(const char *key) {
   static const struct { const char *suffix; uint8_t idx; } kSuffix[] = {
       {"_pre_off", THR_PRE_OFF},
       {"_pre_on", THR_PRE_ON},
@@ -2173,11 +2202,17 @@ static bool setThresholdByName(const char *key, float value) {
     for (size_t i = 0; i < ALARM_RULE_COUNT; i++) {
       if (strlen(kAlarmRules[i].name) != namelen) continue;
       if (strncmp(kAlarmRules[i].name, key, namelen) != 0) continue;
-      g_thr[i][kSuffix[sfx].idx] = value;
-      return true;
+      return &g_thr[i][kSuffix[sfx].idx];
     }
   }
-  return false;
+  return nullptr;
+}
+
+static bool setThresholdByName(const char *key, float value) {
+  float *slot = thresholdSlot(key);
+  if (!slot) return false;
+  *slot = value;
+  return true;
 }
 
 // Did this rule's sensor actually produce a reading this cycle?
