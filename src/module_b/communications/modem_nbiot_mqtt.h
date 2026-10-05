@@ -428,13 +428,44 @@ private:
   //
   // The gap guard is load-bearing, not caution: see DOWNLINK_RETRY_MIN_GAP_MS.
   int deliverableIndexFor(const char *device) const {
+    // ONE COMMAND PER NODE PER WINDOW.
+    //
+    // main.cpp runs its downlink hook on every frame received, and a node sends
+    // several per window - telemetry, then its ACK, then STAT. Checking only
+    // whether THIS slot was recently sent meant the second queued command went
+    // out on the node's ACK frame and the third on its STAT frame, by which
+    // point the node had closed its listen window and was transmitting. Both
+    // were lost and had to be retried a window later.
+    //
+    // Observed with five commands queued at once on 2026-10-05: it drained one
+    // per window anyway, but burned two frames each time to do it.
+    //
+    // So if ANYTHING for this node went out within the gap, the node is mid-
+    // transmission and deaf: hold the rest.
     for (uint8_t i = 0; i < kNodeCmdQueue; i++) {
       const NodeCommand &nc = _nodeCmds[i];
       if (!nc.pending || strcmp(nc.device, device) != 0) continue;
-      if (!nc.awaitingAck) return (int)i;
-      if (millis() - nc.lastSentMs >= DOWNLINK_RETRY_MIN_GAP_MS) return (int)i;
+      if (nc.awaitingAck && millis() - nc.lastSentMs < DOWNLINK_RETRY_MIN_GAP_MS) return -1;
     }
-    return -1;
+
+    // OLDEST FIRST, so commands reach the node in the order Module A sent them.
+    // Slots are handed out by first-free, so slot order is not arrival order -
+    // and when two commands set the same threshold to different values, the one
+    // that wins must be the one sent last. Age rather than the raw stamp, so a
+    // millis() rollover compares correctly.
+    int best = -1;
+    uint32_t bestAge = 0;
+    const uint32_t now = millis();
+    for (uint8_t i = 0; i < kNodeCmdQueue; i++) {
+      const NodeCommand &nc = _nodeCmds[i];
+      if (!nc.pending || strcmp(nc.device, device) != 0) continue;
+      const uint32_t age = now - nc.queuedMs;
+      if (best < 0 || age > bestAge) {
+        best = (int)i;
+        bestAge = age;
+      }
+    }
+    return best;
   }
 
   int awaitingAckIndexFor(const char *device) const {

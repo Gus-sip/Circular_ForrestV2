@@ -766,9 +766,14 @@ void ModemNBIoTMqtt::publishCommandLogApplied(long requestId, const char *status
     if (a > 0 && (size_t)a < sizeof(attrs)) {
       size_t ap = (size_t)a;
       // The record without its {"commandLog": wrapper - reuse, do not rebuild.
-      const char *inner = strstr(payload, "\"commandLog\":");
+      // sizeof-1 for the length, not a hand-counted offset. Counting it by eye
+      // gave 15 for a 13-character key and ate the "{\"" of "{\"requestId\"",
+      // putting {"NodoC-3":{"commandLog":requestId":11,... on the wire - valid
+      // MQTT carrying invalid JSON, which ThingsBoard drops without complaint.
+      static const char kKey[] = "\"commandLog\":";
+      const char *inner = strstr(payload, kKey);
       if (inner) {
-        inner += 15;  // past "commandLog":
+        inner += sizeof(kKey) - 1;
         const size_t ilen = strlen(inner);
         if (ilen >= 1 && ap + ilen + 8 < sizeof(attrs)) {
           memcpy(attrs + ap, inner, ilen - 1);  // drop payload's outer closing brace
@@ -777,7 +782,10 @@ void ModemNBIoTMqtt::publishCommandLogApplied(long requestId, const char *status
           if (detail && *detail && strcmp(status, "confirmado") == 0 && strchr(detail, '=')) {
             ap += appendKvAsJson(attrs + ap, sizeof(attrs) - ap, detail);
           }
-          if (ap + 3 < sizeof(attrs)) {
+          // TWO braces: one closes the per-device object, one closes the
+          // envelope. {"NodoC-3":{ ... }} - the envelope's was missing.
+          if (ap + 4 < sizeof(attrs)) {
+            attrs[ap++] = '}';
             attrs[ap++] = '}';
             attrs[ap] = 0;
             queueRpcReply("v1/gateway/attributes", attrs);
