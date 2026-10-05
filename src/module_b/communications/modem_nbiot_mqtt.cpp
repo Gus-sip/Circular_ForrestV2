@@ -630,16 +630,28 @@ void ModemNBIoTMqtt::handleConfigurarModuloC(const NbiotProtocol::MqttMessage &m
     }
     snprintf(cfg, sizeof(cfg), "CFG,INTERVAL=%u", secs);
 
-  } else if (strcmp(action, "umbral") == 0) {
-    // Every key except the routing fields is forwarded verbatim as CFG,K=V. The
-    // node owns its own vocabulary: it applies what it recognises and ACKs only
-    // that, so Module B never has to know the threshold names and cannot drift
-    // out of step with them when a magnitude is added.
+  } else if (strcmp(action, "umbral") == 0 || strcmp(action, "umbrales_de1variable") == 0) {
+    // THE MAGNITUDE AND THE THRESHOLD ARRIVE IN SEPARATE FIELDS, and have to be
+    // recombined before the node will recognise anything. Observed live on
+    // 2026-10-05, and not what the protocol document shows:
     //
-    // Accepts both naming schemes seen so far - the dashboard's temp_pre_on and
-    // the protocol document's umbral_pre_on - because the node matches on suffix.
+    //   {"action":"umbrales_de1variable","variable":"temp",
+    //    "umbral_pre_off":48,"umbral_pre_on":50,
+    //    "umbral_alarm_off":55,"umbral_alarm_on":60}
+    //
+    // The node addresses a threshold as <magnitude><suffix> - temp_pre_on - so a
+    // key of "umbral_pre_on" matches no rule and is silently ignored. Every
+    // threshold in the command would be dropped and the node would NACK the lot,
+    // which reads like a firmware fault and is really a naming mismatch.
+    //
+    // So "umbral_" is rewritten to "<variable>_". A key that already carries its
+    // magnitude (temp_pre_on, as the dashboard's own table uses) passes through
+    // untouched - both forms work.
+    char variable[24] = {0};
+    NbiotProtocol::jsonString(params, "variable", variable, sizeof(variable));
+
     const char *cur = params;
-    char k[32], v[32];
+    char k[40], v[32];
     size_t pos = (size_t)snprintf(cfg, sizeof(cfg), "CFG");
     bool any = false;
     while (NbiotProtocol::jsonNextPair(cur, k, sizeof(k), v, sizeof(v))) {
@@ -647,7 +659,13 @@ void ModemNBIoTMqtt::handleConfigurarModuloC(const NbiotProtocol::MqttMessage &m
           strcmp(k, "variable") == 0 || strcmp(k, "value") == 0) {
         continue;  // routing, not a threshold
       }
-      int n = snprintf(cfg + pos, sizeof(cfg) - pos, ",%s=%s", k, v);
+
+      int n;
+      if (strncmp(k, "umbral_", 7) == 0 && variable[0]) {
+        n = snprintf(cfg + pos, sizeof(cfg) - pos, ",%s_%s=%s", variable, k + 7, v);
+      } else {
+        n = snprintf(cfg + pos, sizeof(cfg) - pos, ",%s=%s", k, v);
+      }
       if (n > 0 && (size_t)n < sizeof(cfg) - pos) {
         pos += (size_t)n;
         any = true;
@@ -656,6 +674,12 @@ void ModemNBIoTMqtt::handleConfigurarModuloC(const NbiotProtocol::MqttMessage &m
     if (!any) {
       refuse("umbral with no threshold keys");
       return;
+    }
+    if (strncmp(params, "", 0) == 0 && !variable[0]) {
+      // Not fatal - keys may already carry their magnitude - but worth saying,
+      // because if they do not, the node will refuse every one of them.
+      Serial.println("[nbiot-mqtt] umbral without a \"variable\" field - keys must "
+                     "already name their magnitude");
     }
 
   } else {
