@@ -81,6 +81,12 @@ public:
   // acknowledged "enviado". Uses the same single publish slot as RPC replies.
   void publishCommandLog(long requestId, const char *status);
 
+  // Same record plus a "detail" field: the keys the node actually applied, or the
+  // reason it refused. The protocol document defines requestId/status/timestamp;
+  // this adds to that rather than changing it, so a dashboard reading only the
+  // documented fields is unaffected.
+  void publishCommandLogApplied(long requestId, const char *status, const char *detail);
+
 private:
   void handleConfigurarModuloC(const NbiotProtocol::MqttMessage &msg, const char *idStr);
 
@@ -166,6 +172,11 @@ public:
   // Called by main.cpp when an "ACK,..." packet comes back from a node. Reports
   // the outcome and frees that device's slot.
   void onNodeCommandAck(const char *device, const char *ackPayload);
+
+  // The node understood the command and applied NOTHING. Reported as the
+  // protocol's "error" state immediately, rather than being left to time out as
+  // though the node were unreachable.
+  void onNodeCommandNack(const char *device, const char *reason);
 
 private:
   enum class CmdKind : uint8_t { PLAIN, QMTOPEN, QMTCONN, QMTPUB, QMTSUB };

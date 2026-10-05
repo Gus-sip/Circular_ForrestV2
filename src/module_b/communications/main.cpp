@@ -347,6 +347,14 @@ void loop() {
       continue;
     }
 
+    // The node understood the command and applied nothing. Checked BEFORE the
+    // telemetry parser for the same reason as ACK - it is a reply, not a reading,
+    // and would otherwise be dropped as "wrong field count" with no trace.
+    if (msg.length >= 5 && strncmp(msg.payload, "NACK,", 5) == 0) {
+      modem.onNodeCommandNack(nodeName, msg.payload + 5);
+      continue;
+    }
+
     // STAT - the node's own health packet, not telemetry.
     //
     //   STAT,<wake>,<resetReason>,<boots>,<bme><bmv><co2><co><wind>,<ageTicks>,<mV>,<pct>

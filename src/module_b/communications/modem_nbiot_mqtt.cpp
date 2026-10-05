@@ -447,6 +447,24 @@ void ModemNBIoTMqtt::onNodeCommandDelivered(const char *device) {
   Serial.printf("[nbiot-mqtt] sent to %s over LoRa, awaiting ACK\n", _nodeCmds[i].device);
 }
 
+void ModemNBIoTMqtt::onNodeCommandNack(const char *device, const char *reason) {
+  int i = awaitingAckIndexFor(device);
+  if (i < 0) i = undeliveredIndexFor(device);
+  if (i < 0) return;
+  NodeCommand &nc = _nodeCmds[i];
+
+  if (nc.viaCommandLog) {
+    publishCommandLogApplied(nc.rpcId, "error", reason);
+  } else {
+    char reply[224];
+    snprintf(reply, sizeof(reply), "{\"device\":\"%s\",\"id\":%ld,\"data\":{\"error\":\"%s\"}}",
+             nc.device, nc.rpcId, reason);
+    queueRpcReply(MQTT_TOPIC_GATEWAY_RPC, reply);
+  }
+  Serial.printf("[nbiot-mqtt] %s REJECTED the command: %s\n", nc.device, reason);
+  nc = NodeCommand{};
+}
+
 void ModemNBIoTMqtt::onNodeCommandAck(const char *device, const char *ackPayload) {
   // Match the ACK to the command awaiting one FROM THAT NODE. With several
   // commands in flight to different nodes, clearing the wrong one would report
@@ -461,7 +479,11 @@ void ModemNBIoTMqtt::onNodeCommandAck(const char *device, const char *ackPayload
   // as the RPC result, so a clamp on the node is visible in ThingsBoard.
   const char *body = strncmp(ackPayload, "ACK,", 4) == 0 ? ackPayload + 4 : ackPayload;
   if (_nodeCmd.viaCommandLog) {
-    publishCommandLog(_nodeCmd.rpcId, "confirmado");
+    // Carries WHAT was applied, not just that something was. The node ACKs only
+    // the keys it actually took, so this is the difference between Module A
+    // believing a threshold changed and being able to show the value the node is
+    // really using.
+    publishCommandLogApplied(_nodeCmd.rpcId, "confirmado", body);
   } else {
     char reply[224];
     snprintf(reply, sizeof(reply), "{\"device\":\"%s\",\"id\":%ld,\"data\":{\"applied\":\"%s\"}}",
@@ -506,6 +528,11 @@ static size_t appendI64(char *out, int64_t v);  // defined below, near the paylo
 // and holding an RPC open that long is what made commands look like failures when
 // they were merely slow.
 void ModemNBIoTMqtt::publishCommandLog(long requestId, const char *status) {
+  publishCommandLogApplied(requestId, status, nullptr);
+}
+
+void ModemNBIoTMqtt::publishCommandLogApplied(long requestId, const char *status,
+                                              const char *detail) {
   // Built by hand rather than with one snprintf because the timestamp is an
   // int64 and %lld is NOT reliably compiled into this toolchain's snprintf -
   // nano newlib often omits it, which is why appendI64() exists at all. A %llu
@@ -515,6 +542,20 @@ void ModemNBIoTMqtt::publishCommandLog(long requestId, const char *status) {
                    "{\"commandLog\":{\"requestId\":%ld,\"status\":\"%s\"", requestId, status);
   if (n < 0) return;
   size_t pos = (size_t)n;
+
+  // Quotes and backslashes in `detail` would break the JSON. The node's ACK body
+  // is "k=v,k=v" and its NACK a short phrase, so neither should contain them -
+  // but a malformed packet must not be able to emit invalid telemetry, so they
+  // are dropped rather than trusted.
+  if (detail && *detail && pos + 24 < sizeof(payload)) {
+    pos += (size_t)snprintf(payload + pos, sizeof(payload) - pos, ",\"detail\":\"");
+    for (const char *p = detail; *p && pos < sizeof(payload) - 8; p++) {
+      if (*p == '"' || *p == '\\' || (unsigned char)*p < 0x20) continue;
+      payload[pos++] = *p;
+    }
+    if (pos < sizeof(payload) - 4) payload[pos++] = '"';
+    payload[pos] = 0;
+  }
 
   if (_haveNetTime && pos + 40 < sizeof(payload)) {
     pos += (size_t)snprintf(payload + pos, sizeof(payload) - pos, ",\"timestamp\":");

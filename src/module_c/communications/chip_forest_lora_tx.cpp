@@ -207,6 +207,43 @@
 // confirm a doubtful signal, not to delay an obvious one.
 #define PREALARM_CONFIRM_MS 600000UL  // 10 minutes
 
+// ---------------------------------------------------------------------------
+// MEASUREMENT BUILD ONLY - REMOVE BEFORE DEPLOYMENT
+//
+// Pins the alarm state so each of the three power profiles can be measured on a
+// PPK2 for as long as the meter needs, instead of waiting for real smoke:
+//
+//   0  not forced - normal firmware, the state machine runs as designed
+//   1  pinned PRE-ALARM
+//   2  pinned ALARM
+//
+// When forced, updateAlarmState() returns immediately: the state can neither
+// clear nor escalate, so a pinned PRE-ALARM stays pre-alarm instead of being
+// promoted by the 10-minute confirmation window.
+//
+// WHY THIS IS DANGEROUS TO LEAVE IN. A node built with 1 or 2 is DEAF TO ITS OWN
+// SENSORS - it reports a fire that is not there and, worse, could never report one
+// that was, because the state is frozen. It also never sleeps, so on a battery it
+// is flat within hours. Every boot prints a banner saying so, and loop() repeats
+// it, precisely so a test build cannot be mistaken for a real one.
+#ifndef FORCE_ALARM_STATE
+#define FORCE_ALARM_STATE 0
+#endif
+
+// The status LED is a measurement confound in the raised states.
+//
+// ledOff() only runs on the way into deep sleep, and the raised states never
+// sleep - so the WS2812 stays lit from the last transmit for the whole test and
+// its draw lands in the numbers. Set to 1 to keep it dark throughout.
+//
+// Worth knowing beyond this test: that is REAL behaviour, not a test artefact. A
+// node genuinely in alarm leaves its LED lit indefinitely, which is wasted current
+// at exactly the moment the battery matters most.
+#ifndef FORCE_LED_OFF
+#define FORCE_LED_OFF 0
+#endif
+// ---------------------------------------------------------------------------
+
 // Defined further down, beside kAlarmRules which they depend on. Declared here
 // because the CFG parser and the boot-seed block both run long before that.
 static void seedThresholds();
@@ -320,6 +357,11 @@ static bool g_ledBegun = false;
 
 static void ledWrite(uint8_t r, uint8_t g, uint8_t b, bool level) {
   (void)level;  // legacy plain-LED argument, no longer meaningful
+#if FORCE_LED_OFF
+  // Forced dark for a power measurement - see FORCE_LED_OFF. Done HERE rather
+  // than at the call sites so no colour can slip through a path I missed.
+  r = g = b = 0;
+#endif
   if (!g_ledBegun) {
     g_statusLed.begin();
     g_ledBegun = true;
@@ -964,9 +1006,28 @@ static void handleInboundMessage(const LoRaMessage &msg) {
     return;
   }
 
+  // SILENCE IS THE WRONG ANSWER TO A COMMAND WE UNDERSTOOD BUT COULD NOT APPLY.
+  //
+  // This used to just return. Module B cannot tell silence-because-rejected from
+  // silence-because-out-of-range, so it waited out the full downlink timeout and
+  // reported "timeout" - the wrong one of the protocol's four states, a quarter of
+  // an hour after the fact. The operator is told the node is unreachable when it
+  // is sitting there having refused the command.
+  //
+  // A CFG we recognised but applied nothing from now gets an explicit NACK, which
+  // Module B turns into status "error" immediately.
+  const bool looksLikeCfg = (msg.length >= 4 && strncmp(msg.payload, "CFG,", 4) == 0);
+
   char kv[200];
   if (!applyConfigCommand(msg.payload, msg.length, kv, sizeof(kv))) {
-    return;  // not a recognized CFG command, or nothing in it applied - no ACK
+    if (looksLikeCfg && radioReady) {
+      const char *nack = "NACK,no recognized keys";
+      bool sent = radio.send(LORA_RX_ADDR, nack, (uint8_t)strlen(nack));
+      Serial.printf("[cfg] nothing applied - NACK sent (%s)\n", sent ? "ok" : "FAILED");
+    } else if (looksLikeCfg) {
+      Serial.println("[cfg] nothing applied, and the radio is down - cannot NACK");
+    }
+    return;
   }
 
   if (!radioReady) {
@@ -1319,6 +1380,19 @@ void setup() {
 
   Serial.println();
   Serial.println("=== CHIP FOREST + LoRa TX: sensors -> RYLR998 -> ground station ===");
+#if FORCE_ALARM_STATE
+  g_alarmState = (FORCE_ALARM_STATE >= 2) ? ALARM_FIRE : ALARM_PREALARM;
+  g_alarmClearRun = 0;
+  g_prealarmMs = 0;
+  Serial.println("********************************************************");
+  Serial.printf("*** TEST BUILD - ALARM STATE FORCED TO %-14s ***\n",
+                (FORCE_ALARM_STATE >= 2) ? "ALARM" : "PRE-ALARM");
+  Serial.println("*** The node is DEAF to its own sensors and NEVER     ***");
+  Serial.println("*** sleeps. NOT FOR DEPLOYMENT. Rebuild without       ***");
+  Serial.println("*** FORCE_ALARM_STATE before this board goes out.     ***");
+  Serial.println("********************************************************");
+  Serial.flush();
+#endif
   Serial.flush();
 
   esp_reset_reason_t rr = esp_reset_reason();
@@ -2185,6 +2259,11 @@ static const char *alarmStateName(AlarmState st) {
 // Raising is instant and lowering is slow, deliberately: the cost of being late to
 // a fire is not symmetric with the cost of staying alert a few reads too long.
 static void updateAlarmState() {
+#if FORCE_ALARM_STATE
+  // Frozen for a power measurement - no escalation, no clearing, no reading of
+  // the sensors at all. See FORCE_ALARM_STATE.
+  return;
+#endif
   const char *why = "";
   const AlarmState want = evaluateRules(&why);
 
@@ -2821,6 +2900,18 @@ void loop() {
   // transmitting hard and still have no idea it was in alarm. That is the whole
   // path from "this node detected a fire" to "somebody is told".
   if (g_alarmState >= ALARM_PREALARM) {
+#if FORCE_ALARM_STATE
+    // Repeat the warning on a running board: someone reading the serial half an
+    // hour in should not have to have seen the boot banner to know this is a test
+    // build sitting in a fake alarm.
+    static uint32_t lastForcedWarn = 0;
+    if (millis() - lastForcedWarn > 30000) {
+      lastForcedWarn = millis();
+      Serial.printf("[TEST BUILD] alarm state FORCED to %s - not from the sensors\n",
+                    (FORCE_ALARM_STATE >= 2) ? "ALARM" : "PRE-ALARM");
+      Serial.flush();
+    }
+#endif
     // Accumulate before evaluating, so the window is current when updateAlarmState
     // tests it. Only pre-alarm is timed; full alarm has nothing left to confirm.
     static uint32_t lastAccumMs = 0;
