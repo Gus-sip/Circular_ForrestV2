@@ -603,7 +603,33 @@ static uint16_t readingsPerPacket(uint16_t sensorReadEvery, uint16_t loraTransEv
 // cycle and the BMV080's startup delay that follows it, so it is far wider than
 // when the slots merely ran back to back.
 #define SENSOR_READ_WINDOW_MS 45000UL
-#define SLEEP_SKIP_SEN0466 1            // 210s settle: out of the cycle until we sleep through it
+#define SLEEP_SKIP_SEN0466 1            // 210s settle: out of the SLEEPING cycle - see below
+
+// The SEN0466's stabilisation time, from its datasheet and confirmed by the
+// 210s the bring-up has always quoted. It needs this much CONTINUOUS power; any
+// interruption restarts it, which is why recoverRailsAfterHeater() now leaves the
+// 5V rail alone.
+#define SEN0466_WARMUP_MS 210000UL
+
+// WHY THE CO SENSOR CAN RUN IN PRE-ALARM AND ALARM BUT NOT IN NORMAL OPERATION.
+//
+// In the normal cycle the node sleeps, and sleeping cuts both rails. 210s of
+// warm-up per wake against a 17.8s tick is not a trade-off, it is impossible - so
+// the sensor stays out, as it always has.
+//
+// In PRE-ALARM and ALARM the node does not sleep at all. The rails stay up
+// continuously, so the warm-up can run once and then the sensor reads for as long
+// as the state lasts. It becomes available about 3.5 minutes in - comfortably
+// inside the 10-minute pre-alarm confirmation window, which is exactly the moment
+// somebody wants to know whether there is carbon monoxide.
+//
+// What this does NOT do is let CO *trigger* anything: it cannot contribute to
+// entering pre-alarm, because it is not measured until pre-alarm has already been
+// entered. It is a confirmation input, not a detection input. Making CO a
+// detector means keeping the 5V rail powered through the sleeping cycle, and the
+// sensor has no sleep mode - a measured ~15mA, permanently. That is a battery
+// decision, not a firmware one.
+#define SEN0466_RUN_WHEN_AWAKE 1
 
 // A power-cycled board must always give a window to reflash in. Deep sleep drops
 // the USB-Serial/JTAG, so without this the port would vanish seconds after boot
@@ -1908,11 +1934,34 @@ static const char *slotName(int slot) {
 // The rails are NOT brought back afterwards - a transmit is the last thing a tick
 // does before sleeping, and enterDeepSleep() switches them off anyway. On a tick
 // that both reads and transmits, the read has already finished by this point.
+// EXPERIMENTAL, defaults OFF. Keeps the 5V rail powered through the transmit.
+//
+// Cutting both rails for the transmit was the fix for a POWERON reset at
+// radio.send() - a genuine supply collapse - and that is not to be undone
+// lightly. But it was diagnosed when the board ran from SUPERCAPS, whose ESR
+// could not carry the radio's 151mA peak on top of the sensors. The supply has
+// since become a 10Ah lithium pack, which is a far stiffer source.
+//
+// This matters because the SEN0466 needs 210s of CONTINUOUS 5V and the node
+// transmits every 25.5s in alarm, so with both rails cut the CO sensor can never
+// warm up - not a tuning problem, an impossibility. Keeping 5V up through the
+// transmit is the only thing that makes CO measurable without a hardware change.
+//
+// Set to 1 only with a board on the bench and the log watched for a POWERON
+// reset after "[tx] rails". If it resets, the answer is hardware, not firmware.
+#ifndef TX_KEEP_5V_RAIL
+#define TX_KEEP_5V_RAIL 0
+#endif
+
 static void powerDownSensorRails() {
   g_railsUp = false;
   digitalWrite(PIN_PCB_EN_A, (PIN_PCB_EN_A_ACTIVE == LOW) ? HIGH : LOW);
+#if !TX_KEEP_5V_RAIL
   digitalWrite(PIN_PCB_EN_B, (PIN_PCB_EN_B_ACTIVE == LOW) ? HIGH : LOW);
   Serial.println("[tx] sensor rails off for the transmit");
+#else
+  Serial.println("[tx] 3V3 off for the transmit, 5V HELD UP (TX_KEEP_5V_RAIL)");
+#endif
   Serial.flush();
   delay(TX_RAIL_SETTLE_MS);
 }
@@ -2069,7 +2118,22 @@ static void storeCurrentReading() {
   StoredReading &r = g_store[g_storeCount++];
   r.temp = g_temp; r.hum = g_hum; r.pres = g_pres; r.gas = g_gas;
   r.pm1 = g_pm1; r.pm25 = g_pm25; r.pm10 = g_pm10;
-  r.co2 = g_co2; r.co = g_co; r.coTemp = g_coTemp;
+  r.co2 = g_co2;
+
+  // A SENSOR THAT IS NOT READ MUST NOT PUBLISH A NUMBER.
+  //
+  // g_co sits at 0.00 while the SEN0466 is disabled, and 0.00 ppm of CO is a
+  // perfectly plausible reading of clean air - so a node that is NOT MEASURING CO
+  // and a node measuring a healthy zero looked identical on the dashboard. An
+  // operator reading "CO 0.00" would conclude there is no carbon monoxide, when it
+  // means nobody is looking. This is the same failure as C1's frozen co2=663 that
+  // went unexplained for days, except published by design rather than by accident.
+  //
+  // -1 is already the payload's sentinel for "not reported" - chargePct, capMv and
+  // alarmState all use it - so Module B and the dashboard need no new vocabulary.
+  const bool coMeasured = sen0466Ready && g_sen0466Enabled;
+  r.co = coMeasured ? g_co : -1.0f;
+  r.coTemp = coMeasured ? g_coTemp : -1.0f;
   r.windAngle = g_windAngle; r.windSpeed = g_windSpeed;
   r.windValid = g_windValid ? 1 : 0;
   r.tickAge = g_wakeCount;  // absolute tick; converted to an age at transmit time
@@ -2765,16 +2829,29 @@ static bool sensorsDegraded() {
 // It costs the BMV080's startup delay once per read tick, which is the price of
 // reading everything in one wake rather than spreading it out.
 static void recoverRailsAfterHeater() {
-  Serial.println("[read] rail recovery after the BME690 heater");
+  // ONLY THE 3V3 RAIL IS CYCLED. This used to drop both.
+  //
+  // The recovery exists for one reason: the BMV080 will not start after the
+  // BME690's heater has run unless its supply is actually cycled. Both of those
+  // parts are on the 3V3 rail (PIN_PCB_EN_A / GPIO10). The 5V rail carries the
+  // SEN0466, the CM1106 and the Calypso, none of which are involved.
+  //
+  // Dropping 5V as well had a cost that was invisible until the timings were
+  // measured: the SEN0466 needs 210s of CONTINUOUS power to stabilise, and an
+  // 800ms outage every burst meant it could never accumulate that - not even in
+  // alarm, where the node never sleeps. The CO sensor was unusable by
+  // construction, and that is why it ended up excluded from the cycle entirely.
+  //
+  // Cycling only the rail that needs cycling is also simply more correct: the
+  // other three sensors were being power-cycled for no reason at all.
+  Serial.println("[read] 3V3 rail recovery after the BME690 heater (5V stays up)");
   Serial.flush();
 
   digitalWrite(PIN_PCB_EN_A, (PIN_PCB_EN_A_ACTIVE == LOW) ? HIGH : LOW);
-  digitalWrite(PIN_PCB_EN_B, (PIN_PCB_EN_B_ACTIVE == LOW) ? HIGH : LOW);
   delay(HEATER_RECOVERY_OFF_MS);
 
   g_railsUp = true;
   digitalWrite(PIN_PCB_EN_A, PIN_PCB_EN_A_ACTIVE);
-  digitalWrite(PIN_PCB_EN_B, PIN_PCB_EN_B_ACTIVE);
   delay(PIN_PCB_EN_SETTLE_MS);
 
   // The BMV080 needs its full startup window after any power cycle or it NoAcks -
@@ -2824,6 +2901,54 @@ static void readSentinels() {
                 statusName(g_bmeSt), g_temp, g_hum, statusName(g_coSt), g_co,
                 (unsigned long)(millis() - t0));
   Serial.flush();
+}
+
+// Brings the CO sensor up once the 5V rail has been continuously powered long
+// enough for it to be meaningful. Called on every pass of a state that does not
+// sleep; a no-op the rest of the time.
+//
+// The warm-up clock restarts whenever the rail drops, because a partially warmed
+// sensor reports confidently and wrongly - the failure mode this whole guard
+// exists to avoid.
+static uint32_t g_coWarmStartMs = 0;
+static bool g_coWarmRunning = false;
+
+static void sen0466MaintainWarmup() {
+#if SLEEP_SKIP_SEN0466 && SEN0466_RUN_WHEN_AWAKE
+  if (sen0466Ready && g_sen0466Enabled) return;  // already live
+
+  // g_railsUp tracks the 3V3 rail, which is cut for every transmit by design. The
+  // CO sensor only cares about 5V, so with TX_KEEP_5V_RAIL the warm-up clock must
+  // keep running across a transmit - otherwise it resets every 25.5s and never
+  // completes, which is exactly what the first bench run showed.
+#if !TX_KEEP_5V_RAIL
+  if (!g_railsUp) {
+    if (g_coWarmRunning) {
+      Serial.println("[co] 5V rail dropped - SEN0466 warm-up restarts from zero");
+      g_coWarmRunning = false;
+    }
+    return;
+  }
+#endif
+
+  if (!g_coWarmRunning) {
+    g_coWarmRunning = true;
+    g_coWarmStartMs = millis();
+    Serial.printf("[co] 5V rail up - warming the SEN0466, %lus before it is trusted\n",
+                  (unsigned long)(SEN0466_WARMUP_MS / 1000));
+    return;
+  }
+
+  const uint32_t waited = millis() - g_coWarmStartMs;
+  if (waited < SEN0466_WARMUP_MS) return;
+
+  sen0466Ready = sen0466.begin();
+  g_sen0466Enabled = sen0466Ready;
+  Serial.printf("[co] SEN0466 warmed %lus -> %s\n", (unsigned long)(waited / 1000),
+                sen0466Ready ? "LIVE, CO now measured and alarm-capable"
+                             : "begin() FAILED - still not measured");
+  if (!sen0466Ready) g_coWarmRunning = false;  // try again
+#endif
 }
 
 // BURST read - the expensive sensors, on their own slow schedule.
@@ -2979,6 +3104,10 @@ void loop() {
     }
     lastAccumMs = nowMs;
 
+    // Not sleeping, so the 5V rail stays up and the CO sensor can finally warm
+    // up. Becomes live ~3.5 min in, inside the 10-minute confirmation window.
+    sen0466MaintainWarmup();
+
     readFastSensorsOnce();
     updateAlarmState();
     storeCurrentReading();
@@ -2997,6 +3126,7 @@ void loop() {
   // ---- CONTINUOUS (bench) ----
   // Sample every pass, transmit on a timer. No sleeping, so the USB port stays up
   // and the LED stays watchable for as long as you need.
+  sen0466MaintainWarmup();
   readFastSensorsOnce();
   updateAlarmState();
   storeCurrentReading();
