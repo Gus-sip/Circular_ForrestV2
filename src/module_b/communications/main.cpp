@@ -327,7 +327,33 @@ void loop() {
     // send period. Anything we do before this send eats into that window.
     char nodeName[24];
     nbiotResolveNodeName(msg.senderAddr, nodeName, sizeof(nodeName));
-    {
+    // ONLY A TELEMETRY FRAME OPENS A WINDOW. STAT AND ACK DO NOT.
+    //
+    // Module C's order is: transmit telemetry -> hold the ~2s listen window ->
+    // transmit STAT. The window is BETWEEN those two frames. So by the time a
+    // STAT frame arrives here the node has already closed it and is
+    // transmitting; a downlink fired on STAT is lost for certain. Same for an
+    // ACK frame, which the node sends from inside the window and then leaves it.
+    //
+    // Firing on every received frame therefore wasted an attempt whenever a
+    // command happened to be queued between a node's telemetry and its STAT.
+    // Seen on requestId 0, 2026-10-06:
+    //
+    //   +RCV addr=4 data="STAT,4922,8,0,10100,63,3120,86,0"
+    //     -> downlink to NodoC-3: CFG,temp_pre_off=47,... (sent)
+    //   (no ACK; recovered 68s later by the retry)
+    //
+    // and on requestId 10 yesterday, fired on the node's own ACK frame.
+    //
+    // A telemetry frame is anything that is not one of the node's reply or
+    // status payloads. Identified by prefix because that is what distinguishes
+    // them on the wire - a reading row starts with a number or 'B,' for a batch.
+    const bool opensWindow =
+        !(msg.length >= 5 && strncmp(msg.payload, "STAT,", 5) == 0) &&
+        !(msg.length >= 4 && strncmp(msg.payload, "ACK,", 4) == 0) &&
+        !(msg.length >= 5 && strncmp(msg.payload, "NACK,", 5) == 0);
+
+    if (opensWindow) {
       // Ask by DEVICE, not "is anything pending": with a queue, the head may be
       // for a different node that has not woken up, and that must not stop this
       // one being served in the window it just opened.
