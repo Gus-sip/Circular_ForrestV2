@@ -187,11 +187,27 @@ inline void nbiotResolveNodeName(uint16_t addr, char *outName, size_t outCap) {
 // same token, no other change.
 #define MQTT_BROKER_HOST "test-moduloa.home.kg"
 #define MQTT_BROKER_PORT 18831
+// MQTT SESSION LABEL ONLY - NOT THE DEVICE NAME, AND DELIBERATELY NOT CHANGED.
+//
+// The device in ThingsBoard is called "CON-01". This string says "CON-1" and
+// that is harmless: ThingsBoard identifies the device by the ACCESS TOKEN below,
+// which arrives as the MQTT username. The client id is just the MQTT session
+// identifier.
+//
+// Confirmed on 2026-10-06, after the mismatch cost real time: the RPC debug
+// terminal targets "CON-01", there is no device named "CON-1", and B had been
+// connecting correctly the whole time.
+//
+// NOT changed to "CON-01" on purpose. Clean-session persistence is keyed on the
+// client id, so renaming it starts a fresh session at the broker and discards
+// anything queued for the old one - including commands published while B is
+// rebooting, which is exactly the delivery we rely on. The confusion is cheaper
+// to document than the dropped messages are to debug.
 #define MQTT_CLIENT_ID "CON-1"
 // ThingsBoard access-token auth: token goes in as the MQTT username, no
-// password. This is the gateway device's ("CON-1" in ThingsBoard, created
-// 2026-08-28 with "Is gateway" enabled to replace the earlier
-// "CON-MODB_TEST") token, not any individual node's - the hub publishes on
+// password. This is the gateway device's token - the device is "CON-01" in
+// ThingsBoard, created 2026-08-28 with "Is gateway" enabled to replace the
+// earlier "CON-MODB_TEST" - not any individual node's; the hub publishes on
 // nodes' behalf via the Gateway API (see modem_nbiot_mqtt.h).
 // EACH MODULE B BOARD HAS ITS OWN GATEWAY DEVICE AND ITS OWN TOKEN, and the token
 // is compiled in - so this line has to match the board being flashed, or telemetry
@@ -248,7 +264,7 @@ inline void nbiotResolveNodeName(uint16_t addr, char *outName, size_t outCap) {
 // ---------- Downlink: Module A -> Module B (-> Module C) ----------
 // Two subscriptions, because ThingsBoard addresses the gateway itself and its
 // child devices on different topics:
-//   MQTT_TOPIC_DEVICE_RPC_SUB  - RPC aimed at THIS device (the CON-1 gateway),
+//   MQTT_TOPIC_DEVICE_RPC_SUB  - RPC aimed at THIS device (the CON-01 gateway),
 //                                i.e. Module B's own settings. Response goes to
 //                                MQTT_TOPIC_DEVICE_RPC_RESP + the request id.
 //   MQTT_TOPIC_GATEWAY_RPC     - RPC aimed at a child device (NodoC-1 etc).
