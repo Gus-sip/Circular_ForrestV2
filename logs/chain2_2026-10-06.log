@@ -1,1 +1,734 @@
 === COM10 abierto, capturando 1800s (el open resetea la placa) ===
+[   0.3s] [nbiot-mqtt] urc: +IP: 10.0.0.1
+[   0.3s] [nbiot-mqtt] urc: +CEREG: 5
+[   0.3s] [nbiot-mqtt] -> AT+CEREG?
+[   0.3s] [nbiot-mqtt] <- +CEREG: 1,5
+[   0.6s] [nbiot-mqtt] <- OK
+[   0.6s] [nbiot-mqtt] -> AT+CGPADDR=0
+[   0.6s] [nbiot-mqtt] <- +CGPADDR: 0,"10.0.0.1"
+[   0.6s] [nbiot-mqtt] <- OK
+[   0.6s] [nbiot-mqtt] -> AT+CSQ
+[   0.6s] [nbiot-mqtt] <- +CSQ: 31,0
+[   0.6s] [nbiot-mqtt] <- OK
+[   0.6s] [nbiot-mqtt] -> AT+CCLK?
+[   0.6s] [nbiot-mqtt] <- +CCLK: 26/10/06,11:37:50+08
+[   0.6s] [nbiot-mqtt] <- OK
+[   0.6s] [nbiot-mqtt] network time acquired: epoch 1791286670000 ms - uplink readings will carry per-reading ts
+[   0.6s] [nbiot-mqtt] state ATTACHING -> MQTT_CONNECT
+[   0.6s] [nbiot-mqtt] -> AT+QMTCFG="keepalive",0,120
+[   0.6s] [nbiot-mqtt] <- OK
+[   0.6s] [nbiot-mqtt] -> AT+QMTCFG="session",0,0
+[   0.6s] [nbiot-mqtt] <- OK
+[   0.6s] [nbiot-mqtt] -> AT+QMTOPEN=0,"test-moduloa.home.kg",18831
+[   0.6s] [nbiot-mqtt] <- OK
+[   0.9s] [nbiot-mqtt] <- +QMTOPEN: 0,0
+[   0.9s] [nbiot-mqtt] -> AT+QMTCONN=0,"CON-1","QRPJgyk5COJPCavycmpp"
+[   1.2s] [nbiot-mqtt] <- OK
+[   2.2s] [nbiot-mqtt] <- +QMTCONN: 0,0,0
+[   2.2s] [nbiot-mqtt] -> AT+QMTSUB=0,1,"v1/devices/me/rpc/request/+",1
+[   2.2s] [nbiot-mqtt] <- OK
+[   2.8s] [nbiot-mqtt] <- +QMTSUB: 0,1,0,1
+[   2.8s] [nbiot-mqtt] -> AT+QMTSUB=0,2,"v1/gateway/rpc",1
+[   2.8s] [nbiot-mqtt] <- OK
+[   3.4s] [nbiot-mqtt] <- +QMTSUB: 0,2,0,1
+[   3.4s] [nbiot-mqtt] downlink live - announcing the nodes next
+[   3.4s] [nbiot-mqtt] announcing NodoC-1 to the gateway
+[   3.4s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/gateway/connect"
+[   3.4s] [nbiot-mqtt] payload (20 bytes): {"device":"NodoC-1"}
+[   3.4s] [nbiot-mqtt] <- OK
+[   3.7s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[   3.7s] [nbiot-mqtt] announcing NodoC-2 to the gateway
+[   3.7s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/gateway/connect"
+[   3.7s] [nbiot-mqtt] payload (20 bytes): {"device":"NodoC-2"}
+[   3.7s] [nbiot-mqtt] <- OK
+[   3.7s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[   3.7s] [nbiot-mqtt] announcing NodoC-3 to the gateway
+[   3.7s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/gateway/connect"
+[   3.7s] [nbiot-mqtt] payload (20 bytes): {"device":"NodoC-3"}
+[   3.7s] [nbiot-mqtt] <- OK
+[   4.0s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[   4.0s] [nbiot-mqtt] 3 node(s) announced - downlink live
+[   4.0s] [nbiot-mqtt] state MQTT_CONNECT -> IDLE
+[  16.1s] [nbiot-mqtt] -> AT+CSQ
+[  16.1s] [nbiot-mqtt] <- +CSQ: 31,0
+[  16.1s] [nbiot-mqtt] <- OK
+[  17.4s] +RCV addr=1 len=118 rssi=-68 snr=12 data="B,2,23.4,58.2,941.1,11791,0.0,0.0,0.0,1055,0.0,0.0,0,0.0,0,3;23.3,58.5,941.1,11791,0.0,0.0,0.0,1055,0.0,0.0,0,0.0,0,0;"
+[  17.4s]   batch of 2 reading(s)
+[  19.5s] +RCV addr=1 len=33 rssi=-70 snr=11 data="STAT,19503,8,0,11100,63,3115,85,0"
+[  19.5s]   node health: charge 85% (3115 mV at the sense pin)
+[  46.2s] [nbiot-mqtt] -> AT+CSQ
+[  46.2s] [nbiot-mqtt] <- +CSQ: 31,0
+[  46.2s] [nbiot-mqtt] <- OK
+[  47.4s] [nbiot-mqtt] state IDLE -> PUBLISHING
+[  47.4s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/gateway/telemetry"
+[  47.4s] [nbiot-mqtt] payload (555 bytes): {"NodoC-1":[{"ts":1791286656848,"values":{"temp":23.40,"rh":58.20,"pres":941.10,"gas":11791.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":1055.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-68,"snr":12,"chargePct":-1,"capMv":-1,"alarmState":0}},{"ts":1791286686848,"values":{"temp":23.30,"rh":58.50,"pres":941.10,"gas":11791.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":1055.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-68,"snr":12,"chargePct":-1,"capMv":-1,"alarmState":0}}]}
+[  47.4s] [nbiot-mqtt] <- OK
+[  47.4s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[  47.7s] [nbiot-mqtt] state PUBLISHING -> IDLE
+[  47.7s] [nbiot-mqtt] -> AT+CSQ
+[  47.7s] [nbiot-mqtt] <- +CSQ: 31,0
+[  47.7s] [nbiot-mqtt] <- OK
+[  51.1s] +RCV addr=3 len=114 rssi=-82 snr=9 data="B,2,24.8,49.4,940.9,8222,0.0,0.0,0.0,682,0.0,0.0,0,0.0,0,3;24.9,49.4,940.9,8222,0.0,0.0,0.0,682,0.0,0.0,0,0.0,0,0;"
+[  51.1s]   batch of 2 reading(s)
+[  53.0s] +RCV addr=3 len=32 rssi=-83 snr=9 data="STAT,19359,8,0,11100,9,3082,82,0"
+[  53.0s]   node health: charge 82% (3082 mV at the sense pin)
+[  77.5s] [nbiot-mqtt] -> AT+CSQ
+[  77.5s] [nbiot-mqtt] <- +CSQ: 31,0
+[  77.5s] [nbiot-mqtt] <- OK
+[  81.0s] [nbiot-mqtt] state IDLE -> PUBLISHING
+[  81.0s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/gateway/telemetry"
+[  81.0s] [nbiot-mqtt] payload (551 bytes): {"NodoC-2":[{"ts":1791286690513,"values":{"temp":24.80,"rh":49.40,"pres":940.90,"gas":8222.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":682.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-82,"snr":9,"chargePct":-1,"capMv":-1,"alarmState":-1}},{"ts":1791286720513,"values":{"temp":24.90,"rh":49.40,"pres":940.90,"gas":8222.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":682.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-82,"snr":9,"chargePct":-1,"capMv":-1,"alarmState":-1}}]}
+[  81.0s] [nbiot-mqtt] <- OK
+[  81.3s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[  81.3s] [nbiot-mqtt] state PUBLISHING -> IDLE
+[  81.3s] [nbiot-mqtt] -> AT+CSQ
+[  81.3s] [nbiot-mqtt] <- +CSQ: 31,0
+[  81.3s] [nbiot-mqtt] <- OK
+[  88.7s] +RCV addr=1 len=72 rssi=-70 snr=13 data="23.25,58.65,941.09,11790.71,0.00,0.00,0.00,1055.00,0.00,0.00,0.00,0.00,0"
+[  90.9s] +RCV addr=1 len=33 rssi=-71 snr=11 data="STAT,19507,8,0,11100,67,3115,85,0"
+[  90.9s]   node health: charge 85% (3115 mV at the sense pin)
+[ 111.1s] [nbiot-mqtt] -> AT+CSQ
+[ 111.1s] [nbiot-mqtt] <- +CSQ: 30,0
+[ 111.1s] [nbiot-mqtt] <- OK
+[ 124.8s] +RCV addr=3 len=33 rssi=-77 snr=11 data="STAT,19363,8,0,11100,13,3085,83,0"
+[ 124.8s]   node health: charge 83% (3085 mV at the sense pin)
+[ 141.3s] [nbiot-mqtt] -> AT+CSQ
+[ 141.3s] [nbiot-mqtt] <- +CSQ: 30,0
+[ 141.3s] [nbiot-mqtt] <- OK
+[ 144.1s] +RCV addr=4 len=116 rssi=-39 snr=12 data="B,2,25.9,47.9,940.8,5685,0.0,0.0,0.0,1002,0.0,0.0,0,0.0,0,3;25.8,48.0,940.8,5685,0.0,0.0,0.0,1002,0.0,0.0,0,0.0,0,0;"
+[ 144.1s]   batch of 2 reading(s)
+[ 146.0s] +RCV addr=4 len=28 rssi=-39 snr=13 data="STAT,3,8,0,10100,3,3120,86,0"
+[ 146.0s]   node health: charge 86% (3120 mV at the sense pin)
+[ 148.8s] [nbiot-mqtt] state IDLE -> PUBLISHING
+[ 148.8s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/gateway/telemetry"
+[ 148.8s] [nbiot-mqtt] payload (840 bytes): {"NodoC-1":[{"ts":1791286758344,"values":{"temp":23.25,"rh":58.65,"pres":941.09,"gas":11790.71,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":1055.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-70,"snr":13,"chargePct":85,"capMv":3115,"alarmState":0}}],"NodoC-3":[{"ts":1791286783487,"values":{"temp":25.90,"rh":47.90,"pres":940.80,"gas":5685.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":1002.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-39,"snr":12,"chargePct":-1,"capMv":-1,"alarmState":-1}},{"ts":1791286813487,"values":{"temp":25.80,"rh":48.00,"pres":940.80,"gas":5685.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":1002.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-39,"snr":12,"chargePct":-1,"capMv":-1,"alarmState":-1}}]}
+[ 149.1s] [nbiot-mqtt] <- OK
+[ 149.1s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[ 149.1s] [nbiot-mqtt] state PUBLISHING -> IDLE
+[ 149.1s] [nbiot-mqtt] -> AT+CSQ
+[ 149.1s] [nbiot-mqtt] <- +CSQ: 30,0
+[ 149.1s] [nbiot-mqtt] <- OK
+[ 160.3s] +RCV addr=1 len=72 rssi=-70 snr=13 data="23.18,59.10,941.04,11790.71,0.00,0.00,0.00,1055.00,0.00,0.00,0.00,0.00,0"
+[ 162.5s] +RCV addr=1 len=33 rssi=-70 snr=12 data="STAT,19511,8,0,11100,71,3115,85,0"
+[ 162.5s]   node health: charge 85% (3115 mV at the sense pin)
+[ 178.9s] [nbiot-mqtt] -> AT+CSQ
+[ 178.9s] [nbiot-mqtt] <- +CSQ: 31,0
+[ 178.9s] [nbiot-mqtt] <- OK
+[ 194.2s] +RCV addr=3 len=70 rssi=-77 snr=11 data="24.93,49.16,940.86,8221.99,0.00,0.00,0.00,682.00,0.00,0.00,0.00,0.00,0"
+[ 196.4s] +RCV addr=3 len=33 rssi=-78 snr=11 data="STAT,19367,8,0,11100,17,3085,83,0"
+[ 196.4s]   node health: charge 83% (3085 mV at the sense pin)
+[ 209.1s] [nbiot-mqtt] -> AT+CSQ
+[ 209.1s] [nbiot-mqtt] <- +CSQ: 31,0
+[ 209.1s] [nbiot-mqtt] <- OK
+[ 215.6s] +RCV addr=4 len=71 rssi=-38 snr=12 data="25.80,48.10,940.73,5684.85,0.00,0.00,0.00,1002.00,0.00,0.00,0.00,0.00,0"
+[ 217.5s] +RCV addr=4 len=28 rssi=-39 snr=12 data="STAT,7,8,0,10100,7,3120,86,0"
+[ 217.5s]   node health: charge 86% (3120 mV at the sense pin)
+[ 220.3s] [nbiot-mqtt] state IDLE -> PUBLISHING
+[ 220.3s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/gateway/telemetry"
+[ 220.3s] [nbiot-mqtt] payload (853 bytes): {"NodoC-1":[{"ts":1791286829847,"values":{"temp":23.18,"rh":59.10,"pres":941.04,"gas":11790.71,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":1055.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-70,"snr":13,"chargePct":85,"capMv":3115,"alarmState":0}}],"NodoC-2":[{"ts":1791286863716,"values":{"temp":24.93,"rh":49.16,"pres":940.86,"gas":8221.99,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":682.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-77,"snr":11,"chargePct":83,"capMv":3085,"alarmState":0}}],"NodoC-3":[{"ts":1791286884975,"values":{"temp":25.80,"rh":48.10,"pres":940.73,"gas":5684.85,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":1002.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-38,"snr":12,"chargePct":86,"capMv":3120,"alarmState":0}}]}
+[ 220.6s] [nbiot-mqtt] <- OK
+[ 220.6s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[ 220.6s] [nbiot-mqtt] state PUBLISHING -> IDLE
+[ 220.6s] [nbiot-mqtt] -> AT+CSQ
+[ 220.6s] [nbiot-mqtt] <- +CSQ: 31,0
+[ 220.6s] [nbiot-mqtt] <- OK
+[ 231.8s] +RCV addr=1 len=118 rssi=-70 snr=13 data="B,2,23.1,59.3,941.0,11791,0.0,0.0,0.0,1055,0.0,0.0,0,0.0,0,3;23.0,59.5,941.0,11791,0.0,0.0,0.0,1055,0.0,0.0,0,0.0,0,0;"
+[ 231.8s]   batch of 2 reading(s)
+[ 233.9s] +RCV addr=1 len=33 rssi=-70 snr=13 data="STAT,19515,8,0,11100,75,3115,85,0"
+[ 233.9s]   node health: charge 85% (3115 mV at the sense pin)
+[ 250.4s] [nbiot-mqtt] -> AT+CSQ
+[ 250.4s] [nbiot-mqtt] <- +CSQ: 31,0
+[ 250.4s] [nbiot-mqtt] <- OK
+[ 262.0s] [nbiot-mqtt] state IDLE -> PUBLISHING
+[ 262.0s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/gateway/telemetry"
+[ 262.0s] [nbiot-mqtt] payload (559 bytes): {"NodoC-1":[{"ts":1791286871414,"values":{"temp":23.10,"rh":59.30,"pres":941.00,"gas":11791.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":1055.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-70,"snr":13,"chargePct":85,"capMv":3115,"alarmState":0}},{"ts":1791286901414,"values":{"temp":23.00,"rh":59.50,"pres":941.00,"gas":11791.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":1055.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-70,"snr":13,"chargePct":85,"capMv":3115,"alarmState":0}}]}
+[ 262.0s] [nbiot-mqtt] <- OK
+[ 262.3s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[ 262.3s] [nbiot-mqtt] state PUBLISHING -> IDLE
+[ 262.3s] [nbiot-mqtt] -> AT+CSQ
+[ 262.3s] [nbiot-mqtt] <- +CSQ: 31,0
+[ 262.3s] [nbiot-mqtt] <- OK
+[ 266.0s] +RCV addr=3 len=114 rssi=-77 snr=10 data="B,2,25.0,49.1,940.9,8222,0.0,0.0,0.0,682,0.0,0.0,0,0.0,0,3;25.0,48.9,940.8,8222,0.0,0.0,0.0,682,0.0,0.0,0,0.0,0,0;"
+[ 266.0s]   batch of 2 reading(s)
+[ 287.1s] +RCV addr=3 len=33 rssi=-77 snr=9 data="STAT,19371,8,0,11100,21,3087,83,0"
+[ 287.1s]   node health: charge 83% (3087 mV at the sense pin)
+[ 287.1s] +RCV addr=4 len=71 rssi=-38 snr=12 data="25.79,48.15,940.73,5684.85,0.00,0.00,0.00,1002.00,0.00,0.00,0.00,0.00,0"
+[ 292.1s] [nbiot-mqtt] -> AT+CSQ
+[ 292.1s] [nbiot-mqtt] <- +CSQ: 31,0
+[ 292.1s] [nbiot-mqtt] <- OK
+[ 295.8s] [nbiot-mqtt] state IDLE -> PUBLISHING
+[ 295.8s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/gateway/telemetry"
+[ 295.8s] [nbiot-mqtt] payload (839 bytes): {"NodoC-2":[{"ts":1791286905377,"values":{"temp":25.00,"rh":49.10,"pres":940.90,"gas":8222.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":682.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-77,"snr":10,"chargePct":83,"capMv":3085,"alarmState":0}},{"ts":1791286935377,"values":{"temp":25.00,"rh":48.90,"pres":940.80,"gas":8222.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":682.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-77,"snr":10,"chargePct":83,"capMv":3085,"alarmState":0}}],"NodoC-3":[{"ts":1791286956463,"values":{"temp":25.79,"rh":48.15,"pres":940.73,"gas":5684.85,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":1002.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-38,"snr":12,"chargePct":86,"capMv":3120,"alarmState":0}}]}
+[ 296.1s] [nbiot-mqtt] <- OK
+[ 296.1s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[ 296.1s] [nbiot-mqtt] state PUBLISHING -> IDLE
+[ 296.1s] [nbiot-mqtt] -> AT+CSQ
+[ 296.1s] [nbiot-mqtt] <- +CSQ: 31,0
+[ 296.1s] [nbiot-mqtt] <- OK
+[ 305.4s] +RCV addr=1 len=33 rssi=-70 snr=13 data="STAT,19519,8,0,11100,79,3115,85,0"
+[ 305.4s]   node health: charge 85% (3115 mV at the sense pin)
+[ 326.0s] [nbiot-mqtt] -> AT+CSQ
+[ 326.0s] [nbiot-mqtt] <- +CSQ: 31,0
+[ 326.0s] [nbiot-mqtt] <- OK
+[ 337.4s] +RCV addr=3 len=70 rssi=-78 snr=11 data="25.06,49.04,940.81,8221.99,0.00,0.00,0.00,682.00,0.00,0.00,0.00,0.00,0"
+[ 339.6s] +RCV addr=3 len=33 rssi=-78 snr=10 data="STAT,19375,8,0,11100,25,3088,83,0"
+[ 339.6s]   node health: charge 83% (3088 mV at the sense pin)
+[ 349.2s] [nbiot-mqtt] downlink on "v1/devices/me/rpc/request/2": {"method":"configurarModuloC","params":{"moduloC_id":"NodoC-3","action":"umbrales_de1variable","variable":"temp","umbral_pre_off":42,"umbral_pre_on":50,"umbral_alarm_off":55,"umbral_alarm_on":60}}
+[ 349.2s] [nbiot-mqtt] configurarModuloC 2 -> NodoC-3: "CFG,temp_pre_off=42,temp_pre_on=50,temp_alarm_off=55,temp_alarm_on=60" (enviado; esperando ventana)
+[ 349.2s] [nbiot-mqtt] state IDLE -> RPC_REPLY
+[ 349.2s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/devices/me/rpc/response/2"
+[ 349.2s] [nbiot-mqtt] payload (34 bytes): {"status":"enviado","requestId":2}
+[ 349.6s] [nbiot-mqtt] <- OK
+[ 349.6s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[ 349.6s] [nbiot-mqtt] state RPC_REPLY -> IDLE
+[ 349.6s] [nbiot-mqtt] -> AT+CSQ
+[ 349.6s] [nbiot-mqtt] <- +CSQ: 31,0
+[ 349.6s] [nbiot-mqtt] <- OK
+[ 360.7s] +RCV addr=4 len=30 rssi=-37 snr=12 data="STAT,15,8,0,10100,15,3120,86,0"
+[ 360.7s]   node health: charge 86% (3120 mV at the sense pin)
+[ 375.0s] +RCV addr=1 len=72 rssi=-70 snr=13 data="22.92,60.32,941.00,11790.71,0.00,0.00,0.00,1055.00,0.00,0.00,0.00,0.00,0"
+[ 376.9s] +RCV addr=1 len=33 rssi=-70 snr=12 data="STAT,19523,8,0,11100,83,3115,85,0"
+[ 376.9s]   node health: charge 85% (3115 mV at the sense pin)
+[ 379.4s] [nbiot-mqtt] -> AT+CSQ
+[ 379.4s] [nbiot-mqtt] <- +CSQ: 31,0
+[ 379.4s] [nbiot-mqtt] <- OK
+[ 397.4s] [nbiot-mqtt] state IDLE -> PUBLISHING
+[ 397.4s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/gateway/telemetry"
+[ 397.4s] [nbiot-mqtt] payload (569 bytes): {"NodoC-2":[{"ts":1791287006998,"values":{"temp":25.06,"rh":49.04,"pres":940.81,"gas":8221.99,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":682.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-78,"snr":11,"chargePct":83,"capMv":3087,"alarmState":0}}],"NodoC-1":[{"ts":1791287044422,"values":{"temp":22.92,"rh":60.32,"pres":941.00,"gas":11790.71,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":1055.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-70,"snr":13,"chargePct":85,"capMv":3115,"alarmState":0}}]}
+[ 397.4s] [nbiot-mqtt] <- OK
+[ 397.8s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[ 397.8s] [nbiot-mqtt] state PUBLISHING -> IDLE
+[ 397.8s] [nbiot-mqtt] -> AT+CSQ
+[ 397.8s] [nbiot-mqtt] <- +CSQ: 31,0
+[ 397.8s] [nbiot-mqtt] <- OK
+[ 409.0s] +RCV addr=3 len=70 rssi=-77 snr=11 data="25.02,49.07,940.79,8221.99,0.00,0.00,0.00,682.00,0.00,0.00,0.00,0.00,0"
+[ 411.1s] +RCV addr=3 len=33 rssi=-77 snr=11 data="STAT,19379,8,0,11100,29,3089,83,0"
+[ 411.1s]   node health: charge 83% (3089 mV at the sense pin)
+[ 427.7s] [nbiot-mqtt] -> AT+CSQ
+[ 427.7s] [nbiot-mqtt] <- +CSQ: 31,0
+[ 427.7s] [nbiot-mqtt] <- OK
+[ 430.2s] +RCV addr=4 len=71 rssi=-37 snr=12 data="25.79,48.12,940.65,5684.85,0.00,0.00,0.00,1002.00,0.00,0.00,0.00,0.00,0"
+[ 430.2s]   -> downlink to NodoC-3: CFG,temp_pre_off=42,temp_pre_on=50,temp_alarm_off=55,temp_alarm_on=60 (sent)
+[ 430.2s] [nbiot-mqtt] sent to NodoC-3 over LoRa, awaiting ACK
+[ 430.5s] +RCV addr=4 len=69 rssi=-38 snr=13 data="ACK,temp_pre_off=42,temp_pre_on=50,temp_alarm_off=55,temp_alarm_on=60"
+[ 430.5s] [nbiot-mqtt] commandLog 2 -> confirmado (gateway telemetry + node telemetry + node attributes)
+[ 430.5s] [nbiot-mqtt] NodoC-3 acked: temp_pre_off=42,temp_pre_on=50,temp_alarm_off=55,temp_alarm_on=60
+[ 430.5s] [nbiot-mqtt] state IDLE -> RPC_REPLY
+[ 430.5s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/devices/me/telemetry"
+[ 430.5s] [nbiot-mqtt] payload (155 bytes): {"commandLog":{"requestId":2,"status":"confirmado","detail":"temp_pre_off=42,temp_pre_on=50,temp_alarm_off=55,temp_alarm_on=60","timestamp":1791287099854}}
+[ 430.5s] [nbiot-mqtt] <- OK
+[ 430.5s] +RCV addr=4 len=30 rssi=-38 snr=12 data="STAT,19,8,0,10100,19,3120,86,0"
+[ 430.5s]   node health: charge 86% (3120 mV at the sense pin)
+[ 430.5s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[ 430.5s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/gateway/telemetry"
+[ 430.5s] [nbiot-mqtt] payload (273 bytes): {"NodoC-3":[{"ts":1791287099854,"values":{"commandLog":{"requestId":2,"status":"confirmado","detail":"temp_pre_off=42,temp_pre_on=50,temp_alarm_off=55,temp_alarm_on=60","timestamp":1791287099854},"temp_pre_off":42,"temp_pre_on":50,"temp_alarm_off":55,"temp_alarm_on":60}}]}
+[ 430.5s] [nbiot-mqtt] <- OK
+[ 430.8s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[ 430.8s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/gateway/attributes"
+[ 430.8s] [nbiot-mqtt] payload (241 bytes): {"NodoC-3":{"commandLog":{"requestId":2,"status":"confirmado","detail":"temp_pre_off=42,temp_pre_on=50,temp_alarm_off=55,temp_alarm_on=60","timestamp":1791287099854},"temp_pre_off":42,"temp_pre_on":50,"temp_alarm_off":55,"temp_alarm_on":60}}
+[ 430.8s] [nbiot-mqtt] <- OK
+[ 430.8s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[ 430.8s] [nbiot-mqtt] state RPC_REPLY -> IDLE
+[ 430.8s] [nbiot-mqtt] -> AT+CSQ
+[ 430.8s] [nbiot-mqtt] <- +CSQ: 31,0
+[ 430.8s] [nbiot-mqtt] <- OK
+[ 446.6s] +RCV addr=1 len=118 rssi=-71 snr=11 data="B,2,22.9,60.2,941.0,11791,0.0,0.0,0.0,1055,0.0,0.0,0,0.0,0,3;22.8,60.2,941.0,11791,0.0,0.0,0.0,1055,0.0,0.0,0,0.0,0,0;"
+[ 446.6s]   batch of 2 reading(s)
+[ 448.5s] +RCV addr=1 len=33 rssi=-70 snr=13 data="STAT,19527,8,0,11100,87,3115,85,0"
+[ 448.5s]   node health: charge 85% (3115 mV at the sense pin)
+[ 460.9s] [nbiot-mqtt] -> AT+CSQ
+[ 460.9s] [nbiot-mqtt] <- +CSQ: 31,0
+[ 460.9s] [nbiot-mqtt] <- OK
+[ 469.0s] [nbiot-mqtt] state IDLE -> PUBLISHING
+[ 469.0s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/gateway/telemetry"
+[ 469.0s] [nbiot-mqtt] payload (1126 bytes): {"NodoC-2":[{"ts":1791287078572,"values":{"temp":25.02,"rh":49.07,"pres":940.79,"gas":8221.99,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":682.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-77,"snr":11,"chargePct":83,"capMv":3088,"alarmState":0}}],"NodoC-3":[{"ts":1791287099686,"values":{"temp":25.79,"rh":48.12,"pres":940.65,"gas":5684.85,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":1002.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-37,"snr":12,"chargePct":86,"capMv":3120,"alarmState":0}}],"NodoC-1":[{"ts":1791287085999,"values":{"temp":22.90,"rh":60.20,"pres":941.00,"gas":11791.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":1055.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-71,"snr":11,"chargePct":85,"capMv":3115,"alarmState":0}},{"ts":1791287115999,"values":{"temp":22.80,"rh":60.20,"pres":941.00,"gas":11791.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":1055.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-71,"snr":11,"chargePct":85,"capMv":3115,"alarmState":0}}]}
+[ 469.3s] [nbiot-mqtt] <- OK
+[ 469.3s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[ 469.3s] [nbiot-mqtt] state PUBLISHING -> IDLE
+[ 469.3s] [nbiot-mqtt] -> AT+CSQ
+[ 469.3s] [nbiot-mqtt] <- +CSQ: 31,0
+[ 469.3s] [nbiot-mqtt] <- OK
+[ 480.8s] +RCV addr=3 len=114 rssi=-81 snr=11 data="B,2,25.1,48.7,940.7,8222,0.0,0.0,0.0,682,0.0,0.0,0,0.0,0,3;25.1,48.5,940.7,8222,0.0,0.0,0.0,682,0.0,0.0,0,0.0,0,0;"
+[ 480.8s]   batch of 2 reading(s)
+[ 499.4s] +RCV addr=3 len=33 rssi=-81 snr=9 data="STAT,19383,8,0,11100,33,3090,83,0"
+[ 499.4s]   node health: charge 83% (3090 mV at the sense pin)
+[ 499.4s] [nbiot-mqtt] -> AT+CSQ
+[ 499.4s] [nbiot-mqtt] <- +CSQ: 31,0
+[ 499.4s] [nbiot-mqtt] <- OK
+[ 499.8s] +RCV addr=4 len=71 rssi=-38 snr=12 data="25.79,48.18,940.65,5684.85,0.00,0.00,0.00,1002.00,0.00,0.00,0.00,0.00,0"
+[ 501.9s] +RCV addr=4 len=30 rssi=-38 snr=13 data="STAT,23,8,0,10100,23,3120,86,0"
+[ 501.9s]   node health: charge 86% (3120 mV at the sense pin)
+[ 510.7s] [nbiot-mqtt] state IDLE -> PUBLISHING
+[ 510.7s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/gateway/telemetry"
+[ 510.7s] [nbiot-mqtt] payload (839 bytes): {"NodoC-2":[{"ts":1791287120243,"values":{"temp":25.10,"rh":48.70,"pres":940.70,"gas":8222.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":682.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-81,"snr":11,"chargePct":83,"capMv":3089,"alarmState":0}},{"ts":1791287150243,"values":{"temp":25.10,"rh":48.50,"pres":940.70,"gas":8222.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":682.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-81,"snr":11,"chargePct":83,"capMv":3089,"alarmState":0}}],"NodoC-3":[{"ts":1791287169350,"values":{"temp":25.79,"rh":48.18,"pres":940.65,"gas":5684.85,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":1002.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-38,"snr":12,"chargePct":86,"capMv":3120,"alarmState":0}}]}
+[ 511.0s] [nbiot-mqtt] <- OK
+[ 511.0s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[ 511.0s] [nbiot-mqtt] state PUBLISHING -> IDLE
+[ 511.0s] [nbiot-mqtt] -> AT+CSQ
+[ 511.0s] [nbiot-mqtt] <- +CSQ: 31,0
+[ 511.0s] [nbiot-mqtt] <- OK
+[ 537.4s] +RCV addr=1 len=71 rssi=-70 snr=12 data="22.87,60.04,940.93,16443.99,0.00,0.00,0.00,600.00,0.00,0.00,0.00,0.00,0"
+[ 539.6s] +RCV addr=1 len=32 rssi=-70 snr=12 data="STAT,19531,8,0,11100,1,3115,85,0"
+[ 539.6s]   node health: charge 85% (3115 mV at the sense pin)
+[ 541.1s] [nbiot-mqtt] -> AT+CSQ
+[ 541.1s] [nbiot-mqtt] <- +CSQ: 31,0
+[ 541.1s] [nbiot-mqtt] <- OK
+[ 552.4s] +RCV addr=3 len=70 rssi=-85 snr=6 data="25.23,48.24,940.70,8221.99,0.00,0.00,0.00,682.00,0.00,0.00,0.00,0.00,0"
+[ 554.5s] +RCV addr=3 len=33 rssi=-82 snr=11 data="STAT,19387,8,0,11100,37,3092,83,0"
+[ 554.5s]   node health: charge 83% (3092 mV at the sense pin)
+[ 571.0s] [nbiot-mqtt] -> AT+CSQ
+[ 571.0s] [nbiot-mqtt] <- +CSQ: 31,0
+[ 571.0s] [nbiot-mqtt] <- OK
+[ 571.4s] +RCV addr=4 len=116 rssi=-38 snr=12 data="B,2,25.8,48.2,940.6,5685,0.0,0.0,0.0,1002,0.0,0.0,0,0.0,0,3;25.8,48.1,940.5,5685,0.0,0.0,0.0,1002,0.0,0.0,0,0.0,0,0;"
+[ 571.4s]   batch of 2 reading(s)
+[ 573.5s] +RCV addr=4 len=30 rssi=-39 snr=13 data="STAT,27,8,0,10100,27,3120,86,0"
+[ 573.5s]   node health: charge 86% (3120 mV at the sense pin)
+[ 597.5s] [nbiot-mqtt] state IDLE -> PUBLISHING
+[ 597.5s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/gateway/telemetry"
+[ 597.5s] [nbiot-mqtt] payload (1123 bytes): {"NodoC-1":[{"ts":1791287206909,"values":{"temp":22.87,"rh":60.04,"pres":940.93,"gas":16443.99,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":600.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-70,"snr":12,"chargePct":85,"capMv":3115,"alarmState":0}}],"NodoC-2":[{"ts":1791287221853,"values":{"temp":25.23,"rh":48.24,"pres":940.70,"gas":8221.99,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":682.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-85,"snr":6,"chargePct":83,"capMv":3090,"alarmState":0}}],"NodoC-3":[{"ts":1791287210917,"values":{"temp":25.80,"rh":48.20,"pres":940.60,"gas":5685.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":1002.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-38,"snr":12,"chargePct":86,"capMv":3120,"alarmState":0}},{"ts":1791287240917,"values":{"temp":25.80,"rh":48.10,"pres":940.50,"gas":5685.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":1002.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-38,"snr":12,"chargePct":86,"capMv":3120,"alarmState":0}}]}
+[ 597.5s] [nbiot-mqtt] <- OK
+[ 597.8s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[ 597.8s] [nbiot-mqtt] state PUBLISHING -> IDLE
+[ 597.8s] [nbiot-mqtt] -> AT+CSQ
+[ 597.8s] [nbiot-mqtt] <- +CSQ: 31,0
+[ 597.8s] [nbiot-mqtt] <- OK
+[ 609.0s] +RCV addr=1 len=71 rssi=-69 snr=12 data="22.80,60.42,940.89,16443.99,0.00,0.00,0.00,600.00,0.00,0.00,0.00,0.00,0"
+[ 624.0s] +RCV addr=1 len=32 rssi=-69 snr=12 data="STAT,19535,8,0,11100,5,3115,85,0"
+[ 624.0s]   node health: charge 85% (3115 mV at the sense pin)
+[ 624.0s] +RCV addr=3 len=70 rssi=-81 snr=9 data="25.23,48.41,940.64,8221.99,0.00,0.00,0.00,682.00,0.00,0.00,0.00,0.00,0"
+[ 627.7s] +RCV addr=3 len=33 rssi=-81 snr=8 data="STAT,19391,8,0,11100,41,3093,83,0"
+[ 627.7s]   node health: charge 83% (3093 mV at the sense pin)
+[ 627.7s] [nbiot-mqtt] -> AT+CSQ
+[ 627.7s] [nbiot-mqtt] <- +CSQ: 31,0
+[ 627.7s] [nbiot-mqtt] <- OK
+[ 642.9s] +RCV addr=4 len=71 rssi=-38 snr=12 data="25.79,48.06,940.54,5684.85,0.00,0.00,0.00,1002.00,0.00,0.00,0.00,0.00,0"
+[ 657.8s] [nbiot-mqtt] -> AT+CSQ
+[ 657.8s] [nbiot-mqtt] <- +CSQ: 31,0
+[ 657.8s] [nbiot-mqtt] <- OK
+[ 669.0s] [nbiot-mqtt] state IDLE -> PUBLISHING
+[ 669.0s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/gateway/telemetry"
+[ 669.0s] [nbiot-mqtt] payload (851 bytes): {"NodoC-1":[{"ts":1791287278411,"values":{"temp":22.80,"rh":60.42,"pres":940.89,"gas":16443.99,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":600.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-69,"snr":12,"chargePct":85,"capMv":3115,"alarmState":0}}],"NodoC-2":[{"ts":1791287293447,"values":{"temp":25.23,"rh":48.41,"pres":940.64,"gas":8221.99,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":682.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-81,"snr":9,"chargePct":83,"capMv":3092,"alarmState":0}}],"NodoC-3":[{"ts":1791287312415,"values":{"temp":25.79,"rh":48.06,"pres":940.54,"gas":5684.85,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":1002.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-38,"snr":12,"chargePct":86,"capMv":3120,"alarmState":0}}]}
+[ 669.0s] [nbiot-mqtt] <- OK
+[ 669.3s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[ 669.3s] [nbiot-mqtt] state PUBLISHING -> IDLE
+[ 669.3s] [nbiot-mqtt] -> AT+CSQ
+[ 669.3s] [nbiot-mqtt] <- +CSQ: 31,0
+[ 669.3s] [nbiot-mqtt] <- OK
+[ 680.5s] +RCV addr=1 len=116 rssi=-71 snr=12 data="B,2,22.8,60.6,940.9,16444,0.0,0.0,0.0,600,0.0,0.0,0,0.0,0,3;22.7,60.6,940.9,16444,0.0,0.0,0.0,600,0.0,0.0,0,0.0,0,0;"
+[ 680.5s]   batch of 2 reading(s)
+[ 682.7s] +RCV addr=1 len=32 rssi=-70 snr=12 data="STAT,19539,8,0,11100,9,3115,85,0"
+[ 682.7s]   node health: charge 85% (3115 mV at the sense pin)
+[ 695.5s] +RCV addr=3 len=114 rssi=-83 snr=8 data="B,2,25.2,48.2,940.7,8222,0.0,0.0,0.0,682,0.0,0.0,0,0.0,0,3;25.3,48.0,940.6,8222,0.0,0.0,0.0,682,0.0,0.0,0,0.0,0,0;"
+[ 695.5s]   batch of 2 reading(s)
+[ 697.7s] +RCV addr=3 len=33 rssi=-84 snr=8 data="STAT,19395,8,0,11100,45,3095,84,0"
+[ 697.7s]   node health: charge 84% (3095 mV at the sense pin)
+[ 699.2s] [nbiot-mqtt] -> AT+CSQ
+[ 699.2s] [nbiot-mqtt] <- +CSQ: 31,0
+[ 699.2s] [nbiot-mqtt] <- OK
+[ 710.4s] [nbiot-mqtt] state IDLE -> PUBLISHING
+[ 710.4s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/gateway/telemetry"
+[ 710.4s] [nbiot-mqtt] payload (1109 bytes): {"NodoC-1":[{"ts":1791287319984,"values":{"temp":22.80,"rh":60.60,"pres":940.90,"gas":16444.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":600.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-71,"snr":12,"chargePct":85,"capMv":3115,"alarmState":0}},{"ts":1791287349984,"values":{"temp":22.70,"rh":60.60,"pres":940.90,"gas":16444.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":600.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-71,"snr":12,"chargePct":85,"capMv":3115,"alarmState":0}}],"NodoC-2":[{"ts":1791287335118,"values":{"temp":25.20,"rh":48.20,"pres":940.70,"gas":8222.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":682.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-83,"snr":8,"chargePct":83,"capMv":3093,"alarmState":0}},{"ts":1791287365118,"values":{"temp":25.30,"rh":48.00,"pres":940.60,"gas":8222.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":682.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-83,"snr":8,"chargePct":83,"capMv":3093,"alarmState":0}}]}
+[ 710.7s] [nbiot-mqtt] <- OK
+[ 710.7s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[ 710.7s] [nbiot-mqtt] state PUBLISHING -> IDLE
+[ 710.7s] [nbiot-mqtt] -> AT+CSQ
+[ 710.7s] [nbiot-mqtt] <- +CSQ: 31,0
+[ 710.7s] [nbiot-mqtt] <- OK
+[ 714.5s] +RCV addr=4 len=71 rssi=-38 snr=12 data="25.78,48.06,940.58,5684.85,0.00,0.00,0.00,1002.00,0.00,0.00,0.00,0.00,0"
+[ 716.4s] +RCV addr=4 len=30 rssi=-38 snr=13 data="STAT,35,8,0,10100,35,3120,86,0"
+[ 716.4s]   node health: charge 86% (3120 mV at the sense pin)
+[ 740.7s] [nbiot-mqtt] -> AT+CSQ
+[ 740.7s] [nbiot-mqtt] <- +CSQ: 31,0
+[ 740.7s] [nbiot-mqtt] <- OK
+[ 751.9s] +RCV addr=1 len=71 rssi=-71 snr=13 data="22.70,61.05,940.91,16443.99,0.00,0.00,0.00,600.00,0.00,0.00,0.00,0.00,0"
+[ 754.1s] +RCV addr=1 len=33 rssi=-71 snr=13 data="STAT,19543,8,0,11100,13,3115,85,0"
+[ 754.1s]   node health: charge 85% (3115 mV at the sense pin)
+[ 767.2s] +RCV addr=3 len=70 rssi=-85 snr=7 data="25.34,47.97,940.67,8221.99,0.00,0.00,0.00,682.00,0.00,0.00,0.00,0.00,0"
+[ 769.4s] +RCV addr=3 len=33 rssi=-85 snr=7 data="STAT,19399,8,0,11100,49,3096,84,0"
+[ 769.4s]   node health: charge 84% (3096 mV at the sense pin)
+[ 770.6s] [nbiot-mqtt] -> AT+CSQ
+[ 770.6s] [nbiot-mqtt] <- +CSQ: 31,0
+[ 770.6s] [nbiot-mqtt] <- OK
+[ 774.4s] [nbiot-mqtt] state IDLE -> PUBLISHING
+[ 774.4s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/gateway/telemetry"
+[ 774.4s] [nbiot-mqtt] payload (851 bytes): {"NodoC-3":[{"ts":1791287383912,"values":{"temp":25.78,"rh":48.06,"pres":940.58,"gas":5684.85,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":1002.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-38,"snr":12,"chargePct":86,"capMv":3120,"alarmState":0}}],"NodoC-1":[{"ts":1791287421483,"values":{"temp":22.70,"rh":61.05,"pres":940.91,"gas":16443.99,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":600.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-71,"snr":13,"chargePct":85,"capMv":3115,"alarmState":0}}],"NodoC-2":[{"ts":1791287436718,"values":{"temp":25.34,"rh":47.97,"pres":940.67,"gas":8221.99,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":682.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-85,"snr":7,"chargePct":84,"capMv":3095,"alarmState":0}}]}
+[ 774.4s] [nbiot-mqtt] <- OK
+[ 774.7s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[ 774.7s] [nbiot-mqtt] state PUBLISHING -> IDLE
+[ 774.7s] [nbiot-mqtt] -> AT+CSQ
+[ 774.7s] [nbiot-mqtt] <- +CSQ: 31,0
+[ 774.7s] [nbiot-mqtt] <- OK
+[ 785.9s] +RCV addr=4 len=116 rssi=-38 snr=11 data="B,2,25.8,48.1,940.6,5685,0.0,0.0,0.0,1002,0.0,0.0,0,0.0,0,3;25.8,48.1,940.6,5685,0.0,0.0,0.0,1002,0.0,0.0,0,0.0,0,0;"
+[ 785.9s]   batch of 2 reading(s)
+[ 788.1s] +RCV addr=4 len=30 rssi=-37 snr=12 data="STAT,39,8,0,10100,39,3120,86,0"
+[ 788.1s]   node health: charge 86% (3120 mV at the sense pin)
+[ 804.6s] [nbiot-mqtt] -> AT+CSQ
+[ 804.6s] [nbiot-mqtt] <- +CSQ: 31,0
+[ 804.6s] [nbiot-mqtt] <- OK
+[ 815.9s] [nbiot-mqtt] state IDLE -> PUBLISHING
+[ 815.9s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/gateway/telemetry"
+[ 815.9s] [nbiot-mqtt] payload (557 bytes): {"NodoC-3":[{"ts":1791287425479,"values":{"temp":25.80,"rh":48.10,"pres":940.60,"gas":5685.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":1002.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-38,"snr":11,"chargePct":86,"capMv":3120,"alarmState":0}},{"ts":1791287455479,"values":{"temp":25.80,"rh":48.10,"pres":940.60,"gas":5685.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":1002.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-38,"snr":11,"chargePct":86,"capMv":3120,"alarmState":0}}]}
+[ 816.2s] [nbiot-mqtt] <- OK
+[ 816.2s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[ 816.2s] [nbiot-mqtt] state PUBLISHING -> IDLE
+[ 816.2s] [nbiot-mqtt] -> AT+CSQ
+[ 816.2s] [nbiot-mqtt] <- +CSQ: 31,0
+[ 816.2s] [nbiot-mqtt] <- OK
+[ 823.3s] +RCV addr=1 len=71 rssi=-71 snr=13 data="22.72,60.80,940.85,16443.99,0.00,0.00,0.00,600.00,0.00,0.00,0.00,0.00,0"
+[ 825.5s] +RCV addr=1 len=33 rssi=-71 snr=11 data="STAT,19547,8,0,11100,17,3115,85,0"
+[ 825.5s]   node health: charge 85% (3115 mV at the sense pin)
+[ 838.9s] +RCV addr=3 len=70 rssi=-80 snr=10 data="25.33,48.10,940.65,8221.99,0.00,0.00,0.00,682.00,0.00,0.00,0.00,0.00,0"
+[ 840.8s] +RCV addr=3 len=33 rssi=-81 snr=10 data="STAT,19403,8,0,11100,53,3098,84,0"
+[ 840.8s]   node health: charge 84% (3098 mV at the sense pin)
+[ 846.1s] [nbiot-mqtt] -> AT+CSQ
+[ 846.1s] [nbiot-mqtt] <- +CSQ: 31,0
+[ 846.1s] [nbiot-mqtt] <- OK
+[ 857.3s] +RCV addr=4 len=71 rssi=-39 snr=13 data="25.79,48.10,940.55,5684.85,0.00,0.00,0.00,1002.00,0.00,0.00,0.00,0.00,0"
+[ 859.5s] +RCV addr=4 len=30 rssi=-38 snr=12 data="STAT,43,8,0,10100,43,3120,86,0"
+[ 859.5s]   node health: charge 86% (3120 mV at the sense pin)
+[ 876.3s] [nbiot-mqtt] -> AT+CSQ
+[ 876.3s] [nbiot-mqtt] <- +CSQ: 31,0
+[ 876.3s] [nbiot-mqtt] <- OK
+[ 883.5s] [nbiot-mqtt] state IDLE -> PUBLISHING
+[ 883.5s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/gateway/telemetry"
+[ 883.5s] [nbiot-mqtt] payload (852 bytes): {"NodoC-1":[{"ts":1791287492990,"values":{"temp":22.72,"rh":60.80,"pres":940.85,"gas":16443.99,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":600.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-71,"snr":13,"chargePct":85,"capMv":3115,"alarmState":0}}],"NodoC-2":[{"ts":1791287508322,"values":{"temp":25.33,"rh":48.10,"pres":940.65,"gas":8221.99,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":682.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-80,"snr":10,"chargePct":84,"capMv":3096,"alarmState":0}}],"NodoC-3":[{"ts":1791287526978,"values":{"temp":25.79,"rh":48.10,"pres":940.55,"gas":5684.85,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":1002.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-39,"snr":13,"chargePct":86,"capMv":3120,"alarmState":0}}]}
+[ 883.5s] [nbiot-mqtt] <- OK
+[ 883.8s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[ 883.8s] [nbiot-mqtt] state PUBLISHING -> IDLE
+[ 883.8s] [nbiot-mqtt] -> AT+CSQ
+[ 883.8s] [nbiot-mqtt] <- +CSQ: 31,0
+[ 883.8s] [nbiot-mqtt] <- OK
+[ 895.0s] +RCV addr=1 len=116 rssi=-69 snr=12 data="B,2,22.7,60.7,940.9,16444,0.0,0.0,0.0,600,0.0,0.0,0,0.0,0,3;22.7,60.7,940.8,16444,0.0,0.0,0.0,600,0.0,0.0,0,0.0,0,0;"
+[ 895.0s]   batch of 2 reading(s)
+[ 897.2s] +RCV addr=1 len=33 rssi=-69 snr=12 data="STAT,19551,8,0,11100,21,3115,85,0"
+[ 897.2s]   node health: charge 85% (3115 mV at the sense pin)
+[ 910.6s] +RCV addr=3 len=114 rssi=-74 snr=12 data="B,2,25.3,48.0,940.7,8222,0.0,0.0,0.0,682,0.0,0.0,0,0.0,0,3;25.3,48.0,940.6,8222,0.0,0.0,0.0,682,0.0,0.0,0,0.0,0,0;"
+[ 910.6s]   batch of 2 reading(s)
+[ 912.5s] +RCV addr=3 len=33 rssi=-75 snr=10 data="STAT,19407,8,0,11100,57,3099,84,0"
+[ 912.5s]   node health: charge 84% (3099 mV at the sense pin)
+[ 913.7s] [nbiot-mqtt] -> AT+CSQ
+[ 913.7s] [nbiot-mqtt] <- +CSQ: 31,0
+[ 913.7s] [nbiot-mqtt] <- OK
+[ 924.9s] [nbiot-mqtt] state IDLE -> PUBLISHING
+[ 924.9s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/gateway/telemetry"
+[ 924.9s] [nbiot-mqtt] payload (1111 bytes): {"NodoC-1":[{"ts":1791287534567,"values":{"temp":22.70,"rh":60.70,"pres":940.90,"gas":16444.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":600.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-69,"snr":12,"chargePct":85,"capMv":3115,"alarmState":0}},{"ts":1791287564567,"values":{"temp":22.70,"rh":60.70,"pres":940.80,"gas":16444.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":600.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-69,"snr":12,"chargePct":85,"capMv":3115,"alarmState":0}}],"NodoC-2":[{"ts":1791287549997,"values":{"temp":25.30,"rh":48.00,"pres":940.70,"gas":8222.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":682.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-74,"snr":12,"chargePct":84,"capMv":3098,"alarmState":0}},{"ts":1791287579997,"values":{"temp":25.30,"rh":48.00,"pres":940.60,"gas":8222.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":682.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-74,"snr":12,"chargePct":84,"capMv":3098,"alarmState":0}}]}
+[ 925.2s] [nbiot-mqtt] <- OK
+[ 925.2s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[ 925.2s] [nbiot-mqtt] state PUBLISHING -> IDLE
+[ 925.2s] [nbiot-mqtt] -> AT+CSQ
+[ 925.2s] [nbiot-mqtt] <- +CSQ: 31,0
+[ 925.2s] [nbiot-mqtt] <- OK
+[ 929.0s] +RCV addr=4 len=71 rssi=-38 snr=12 data="25.78,48.05,940.53,5684.85,0.00,0.00,0.00,1002.00,0.00,0.00,0.00,0.00,0"
+[ 931.2s] +RCV addr=4 len=30 rssi=-39 snr=12 data="STAT,47,8,0,10100,47,3120,86,0"
+[ 931.2s]   node health: charge 86% (3120 mV at the sense pin)
+[ 955.5s] [nbiot-mqtt] -> AT+CSQ
+[ 955.5s] [nbiot-mqtt] <- +CSQ: 31,0
+[ 955.5s] [nbiot-mqtt] <- OK
+[ 966.7s] +RCV addr=1 len=71 rssi=-71 snr=12 data="22.72,60.79,940.83,16443.99,0.00,0.00,0.00,600.00,0.00,0.00,0.00,0.00,0"
+[ 968.6s] +RCV addr=1 len=33 rssi=-71 snr=12 data="STAT,19555,8,0,11100,25,3115,85,0"
+[ 968.6s]   node health: charge 85% (3115 mV at the sense pin)
+[ 982.0s] +RCV addr=3 len=70 rssi=-76 snr=11 data="25.43,47.81,940.59,8221.99,0.00,0.00,0.00,682.00,0.00,0.00,0.00,0.00,0"
+[ 984.2s] +RCV addr=3 len=33 rssi=-75 snr=10 data="STAT,19411,8,0,11100,61,3100,84,0"
+[ 984.2s]   node health: charge 84% (3100 mV at the sense pin)
+[ 985.4s] [nbiot-mqtt] -> AT+CSQ
+[ 985.4s] [nbiot-mqtt] <- +CSQ: 31,0
+[ 985.4s] [nbiot-mqtt] <- OK
+[ 988.8s] [nbiot-mqtt] state IDLE -> PUBLISHING
+[ 988.8s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/gateway/telemetry"
+[ 988.8s] [nbiot-mqtt] payload (852 bytes): {"NodoC-3":[{"ts":1791287598468,"values":{"temp":25.78,"rh":48.05,"pres":940.53,"gas":5684.85,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":1002.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-38,"snr":12,"chargePct":86,"capMv":3120,"alarmState":0}}],"NodoC-1":[{"ts":1791287636072,"values":{"temp":22.72,"rh":60.79,"pres":940.83,"gas":16443.99,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":600.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-71,"snr":12,"chargePct":85,"capMv":3115,"alarmState":0}}],"NodoC-2":[{"ts":1791287651598,"values":{"temp":25.43,"rh":47.81,"pres":940.59,"gas":8221.99,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":682.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-76,"snr":11,"chargePct":84,"capMv":3099,"alarmState":0}}]}
+[ 989.1s] [nbiot-mqtt] <- OK
+[ 989.1s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[ 989.1s] [nbiot-mqtt] state PUBLISHING -> IDLE
+[ 989.1s] [nbiot-mqtt] -> AT+CSQ
+[ 989.1s] [nbiot-mqtt] <- +CSQ: 31,0
+[ 989.1s] [nbiot-mqtt] <- OK
+[1000.7s] +RCV addr=4 len=116 rssi=-38 snr=12 data="B,2,25.8,48.0,940.5,5685,0.0,0.0,0.0,1002,0.0,0.0,0,0.0,0,3;25.8,48.1,940.5,5685,0.0,0.0,0.0,1002,0.0,0.0,0,0.0,0,0;"
+[1000.7s]   batch of 2 reading(s)
+[1002.5s] +RCV addr=4 len=30 rssi=-39 snr=13 data="STAT,51,8,0,10100,51,3120,86,0"
+[1002.5s]   node health: charge 86% (3120 mV at the sense pin)
+[1019.1s] [nbiot-mqtt] -> AT+CSQ
+[1019.1s] [nbiot-mqtt] <- +CSQ: 31,0
+[1019.1s] [nbiot-mqtt] <- OK
+[1030.6s] [nbiot-mqtt] state IDLE -> PUBLISHING
+[1030.6s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/gateway/telemetry"
+[1030.6s] [nbiot-mqtt] payload (557 bytes): {"NodoC-3":[{"ts":1791287640034,"values":{"temp":25.80,"rh":48.00,"pres":940.50,"gas":5685.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":1002.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-38,"snr":12,"chargePct":86,"capMv":3120,"alarmState":0}},{"ts":1791287670034,"values":{"temp":25.80,"rh":48.10,"pres":940.50,"gas":5685.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":1002.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-38,"snr":12,"chargePct":86,"capMv":3120,"alarmState":0}}]}
+[1030.6s] [nbiot-mqtt] <- OK
+[1030.6s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[1030.6s] [nbiot-mqtt] state PUBLISHING -> IDLE
+[1030.6s] [nbiot-mqtt] -> AT+CSQ
+[1030.6s] [nbiot-mqtt] <- +CSQ: 31,0
+[1030.6s] [nbiot-mqtt] <- OK
+[1038.1s] +RCV addr=1 len=71 rssi=-68 snr=13 data="22.70,60.98,940.82,16443.99,0.00,0.00,0.00,600.00,0.00,0.00,0.00,0.00,0"
+[1040.3s] +RCV addr=1 len=33 rssi=-70 snr=12 data="STAT,19559,8,0,11100,29,3115,85,0"
+[1040.3s]   node health: charge 85% (3115 mV at the sense pin)
+[1053.7s] +RCV addr=3 len=70 rssi=-77 snr=8 data="25.44,47.99,940.63,8221.99,0.00,0.00,0.00,682.00,0.00,0.00,0.00,0.00,0"
+[1055.8s] +RCV addr=3 len=33 rssi=-78 snr=12 data="STAT,19415,8,0,11100,65,3100,84,0"
+[1055.8s]   node health: charge 84% (3100 mV at the sense pin)
+[1060.8s] [nbiot-mqtt] -> AT+CSQ
+[1060.8s] [nbiot-mqtt] <- +CSQ: 30,0
+[1060.8s] [nbiot-mqtt] <- OK
+[1074.2s] +RCV addr=4 len=30 rssi=-36 snr=14 data="STAT,55,8,0,10100,55,3120,86,0"
+[1074.2s]   node health: charge 86% (3120 mV at the sense pin)
+[1090.8s] [nbiot-mqtt] -> AT+CSQ
+[1090.8s] [nbiot-mqtt] <- +CSQ: 30,0
+[1090.8s] [nbiot-mqtt] <- OK
+[1097.9s] [nbiot-mqtt] state IDLE -> PUBLISHING
+[1097.9s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/gateway/telemetry"
+[1097.9s] [nbiot-mqtt] payload (567 bytes): {"NodoC-1":[{"ts":1791287707580,"values":{"temp":22.70,"rh":60.98,"pres":940.82,"gas":16443.99,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":600.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-68,"snr":13,"chargePct":85,"capMv":3115,"alarmState":0}}],"NodoC-2":[{"ts":1791287723203,"values":{"temp":25.44,"rh":47.99,"pres":940.63,"gas":8221.99,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":682.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-77,"snr":8,"chargePct":84,"capMv":3100,"alarmState":0}}]}
+[1098.3s] [nbiot-mqtt] <- OK
+[1098.3s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[1098.3s] [nbiot-mqtt] state PUBLISHING -> IDLE
+[1098.3s] [nbiot-mqtt] -> AT+CSQ
+[1098.3s] [nbiot-mqtt] <- +CSQ: 30,0
+[1098.3s] [nbiot-mqtt] <- OK
+[1109.8s] +RCV addr=1 len=116 rssi=-68 snr=13 data="B,2,22.7,61.2,940.8,16444,0.0,0.0,0.0,600,0.0,0.0,0,0.0,0,3;22.7,61.1,940.8,16444,0.0,0.0,0.0,600,0.0,0.0,0,0.0,0,0;"
+[1109.8s]   batch of 2 reading(s)
+[1111.7s] +RCV addr=1 len=33 rssi=-67 snr=13 data="STAT,19563,8,0,11100,33,3115,85,0"
+[1111.7s]   node health: charge 85% (3115 mV at the sense pin)
+[1125.4s] +RCV addr=3 len=114 rssi=-82 snr=10 data="B,2,25.4,48.1,940.6,8222,0.0,0.0,0.0,682,0.0,0.0,0,0.0,0,3;25.3,48.2,940.6,8222,0.0,0.0,0.0,682,0.0,0.0,0,0.0,0,0;"
+[1125.4s]   batch of 2 reading(s)
+[1127.6s] +RCV addr=3 len=33 rssi=-83 snr=9 data="STAT,19419,8,0,11100,69,3101,84,0"
+[1127.6s]   node health: charge 84% (3101 mV at the sense pin)
+[1128.2s] [nbiot-mqtt] -> AT+CSQ
+[1128.2s] [nbiot-mqtt] <- +CSQ: 31,0
+[1128.2s] [nbiot-mqtt] <- OK
+[1139.7s] [nbiot-mqtt] state IDLE -> PUBLISHING
+[1139.7s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/gateway/telemetry"
+[1139.7s] [nbiot-mqtt] payload (1111 bytes): {"NodoC-1":[{"ts":1791287749156,"values":{"temp":22.70,"rh":61.20,"pres":940.80,"gas":16444.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":600.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-68,"snr":13,"chargePct":85,"capMv":3115,"alarmState":0}},{"ts":1791287779156,"values":{"temp":22.70,"rh":61.10,"pres":940.80,"gas":16444.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":600.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-68,"snr":13,"chargePct":85,"capMv":3115,"alarmState":0}}],"NodoC-2":[{"ts":1791287764866,"values":{"temp":25.40,"rh":48.10,"pres":940.60,"gas":8222.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":682.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-82,"snr":10,"chargePct":84,"capMv":3100,"alarmState":0}},{"ts":1791287794866,"values":{"temp":25.30,"rh":48.20,"pres":940.60,"gas":8222.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":682.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-82,"snr":10,"chargePct":84,"capMv":3100,"alarmState":0}}]}
+[1139.7s] [nbiot-mqtt] <- OK
+[1140.0s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[1140.0s] [nbiot-mqtt] state PUBLISHING -> IDLE
+[1140.0s] [nbiot-mqtt] -> AT+CSQ
+[1140.0s] [nbiot-mqtt] <- +CSQ: 31,0
+[1140.0s] [nbiot-mqtt] <- OK
+[1143.4s] +RCV addr=4 len=71 rssi=-38 snr=12 data="25.78,48.08,940.49,5684.85,0.00,0.00,0.00,1002.00,0.00,0.00,0.00,0.00,0"
+[1145.6s] +RCV addr=4 len=30 rssi=-37 snr=12 data="STAT,59,8,0,10100,59,3120,86,0"
+[1145.6s]   node health: charge 86% (3120 mV at the sense pin)
+[1169.9s] [nbiot-mqtt] -> AT+CSQ
+[1169.9s] [nbiot-mqtt] <- +CSQ: 31,0
+[1169.9s] [nbiot-mqtt] <- OK
+[1181.1s] +RCV addr=1 len=71 rssi=-66 snr=12 data="22.68,61.07,940.77,16443.99,0.00,0.00,0.00,600.00,0.00,0.00,0.00,0.00,0"
+[1197.0s] +RCV addr=3 len=70 rssi=-79 snr=11 data="25.39,47.88,940.56,8221.99,0.00,0.00,0.00,682.00,0.00,0.00,0.00,0.00,0"
+[1199.2s] +RCV addr=3 len=33 rssi=-81 snr=11 data="STAT,19423,8,0,11100,73,3102,84,0"
+[1199.2s]   node health: charge 84% (3102 mV at the sense pin)
+[1199.8s] [nbiot-mqtt] -> AT+CSQ
+[1199.8s] [nbiot-mqtt] <- +CSQ: 31,0
+[1199.8s] [nbiot-mqtt] <- OK
+[1203.6s] [nbiot-mqtt] state IDLE -> PUBLISHING
+[1203.6s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/gateway/telemetry"
+[1203.6s] [nbiot-mqtt] payload (852 bytes): {"NodoC-3":[{"ts":1791287813008,"values":{"temp":25.78,"rh":48.08,"pres":940.49,"gas":5684.85,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":1002.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-38,"snr":12,"chargePct":86,"capMv":3120,"alarmState":0}}],"NodoC-1":[{"ts":1791287850668,"values":{"temp":22.68,"rh":61.07,"pres":940.77,"gas":16443.99,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":600.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-66,"snr":12,"chargePct":85,"capMv":3115,"alarmState":0}}],"NodoC-2":[{"ts":1791287866465,"values":{"temp":25.39,"rh":47.88,"pres":940.56,"gas":8221.99,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":682.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-79,"snr":11,"chargePct":84,"capMv":3101,"alarmState":0}}]}
+[1203.6s] [nbiot-mqtt] <- OK
+[1203.6s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[1203.6s] [nbiot-mqtt] state PUBLISHING -> IDLE
+[1203.6s] [nbiot-mqtt] -> AT+CSQ
+[1203.6s] [nbiot-mqtt] <- +CSQ: 31,0
+[1203.6s] [nbiot-mqtt] <- OK
+[1215.1s] +RCV addr=4 len=116 rssi=-38 snr=12 data="B,2,25.8,48.1,940.5,5685,0.0,0.0,0.0,1002,0.0,0.0,0,0.0,0,3;25.8,48.0,940.5,5685,0.0,0.0,0.0,1002,0.0,0.0,0,0.0,0,0;"
+[1215.1s]   batch of 2 reading(s)
+[1233.9s] [nbiot-mqtt] -> AT+CSQ
+[1233.9s] [nbiot-mqtt] <- +CSQ: 31,0
+[1233.9s] [nbiot-mqtt] <- OK
+[1245.1s] [nbiot-mqtt] state IDLE -> PUBLISHING
+[1245.1s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/gateway/telemetry"
+[1245.1s] [nbiot-mqtt] payload (557 bytes): {"NodoC-3":[{"ts":1791287854578,"values":{"temp":25.80,"rh":48.10,"pres":940.50,"gas":5685.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":1002.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-38,"snr":12,"chargePct":86,"capMv":3120,"alarmState":0}},{"ts":1791287884578,"values":{"temp":25.80,"rh":48.00,"pres":940.50,"gas":5685.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":1002.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-38,"snr":12,"chargePct":86,"capMv":3120,"alarmState":0}}]}
+[1245.1s] [nbiot-mqtt] <- OK
+[1245.4s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[1245.4s] [nbiot-mqtt] state PUBLISHING -> IDLE
+[1245.4s] [nbiot-mqtt] -> AT+CSQ
+[1245.4s] [nbiot-mqtt] <- +CSQ: 31,0
+[1245.4s] [nbiot-mqtt] <- OK
+[1252.6s] +RCV addr=1 len=71 rssi=-66 snr=12 data="22.66,61.17,940.77,16443.99,0.00,0.00,0.00,600.00,0.00,0.00,0.00,0.00,0"
+[1254.8s] +RCV addr=1 len=33 rssi=-66 snr=12 data="STAT,19571,8,0,11100,41,3115,85,0"
+[1254.8s]   node health: charge 85% (3115 mV at the sense pin)
+[1268.5s] +RCV addr=3 len=70 rssi=-74 snr=11 data="25.46,47.76,940.55,8221.99,0.00,0.00,0.00,682.00,0.00,0.00,0.00,0.00,0"
+[1270.7s] +RCV addr=3 len=33 rssi=-75 snr=12 data="STAT,19427,8,0,11100,77,3103,84,0"
+[1270.7s]   node health: charge 84% (3103 mV at the sense pin)
+[1275.3s] [nbiot-mqtt] -> AT+CSQ
+[1275.3s] [nbiot-mqtt] <- +CSQ: 31,0
+[1275.3s] [nbiot-mqtt] <- OK
+[1286.6s] +RCV addr=4 len=71 rssi=-37 snr=13 data="25.77,48.06,940.43,5684.85,0.00,0.00,0.00,1002.00,0.00,0.00,0.00,0.00,0"
+[1288.7s] +RCV addr=4 len=30 rssi=-37 snr=14 data="STAT,67,8,0,10100,67,3120,86,0"
+[1288.7s]   node health: charge 86% (3120 mV at the sense pin)
+[1305.3s] [nbiot-mqtt] -> AT+CSQ
+[1305.3s] [nbiot-mqtt] <- +CSQ: 31,0
+[1305.3s] [nbiot-mqtt] <- OK
+[1312.8s] [nbiot-mqtt] state IDLE -> PUBLISHING
+[1312.8s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/gateway/telemetry"
+[1312.8s] [nbiot-mqtt] payload (852 bytes): {"NodoC-1":[{"ts":1791287922165,"values":{"temp":22.66,"rh":61.17,"pres":940.77,"gas":16443.99,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":600.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-66,"snr":12,"chargePct":85,"capMv":3115,"alarmState":0}}],"NodoC-2":[{"ts":1791287938057,"values":{"temp":25.46,"rh":47.76,"pres":940.55,"gas":8221.99,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":682.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-74,"snr":11,"chargePct":84,"capMv":3102,"alarmState":0}}],"NodoC-3":[{"ts":1791287956079,"values":{"temp":25.77,"rh":48.06,"pres":940.43,"gas":5684.85,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":1002.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-37,"snr":13,"chargePct":86,"capMv":3120,"alarmState":0}}]}
+[1312.8s] [nbiot-mqtt] <- OK
+[1312.8s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[1312.8s] [nbiot-mqtt] state PUBLISHING -> IDLE
+[1312.8s] [nbiot-mqtt] -> AT+CSQ
+[1312.8s] [nbiot-mqtt] <- +CSQ: 31,0
+[1312.8s] [nbiot-mqtt] <- OK
+[1324.3s] +RCV addr=1 len=116 rssi=-67 snr=12 data="B,2,22.7,61.0,940.7,16444,0.0,0.0,0.0,600,0.0,0.0,0,0.0,0,3;22.7,61.0,940.8,16444,0.0,0.0,0.0,600,0.0,0.0,0,0.0,0,0;"
+[1324.3s]   batch of 2 reading(s)
+[1326.5s] +RCV addr=1 len=33 rssi=-67 snr=12 data="STAT,19575,8,0,11100,45,3115,85,0"
+[1326.5s]   node health: charge 85% (3115 mV at the sense pin)
+[1340.2s] +RCV addr=3 len=114 rssi=-75 snr=11 data="B,2,25.4,47.8,940.5,8222,0.0,0.0,0.0,682,0.0,0.0,0,0.0,0,3;25.5,47.6,940.5,8222,0.0,0.0,0.0,682,0.0,0.0,0,0.0,0,0;"
+[1340.2s]   batch of 2 reading(s)
+[1342.4s] +RCV addr=3 len=33 rssi=-75 snr=11 data="STAT,19431,8,0,11100,81,3103,84,0"
+[1342.4s]   node health: charge 84% (3103 mV at the sense pin)
+[1343.0s] [nbiot-mqtt] -> AT+CSQ
+[1343.0s] [nbiot-mqtt] <- +CSQ: 31,0
+[1343.0s] [nbiot-mqtt] <- OK
+[1354.2s] [nbiot-mqtt] state IDLE -> PUBLISHING
+[1354.2s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/gateway/telemetry"
+[1354.2s] [nbiot-mqtt] payload (1111 bytes): {"NodoC-1":[{"ts":1791287963736,"values":{"temp":22.70,"rh":61.00,"pres":940.70,"gas":16444.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":600.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-67,"snr":12,"chargePct":85,"capMv":3115,"alarmState":0}},{"ts":1791287993736,"values":{"temp":22.70,"rh":61.00,"pres":940.80,"gas":16444.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":600.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-67,"snr":12,"chargePct":85,"capMv":3115,"alarmState":0}}],"NodoC-2":[{"ts":1791287979720,"values":{"temp":25.40,"rh":47.80,"pres":940.50,"gas":8222.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":682.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-75,"snr":11,"chargePct":84,"capMv":3103,"alarmState":0}},{"ts":1791288009720,"values":{"temp":25.50,"rh":47.60,"pres":940.50,"gas":8222.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":682.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-75,"snr":11,"chargePct":84,"capMv":3103,"alarmState":0}}]}
+[1354.2s] [nbiot-mqtt] <- OK
+[1354.5s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[1354.5s] [nbiot-mqtt] state PUBLISHING -> IDLE
+[1354.5s] [nbiot-mqtt] -> AT+CSQ
+[1354.5s] [nbiot-mqtt] <- +CSQ: 31,0
+[1354.5s] [nbiot-mqtt] <- OK
+[1360.1s] +RCV addr=4 len=30 rssi=-37 snr=12 data="STAT,71,8,0,10100,71,3120,86,0"
+[1360.1s]   node health: charge 86% (3120 mV at the sense pin)
+[1384.5s] [nbiot-mqtt] -> AT+CSQ
+[1384.5s] [nbiot-mqtt] <- +CSQ: 31,0
+[1384.5s] [nbiot-mqtt] <- OK
+[1397.8s] +RCV addr=1 len=71 rssi=-67 snr=13 data="22.67,60.75,940.73,16443.99,0.00,0.00,0.00,600.00,0.00,0.00,0.00,0.00,0"
+[1397.8s] +RCV addr=1 len=33 rssi=-68 snr=12 data="STAT,19579,8,0,11100,49,3115,85,0"
+[1397.8s]   node health: charge 85% (3115 mV at the sense pin)
+[1411.8s] +RCV addr=3 len=70 rssi=-75 snr=12 data="25.52,47.36,940.49,8221.99,0.00,0.00,0.00,682.00,0.00,0.00,0.00,0.00,0"
+[1414.0s] +RCV addr=3 len=33 rssi=-75 snr=11 data="STAT,19435,8,0,11100,85,3104,84,0"
+[1414.0s]   node health: charge 84% (3104 mV at the sense pin)
+[1414.3s] [nbiot-mqtt] -> AT+CSQ
+[1414.3s] [nbiot-mqtt] <- +CSQ: 31,0
+[1414.3s] [nbiot-mqtt] <- OK
+[1429.6s] +RCV addr=4 len=116 rssi=-38 snr=12 data="B,2,25.8,48.0,940.4,5685,0.0,0.0,0.0,1002,0.0,0.0,0,0.0,0,3;25.8,48.1,940.4,5685,0.0,0.0,0.0,1002,0.0,0.0,0,0.0,0,0;"
+[1429.6s]   batch of 2 reading(s)
+[1431.8s] +RCV addr=4 len=30 rssi=-38 snr=13 data="STAT,75,8,0,10100,75,3120,86,0"
+[1431.8s]   node health: charge 86% (3120 mV at the sense pin)
+[1444.6s] [nbiot-mqtt] -> AT+CSQ
+[1444.6s] [nbiot-mqtt] <- +CSQ: 31,0
+[1444.6s] [nbiot-mqtt] <- OK
+[1455.8s] [nbiot-mqtt] state IDLE -> PUBLISHING
+[1455.8s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/gateway/telemetry"
+[1455.8s] [nbiot-mqtt] payload (1124 bytes): {"NodoC-1":[{"ts":1791288065244,"values":{"temp":22.67,"rh":60.75,"pres":940.73,"gas":16443.99,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":600.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-67,"snr":13,"chargePct":85,"capMv":3115,"alarmState":0}}],"NodoC-2":[{"ts":1791288081332,"values":{"temp":25.52,"rh":47.36,"pres":940.49,"gas":8221.99,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":682.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-75,"snr":12,"chargePct":84,"capMv":3103,"alarmState":0}}],"NodoC-3":[{"ts":1791288069137,"values":{"temp":25.80,"rh":48.00,"pres":940.40,"gas":5685.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":1002.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-38,"snr":12,"chargePct":86,"capMv":3120,"alarmState":0}},{"ts":1791288099137,"values":{"temp":25.80,"rh":48.10,"pres":940.40,"gas":5685.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":1002.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-38,"snr":12,"chargePct":86,"capMv":3120,"alarmState":0}}]}
+[1455.8s] [nbiot-mqtt] <- OK
+[1456.1s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[1456.1s] [nbiot-mqtt] state PUBLISHING -> IDLE
+[1456.1s] [nbiot-mqtt] -> AT+CSQ
+[1456.1s] [nbiot-mqtt] <- +CSQ: 31,0
+[1456.1s] [nbiot-mqtt] <- OK
+[1467.4s] +RCV addr=1 len=71 rssi=-67 snr=13 data="22.67,60.73,940.69,16443.99,0.00,0.00,0.00,600.00,0.00,0.00,0.00,0.00,0"
+[1469.2s] +RCV addr=1 len=33 rssi=-67 snr=12 data="STAT,19583,8,0,11100,53,3115,85,0"
+[1469.2s]   node health: charge 85% (3115 mV at the sense pin)
+[1483.3s] +RCV addr=3 len=70 rssi=-74 snr=11 data="25.56,47.33,940.48,8221.99,0.00,0.00,0.00,682.00,0.00,0.00,0.00,0.00,0"
+[1485.5s] +RCV addr=3 len=33 rssi=-74 snr=12 data="STAT,19439,8,0,11100,89,3104,84,0"
+[1485.5s]   node health: charge 84% (3104 mV at the sense pin)
+[1486.1s] [nbiot-mqtt] -> AT+CSQ
+[1486.1s] [nbiot-mqtt] <- +CSQ: 31,0
+[1486.1s] [nbiot-mqtt] <- OK
+[1501.1s] +RCV addr=4 len=71 rssi=-38 snr=13 data="25.78,48.05,940.35,5684.85,0.00,0.00,0.00,1002.00,0.00,0.00,0.00,0.00,0"
+[1503.2s] +RCV addr=4 len=30 rssi=-37 snr=13 data="STAT,79,8,0,10100,79,3120,86,0"
+[1503.2s]   node health: charge 86% (3120 mV at the sense pin)
+[1516.0s] [nbiot-mqtt] -> AT+CSQ
+[1516.0s] [nbiot-mqtt] <- +CSQ: 31,0
+[1516.0s] [nbiot-mqtt] <- OK
+[1527.2s] [nbiot-mqtt] state IDLE -> PUBLISHING
+[1527.2s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/gateway/telemetry"
+[1527.2s] [nbiot-mqtt] payload (852 bytes): {"NodoC-1":[{"ts":1791288136753,"values":{"temp":22.67,"rh":60.73,"pres":940.69,"gas":16443.99,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":600.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-67,"snr":13,"chargePct":85,"capMv":3115,"alarmState":0}}],"NodoC-2":[{"ts":1791288152930,"values":{"temp":25.56,"rh":47.33,"pres":940.48,"gas":8221.99,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":682.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-74,"snr":11,"chargePct":84,"capMv":3104,"alarmState":0}}],"NodoC-3":[{"ts":1791288170635,"values":{"temp":25.78,"rh":48.05,"pres":940.35,"gas":5684.85,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":1002.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-38,"snr":13,"chargePct":86,"capMv":3120,"alarmState":0}}]}
+[1527.2s] [nbiot-mqtt] <- OK
+[1527.5s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[1527.5s] [nbiot-mqtt] state PUBLISHING -> IDLE
+[1527.5s] [nbiot-mqtt] -> AT+CSQ
+[1527.5s] [nbiot-mqtt] <- +CSQ: 31,0
+[1527.5s] [nbiot-mqtt] <- OK
+[1538.8s] +RCV addr=1 len=116 rssi=-67 snr=12 data="B,2,22.7,60.8,940.7,16444,0.0,0.0,0.0,600,0.0,0.0,0,0.0,0,3;22.7,60.8,940.6,16444,0.0,0.0,0.0,600,0.0,0.0,0,0.0,0,0;"
+[1538.8s]   batch of 2 reading(s)
+[1541.0s] +RCV addr=1 len=33 rssi=-67 snr=13 data="STAT,19587,8,0,11100,57,3115,85,0"
+[1541.0s]   node health: charge 85% (3115 mV at the sense pin)
+[1557.5s] [nbiot-mqtt] -> AT+CSQ
+[1557.5s] [nbiot-mqtt] <- +CSQ: 31,0
+[1557.5s] [nbiot-mqtt] <- OK
+[1569.0s] [nbiot-mqtt] state IDLE -> PUBLISHING
+[1569.0s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/gateway/telemetry"
+[1569.0s] [nbiot-mqtt] payload (557 bytes): {"NodoC-1":[{"ts":1791288178324,"values":{"temp":22.70,"rh":60.80,"pres":940.70,"gas":16444.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":600.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-67,"snr":12,"chargePct":85,"capMv":3115,"alarmState":0}},{"ts":1791288208324,"values":{"temp":22.70,"rh":60.80,"pres":940.60,"gas":16444.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":600.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-67,"snr":12,"chargePct":85,"capMv":3115,"alarmState":0}}]}
+[1569.0s] [nbiot-mqtt] <- OK
+[1569.0s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[1569.0s] [nbiot-mqtt] state PUBLISHING -> IDLE
+[1569.0s] [nbiot-mqtt] -> AT+CSQ
+[1569.0s] [nbiot-mqtt] <- +CSQ: 31,0
+[1569.0s] [nbiot-mqtt] <- OK
+[1574.6s] +RCV addr=3 len=116 rssi=-76 snr=11 data="B,2,25.5,47.3,940.4,10836,0.0,0.0,0.0,702,0.0,0.0,0,0.0,0,3;25.6,47.2,940.4,10836,0.0,0.0,0.0,702,0.0,0.0,0,0.0,0,0;"
+[1574.6s]   batch of 2 reading(s)
+[1598.9s] +RCV addr=3 len=32 rssi=-75 snr=12 data="STAT,19443,8,0,11100,3,3106,85,0"
+[1598.9s]   node health: charge 85% (3106 mV at the sense pin)
+[1598.9s] [nbiot-mqtt] -> AT+CSQ
+[1599.2s] [nbiot-mqtt] <- +CSQ: 28,0
+[1599.2s] [nbiot-mqtt] <- OK
+[1604.5s] [nbiot-mqtt] state IDLE -> PUBLISHING
+[1604.5s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/gateway/telemetry"
+[1604.5s] [nbiot-mqtt] payload (557 bytes): {"NodoC-2":[{"ts":1791288214025,"values":{"temp":25.50,"rh":47.30,"pres":940.40,"gas":10836.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":702.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-76,"snr":11,"chargePct":84,"capMv":3104,"alarmState":0}},{"ts":1791288244025,"values":{"temp":25.60,"rh":47.20,"pres":940.40,"gas":10836.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":702.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-76,"snr":11,"chargePct":84,"capMv":3104,"alarmState":0}}]}
+[1604.5s] [nbiot-mqtt] <- OK
+[1604.8s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[1604.8s] [nbiot-mqtt] state PUBLISHING -> IDLE
+[1604.8s] [nbiot-mqtt] -> AT+CSQ
+[1604.8s] [nbiot-mqtt] <- +CSQ: 28,0
+[1604.8s] [nbiot-mqtt] <- OK
+[1612.6s] +RCV addr=1 len=71 rssi=-68 snr=13 data="22.65,60.75,940.62,16443.99,0.00,0.00,0.00,600.00,0.00,0.00,0.00,0.00,0"
+[1612.6s] +RCV addr=1 len=33 rssi=-68 snr=13 data="STAT,19591,8,0,11100,61,3115,85,0"
+[1612.6s]   node health: charge 85% (3115 mV at the sense pin)
+[1634.7s] [nbiot-mqtt] -> AT+CSQ
+[1634.7s] [nbiot-mqtt] <- +CSQ: 31,0
+[1634.7s] [nbiot-mqtt] <- OK
+[1644.1s] +RCV addr=4 len=116 rssi=-38 snr=13 data="B,2,25.8,48.0,940.3,5685,0.0,0.0,0.0,1002,0.0,0.0,0,0.0,0,3;25.8,47.9,940.3,5685,0.0,0.0,0.0,1002,0.0,0.0,0,0.0,0,0;"
+[1644.1s]   batch of 2 reading(s)
+[1646.0s] +RCV addr=3 len=71 rssi=-74 snr=12 data="25.51,47.36,940.41,10836.44,0.00,0.00,0.00,702.00,0.00,0.00,0.00,0.00,0"
+[1646.3s] +RCV addr=4 len=30 rssi=-38 snr=13 data="STAT,87,8,0,10100,87,3120,86,0"
+[1646.3s]   node health: charge 86% (3120 mV at the sense pin)
+[1664.7s] +RCV addr=3 len=32 rssi=-74 snr=11 data="STAT,19447,8,0,11100,7,3105,84,0"
+[1664.7s]   node health: charge 84% (3105 mV at the sense pin)
+[1664.7s] [nbiot-mqtt] -> AT+CSQ
+[1664.7s] [nbiot-mqtt] <- +CSQ: 31,0
+[1664.7s] [nbiot-mqtt] <- OK
+[1670.3s] [nbiot-mqtt] state IDLE -> PUBLISHING
+[1670.3s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/gateway/telemetry"
+[1670.3s] [nbiot-mqtt] payload (1125 bytes): {"NodoC-1":[{"ts":1791288279833,"values":{"temp":22.65,"rh":60.75,"pres":940.62,"gas":16443.99,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":600.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-68,"snr":13,"chargePct":85,"capMv":3115,"alarmState":0}}],"NodoC-3":[{"ts":1791288283685,"values":{"temp":25.80,"rh":48.00,"pres":940.30,"gas":5685.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":1002.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-38,"snr":13,"chargePct":86,"capMv":3120,"alarmState":0}},{"ts":1791288313685,"values":{"temp":25.80,"rh":47.90,"pres":940.30,"gas":5685.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":1002.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-38,"snr":13,"chargePct":86,"capMv":3120,"alarmState":0}}],"NodoC-2":[{"ts":1791288315620,"values":{"temp":25.51,"rh":47.36,"pres":940.41,"gas":10836.44,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":702.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-74,"snr":12,"chargePct":85,"capMv":3106,"alarmState":0}}]}
+[1670.6s] [nbiot-mqtt] <- OK
+[1670.6s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[1670.6s] [nbiot-mqtt] state PUBLISHING -> IDLE
+[1670.6s] [nbiot-mqtt] -> AT+CSQ
+[1670.6s] [nbiot-mqtt] <- +CSQ: 31,0
+[1670.6s] [nbiot-mqtt] <- OK
+[1684.0s] +RCV addr=1 len=33 rssi=-67 snr=12 data="STAT,19595,8,0,11100,65,3115,85,0"
+[1684.0s]   node health: charge 85% (3115 mV at the sense pin)
+[1700.5s] [nbiot-mqtt] -> AT+CSQ
+[1700.5s] [nbiot-mqtt] <- +CSQ: 31,0
+[1700.5s] [nbiot-mqtt] <- OK
+[1719.8s] +RCV addr=3 len=33 rssi=-74 snr=12 data="STAT,19451,8,0,11100,11,3107,85,0"
+[1719.8s]   node health: charge 85% (3107 mV at the sense pin)
+[1730.7s] [nbiot-mqtt] -> AT+CSQ
+[1730.7s] [nbiot-mqtt] <- +CSQ: 31,0
+[1730.7s] [nbiot-mqtt] <- OK
+[1735.1s] +RCV addr=4 len=70 rssi=-38 snr=12 data="25.77,47.84,940.28,5684.85,0.00,0.00,0.00,889.00,0.00,0.00,0.00,0.00,0"
+[1737.3s] +RCV addr=4 len=29 rssi=-38 snr=12 data="STAT,91,8,0,11100,1,3120,86,0"
+[1737.3s]   node health: charge 86% (3120 mV at the sense pin)
+[1753.5s] +RCV addr=1 len=116 rssi=-68 snr=13 data="B,2,22.6,60.9,940.6,16444,0.0,0.0,0.0,600,0.0,0.0,0,0.0,0,3;22.6,60.8,940.6,16444,0.0,0.0,0.0,600,0.0,0.0,0,0.0,0,0;"
+[1753.5s]   batch of 2 reading(s)
+[1755.4s] +RCV addr=1 len=33 rssi=-68 snr=13 data="STAT,19599,8,0,11100,69,3115,85,0"
+[1755.4s]   node health: charge 85% (3115 mV at the sense pin)
+[1760.7s] [nbiot-mqtt] -> AT+CSQ
+[1760.7s] [nbiot-mqtt] <- +CSQ: 31,0
+[1760.7s] [nbiot-mqtt] <- OK
+[1789.4s] +RCV addr=3 len=116 rssi=-77 snr=12 data="B,2,25.6,47.0,940.3,10836,0.0,0.0,0.0,702,0.0,0.0,0,0.0,0,3;25.6,46.9,940.3,10836,0.0,0.0,0.0,702,0.0,0.0,0,0.0,0,0;"
+[1789.4s]   batch of 2 reading(s)
+[1790.6s] [nbiot-mqtt] -> AT+CSQ
+[1790.6s] [nbiot-mqtt] <- +CSQ: 31,0
+[1790.6s] [nbiot-mqtt] <- OK
+[1791.5s] +RCV addr=3 len=33 rssi=-78 snr=11 data="STAT,19455,8,0,11100,15,3108,85,0"
+[1791.5s]   node health: charge 85% (3108 mV at the sense pin)
+[1795.3s] [nbiot-mqtt] state IDLE -> PUBLISHING
+[1795.3s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/gateway/telemetry"
+[1795.3s] [nbiot-mqtt] payload (1124 bytes): {"NodoC-3":[{"ts":1791288404607,"values":{"temp":25.77,"rh":47.84,"pres":940.28,"gas":5684.85,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":889.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-38,"snr":12,"chargePct":86,"capMv":3120,"alarmState":0}}],"NodoC-1":[{"ts":1791288392920,"values":{"temp":22.60,"rh":60.90,"pres":940.60,"gas":16444.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":600.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-68,"snr":13,"chargePct":85,"capMv":3115,"alarmState":0}},{"ts":1791288422920,"values":{"temp":22.60,"rh":60.80,"pres":940.60,"gas":16444.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":600.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-68,"snr":13,"chargePct":85,"capMv":3115,"alarmState":0}}],"NodoC-2":[{"ts":1791288428888,"values":{"temp":25.60,"rh":47.00,"pres":940.30,"gas":10836.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":702.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-77,"snr":12,"chargePct":85,"capMv":3107,"alarmState":0}}]}
+[1795.3s] [nbiot-mqtt] <- OK
+[1795.3s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[1795.3s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/gateway/telemetry"
+[1795.3s] [nbiot-mqtt] payload (285 bytes): {"NodoC-2":[{"ts":1791288458888,"values":{"temp":25.60,"rh":46.90,"pres":940.30,"gas":10836.00,"pm1":0.00,"pm25":0.00,"pm10":0.00,"co2":702.00,"co":0.00,"coTemp":0.00,"windAngle":0.00,"windSpeed":0.00,"windValid":false,"rssi":-77,"snr":12,"chargePct":85,"capMv":3107,"alarmState":0}}]}
+[1795.3s] [nbiot-mqtt] <- OK
+[1795.6s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[1795.6s] [nbiot-mqtt] state PUBLISHING -> IDLE
+[1795.6s] [nbiot-mqtt] -> AT+CSQ
+[1795.6s] [nbiot-mqtt] <- +CSQ: 31,0
+[1795.6s] [nbiot-mqtt] <- OK
