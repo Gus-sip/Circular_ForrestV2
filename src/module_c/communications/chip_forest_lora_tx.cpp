@@ -437,7 +437,11 @@ static void ledReading() {
 // Set to 0 for bench testing: the node stays awake, samples continuously and
 // transmits on a plain timer. Useful when you need the serial port to stay put and
 // the LED to be watchable, rather than the port vanishing every 10 seconds.
+// Overridable from platformio.ini (-DSLEEP_ENABLED=0) so a bench or measurement
+// build needs no source edit - see the medir-tiempos environment.
+#ifndef SLEEP_ENABLED
 #define SLEEP_ENABLED 1
+#endif
 
 // Transmit cadence when SLEEP_ENABLED is 0. The tick counters cannot drive it in
 // this mode - they advance once per boot, and without sleep there are no reboots,
@@ -2834,7 +2838,20 @@ static void readFastSensorsOnce() {
       break;
     }
 
+    // PER-SLOT TIMING. The power model needs the time each sensor is actually
+    // drawing current, and that is not any of the #defines - those are ceilings
+    // and gaps, not what a slot costs in practice. Measured here, in the real
+    // sequence, because a slot's cost depends on what ran before it: the BMV080
+    // follows a rail cycle, the CM1106 a power-cycle and warm-up.
+    //
+    // "active" is the slot itself; "recovery" is the enforced quiet time after
+    // it, which is also time the node is awake and the ESP is drawing its ~35mA.
+    // Both belong in the budget, so both are reported.
+    const uint32_t slotT0 = millis();
     runSlot(slot);
+    const uint32_t slotMs = millis() - slotT0;
+
+    const uint32_t recT0 = millis();
     quiesceAll();
 
     // The heater is the one load big enough to stop its neighbours starting, so it
@@ -2844,7 +2861,13 @@ static void readFastSensorsOnce() {
     } else {
       delay(SLOT_GAP_MS);
     }
+    Serial.printf("[t] %-8s active=%lums recovery=%lums\n", slotName(slot),
+                  (unsigned long)slotMs, (unsigned long)(millis() - recT0));
+    Serial.flush();
   }
+
+  Serial.printf("[t] TOTAL burst=%lums\n", (unsigned long)(millis() - t0));
+  Serial.flush();
 
   // Snapshot health NOW, while the statuses refer to reads that just happened.
   g_lastReadHealth = (uint8_t)(((g_bmeSt == ReadingStatus::Ok ? 1 : 0) << 4) |
