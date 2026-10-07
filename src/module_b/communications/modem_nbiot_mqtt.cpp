@@ -646,7 +646,7 @@ void ModemNBIoTMqtt::publishCommandLogApplied(long requestId, const char *status
   // here would have emitted a literal "llu" or garbage into live telemetry.
   char payload[192];
   int n = snprintf(payload, sizeof(payload),
-                   "{\"commandLog\":{\"requestId\":%ld,\"status\":\"%s\"", requestId, status);
+                   "{\"seguimientoCmd\":{\"requestId\":%ld,\"status\":\"%s\"", requestId, status);
   if (n < 0) return;
   size_t pos = (size_t)n;
 
@@ -677,7 +677,7 @@ void ModemNBIoTMqtt::publishCommandLogApplied(long requestId, const char *status
 
   // THE SAME RECORD, ALSO ON THE NODE'S OWN TELEMETRY.
   //
-  // v1/devices/me/telemetry carries the gateway's access token, so `commandLog`
+  // v1/devices/me/telemetry carries the gateway's access token, so `seguimientoCmd`
   // lands on the GATEWAY device (CON-1) and never on NodoC-3. "enviado" goes to
   // the node's RPC response topic, so a dashboard bound to the node sees the
   // command leave and never sees it confirmed - it sits at "en transito al
@@ -740,7 +740,7 @@ void ModemNBIoTMqtt::publishCommandLogApplied(long requestId, const char *status
   // Straight from the protocol document, under "Control del Comando en MODULOA":
   //
   //     MODULOA recibe la telemetria
-  //     Detecta "commandLog"
+  //     Detecta "seguimientoCmd" (v2; la v1 lo llamaba "commandLog")
   //     Copia automaticamente a atributos del ModC
   //     Dashboard lee atributos (rapido)
   //     Historico guardado en telemetria
@@ -756,13 +756,16 @@ void ModemNBIoTMqtt::publishCommandLogApplied(long requestId, const char *status
   // existing. It does not replace the telemetry record, which the document
   // requires and which remains the history.
   //
-  // Key names: `commandLog` is the only name the document gives, so the same
-  // object goes in under the same name. The threshold keys are the node's own
+  // Key names: `seguimientoCmd` is what Module A actually subscribes to. v1 of the
+  // protocol document says `commandLog`, and that is what this published until
+  // 2026-10-07 - v2 of the document renamed it and we were working from v1. The
+  // records were arriving and being stored correctly the whole time under a name
+  // nothing was listening for. The threshold keys are the node's own
   // vocabulary, as echoed in its ACK. Nothing is invented - inventing names is
   // what the action-name mismatch cost us.
   if (device && *device) {
     char attrs[480];
-    int a = snprintf(attrs, sizeof(attrs), "{\"%s\":{\"commandLog\":", device);
+    int a = snprintf(attrs, sizeof(attrs), "{\"%s\":{\"seguimientoCmd\":", device);
     if (a > 0 && (size_t)a < sizeof(attrs)) {
       size_t ap = (size_t)a;
       // The record without its {"commandLog": wrapper - reuse, do not rebuild.
@@ -770,7 +773,7 @@ void ModemNBIoTMqtt::publishCommandLogApplied(long requestId, const char *status
       // gave 15 for a 13-character key and ate the "{\"" of "{\"requestId\"",
       // putting {"NodoC-3":{"commandLog":requestId":11,... on the wire - valid
       // MQTT carrying invalid JSON, which ThingsBoard drops without complaint.
-      static const char kKey[] = "\"commandLog\":";
+      static const char kKey[] = "\"seguimientoCmd\":";
       const char *inner = strstr(payload, kKey);
       if (inner) {
         inner += sizeof(kKey) - 1;
@@ -795,7 +798,7 @@ void ModemNBIoTMqtt::publishCommandLogApplied(long requestId, const char *status
     }
   }
 
-  Serial.printf("[nbiot-mqtt] commandLog %ld -> %s%s\n", requestId, status,
+  Serial.printf("[nbiot-mqtt] seguimientoCmd %ld -> %s%s\n", requestId, status,
                 (device && *device) ? " (gateway telemetry + node telemetry + node attributes)" : "");
 }
 
