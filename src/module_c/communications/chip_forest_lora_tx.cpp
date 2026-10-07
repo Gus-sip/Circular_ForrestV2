@@ -1572,6 +1572,26 @@ void setup() {
     // setup() puts it straight back into hibernation on this same boot.
     g_hibernating = false;
     g_burstCount = g_burstEvery;
+
+    // EL ESTADO DE ALARMA TAMBIEN HAY QUE SEMBRARLO.
+    //
+    // Las tres viven en RTC_NOINIT, que sobrevive al deep sleep - que es lo que
+    // se quiere - pero NO a un corte de alimentacion: ahi vuelven con basura. Y
+    // este bloque, que existe justo para limpiar esa basura, se las saltaba.
+    //
+    // Lo vimos en vivo el 2026-10-07: C3 arranco en frio y, al entrar en
+    // pre-alarma, escalo a ALARMA en 26 segundos en lugar de los 600 de la
+    // ventana de confirmacion, porque g_prealarmMs vino con un valor cualquiera
+    // mayor que el umbral.
+    //
+    // Lo grave no es ese. Es que g_alarmState tampoco se sembraba: un nodo que
+    // pierda alimentacion puede arrancar directamente en ALARMA DE INCENDIO sin
+    // que ningun sensor haya cruzado nada. En un sistema de deteccion de
+    // incendios eso es una falsa alarma que se dispara justo cuando una placa se
+    // reinicia en campo, que es cuando menos se puede ir a mirar.
+    g_alarmState = ALARM_NORMAL;
+    g_prealarmMs = 0;
+    g_alarmClearRun = 0;
     g_sensorReadEvery = SENSOR_READ_EVERY_DEFAULT;
     g_loraTransEvery = LORA_TRANS_EVERY_DEFAULT;
     g_storeCount = 0;
@@ -2023,10 +2043,25 @@ static const char *slotName(int slot) {
 // warm up - not a tuning problem, an impossibility. Keeping 5V up through the
 // transmit is the only thing that makes CO measurable without a hardware change.
 //
-// Set to 1 only with a board on the bench and the log watched for a POWERON
-// reset after "[tx] rails". If it resets, the answer is hardware, not firmware.
+// ACTIVADO POR DEFECTO el 2026-10-07, y la razon ya no es solo el CO.
+//
+// El Calypso tambien vive en el rail de 5V, y mostro el mismo sintoma: la primera
+// lectura tras el arranque recibio 27 bytes - cuando el rail llevaba todo el
+// setup() alimentado - y las doce siguientes cero. Dos sensores distintos
+// fallando igual por la misma causa dejan poca duda.
+//
+// Medido en C3: 290 s en alarma, 11 transmisiones con el rail de 5V levantado,
+// SIN UN SOLO REINICIO (nvsBoots=1).
+//
+// AVISO QUE SIGUE EN PIE: esa prueba se hizo con C3 alimentado desde una fuente
+// de banco, NO desde el pack de litio montado. Demuestra que el firmware
+// funciona, no que la alimentacion real lo aguante. El corte original se puso
+// contra un reset POWERON de verdad en radio.send(), aunque diagnosticado con
+// SUPERCONDENSADORES, cuya ESR no podia con los 151 mA de pico de la radio. Hay
+// que repetirlo en un nodo con bateria antes de darlo por bueno en campo; si
+// aparece un POWERON tras "[tx] 3V3 off", volver a 0 y la respuesta es hardware.
 #ifndef TX_KEEP_5V_RAIL
-#define TX_KEEP_5V_RAIL 0
+#define TX_KEEP_5V_RAIL 1
 #endif
 
 static void powerDownSensorRails() {
@@ -2211,7 +2246,24 @@ static void storeCurrentReading() {
   r.co = coMeasured ? g_co : -1.0f;
   r.coTemp = coMeasured ? g_coTemp : -1.0f;
   r.windAngle = g_windAngle; r.windSpeed = g_windSpeed;
-  r.windValid = g_windValid ? 1 : 0;
+
+  // UN DATO VIEJO NO ES UN DATO VALIDO.
+  //
+  // g_windValid se pone a true cuando una lectura del Calypso sale bien y NUNCA
+  // se vuelve a poner a false, porque vive en RTC. g_calFresh, en cambio, se
+  // limpia al empezar cada ciclo de lectura y solo se pone si ESTE ciclo recibio
+  // datos. Publicando solo g_windValid, un nodo que leyo el viento una vez al
+  // arrancar seguia diciendo "valid" indefinidamente con el mismo valor.
+  //
+  // Medido en C3 el 2026-10-07: la primera lectura tras el arranque recibio 27
+  // bytes y las doce siguientes cero, y las trece publicaron valid=1 con
+  // windSpeed=0.00. Es el mismo patron que el co2=663 congelado de C1, que costo
+  // dias de no entender nada.
+  //
+  // La regla de alarma ya exigia las dos (ruleHasData comprueba g_calFresh &&
+  // g_windValid), asi que el fuego nunca estuvo en juego - lo que mentia era la
+  // telemetria que ve el operador.
+  r.windValid = (g_windValid && g_calFresh) ? 1 : 0;
   r.tickAge = g_wakeCount;  // absolute tick; converted to an age at transmit time
   Serial.printf("[store] reading %u/%u kept (tick %lu)\n", (unsigned)g_storeCount,
                 (unsigned)READING_STORE_MAX, (unsigned long)g_wakeCount);
@@ -3075,7 +3127,7 @@ static void readFastSensorsOnce() {
                                ((g_bmvSt == ReadingStatus::Ok ? 1 : 0) << 3) |
                                ((g_co2St == ReadingStatus::Ok ? 1 : 0) << 2) |
                                ((g_coSt == ReadingStatus::Ok ? 1 : 0) << 1) |
-                               (g_windValid ? 1 : 0));
+                               ((g_windValid && g_calFresh) ? 1 : 0));
   g_lastReadWake = g_wakeCount;
 
   uint8_t stillPending = pendingSensors(pending, sizeof(pending));
@@ -3085,7 +3137,8 @@ static void readFastSensorsOnce() {
                 statusName(g_bmvSt), g_pm25,
                 statusName(g_co2St), g_co2,
                 statusName(g_coSt), g_co,
-                !g_calypsoEnabled ? "off" : (g_windValid ? "OK" : "silent"),
+                !g_calypsoEnabled ? "off"
+                                 : ((g_windValid && g_calFresh) ? "OK" : "silent"),
                 calypso.lastReadBytes(),
                 stillPending ? "  STALE: " : "", stillPending ? pending : "",
                 (unsigned long)(millis() - t0));

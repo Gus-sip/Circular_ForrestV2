@@ -1,0 +1,206 @@
+=== COM16 abierto, capturando 280s (el open resetea la placa) ===
+[   1.5s] [bme probe after BMV080 wait, before begin] 0x76 (addr-probe=0) chip ID = 0x61 (0x61 = BME69x, CORRECT)
+[   1.5s] [  9771][E][Wire.cpp:499] requestFrom(): i2cWriteReadNonStop returned Error -1
+[   1.5s] [bme probe after BMV080 wait, before begin] 0x77 accepted the register write but returned no data
+[   1.5s] [step] bme690.begin ...
+[   1.5s] BME690: OK (bound to 0x76)
+[   1.5s] SEN0466: SKIPPED (210s settle - excluded from the sleeping cycle)
+[   1.5s] [step] cm1106.begin (SWAPPED: now before bmv080) ...
+[   4.7s] [step] cm1106.begin returned ...
+[   4.7s] [step] bmv080.begin (SWAPPED: now after cm1106) ...
+[   5.3s] BMV080: OK
+[   5.3s] [step] calypso.begin next ...
+[   5.3s] [step] calypso.begin returned - radio next ...
+[   5.3s] Configuring RYLR998 (link parameters must match pp1-lora-receiver):
+[   5.3s]   -> AT
+[   5.3s]   <- +OK
+[   5.3s]   -> AT+ADDRESS=4
+[   5.3s]   <- +OK
+[   5.3s]   -> AT+NETWORKID=5
+[   5.3s]   <- +OK
+[   5.3s]   -> AT+BAND=868000000
+[   5.3s]   <- +OK
+[   5.3s]   -> AT+PARAMETER=7,7,1,12
+[   5.3s]   <- +OK
+[   5.3s]   -> AT+CRFOP=14
+[   5.3s]   <- +OK
+[   5.3s] LoRa TX power -> 14 dBm: OK
+[   5.3s] Radio init OK
+[   5.3s] Setup complete.
+[   5.3s] 
+[   5.3s] [co] 5V rail up - warming the SEN0466, 210s before it is trusted
+[  11.8s] [read] 3V3 rail recovery after the BME690 heater (5V stays up)
+[  11.8s] [t] BME690   active=187ms recovery=6100ms
+[  13.7s] [bmv080] laser off after 2056ms (pm2.5=9.0, frame)
+[  15.2s] [t] BMV080   active=2135ms recovery=1501ms
+[  18.9s] [cm1106 raw] 16 05 01 02 68 00 03 77 | status=OK frozenValueRun=0
+[  20.5s] [t] CM1106   active=3513ms recovery=1500ms
+[  21.7s] [t] SEN0466  active=0ms recovery=1500ms
+[  23.8s] [t] Calypso  active=574ms recovery=1500ms
+[  23.8s] [t] TOTAL burst=18515ms
+[  23.8s] [read] bme=OK(T23.6 H45.1 gas43170) bmv=OK(pm2.5=9.0) co2=OK(616) co=NotInit(0.00) wind=OK(rx=27)  (all sensors, 18516ms)
+[  23.8s] [wind] angle=334.0 deg  speed=1.10
+[  23.8s] [store] reading 1/4 kept (tick 31)
+[  25.4s] [tx] 3V3 off for the transmit, 5V HELD UP (TX_KEEP_5V_RAIL)
+[  26.0s] TX [0..0/1] 76 bytes: 23.63,45.07,938.45,43170.32,4.00,9.00,13.00,616.00,-1.00,-1.00,334.00,1.10,1  (sent)
+[  28.2s] [stat] STAT,31,0,1,11101,0,3120,86,2  (cap 3.62V = 86% usable, flags from wake 31, 0 tick(s) ago) (sent)
+[  30.0s] Boot guard: run marked good, NVS counter cleared
+[  30.0s] [TEST BUILD] alarm state FORCED to ALARM - not from the sensors
+[  36.2s] [read] 3V3 rail recovery after the BME690 heater (5V stays up)
+[  36.2s] [t] BME690   active=37ms recovery=6101ms
+[  38.4s] [bmv080] laser off after 2054ms (pm2.5=9.0, frame)
+[  39.9s] [t] BMV080   active=2133ms recovery=1500ms
+[  43.3s] [cm1106 raw] 16 05 01 02 5D 00 03 82 | status=OK frozenValueRun=0
+[  44.8s] [t] CM1106   active=3513ms recovery=1500ms
+[  46.4s] [t] SEN0466  active=0ms recovery=1500ms
+[  48.5s] [t] Calypso  active=774ms recovery=1500ms
+[  48.5s] [t] TOTAL burst=18563ms
+[  48.5s] [read] bme=OK(T23.8 H45.1 gas13725) bmv=OK(pm2.5=9.0) co2=OK(605) co=NotInit(0.00) wind=OK(rx=27)  (all sensors, 18564ms)
+[  48.5s] [wind] angle=16.0 deg  speed=1.10
+[  48.5s] [store] reading 1/4 kept (tick 31)
+[  50.1s] [tx] 3V3 off for the transmit, 5V HELD UP (TX_KEEP_5V_RAIL)
+[  50.7s] TX [0..0/1] 75 bytes: 23.84,45.13,938.42,13725.07,4.00,9.00,13.00,605.00,-1.00,-1.00,16.00,1.10,1  (sent)
+[  52.8s] [stat] STAT,31,0,1,11101,0,3120,86,2  (cap 3.62V = 86% usable, flags from wake 31, 0 tick(s) ago) (sent)
+[  55.0s] [read] 3V3 rail recovery after the BME690 heater (5V stays up)
+[  61.1s] [t] BME690   active=37ms recovery=6101ms
+[  63.0s] [bmv080] laser off after 2035ms (pm2.5=0.0, frame)
+[  64.5s] [t] BMV080   active=2114ms recovery=1500ms
+[  68.2s] [cm1106 raw] 16 05 01 02 9E 00 03 41 | status=OK frozenValueRun=0
+[  69.7s] [t] CM1106   active=3513ms recovery=1500ms
+[  71.2s] [t] SEN0466  active=0ms recovery=1500ms
+[  73.4s] [t] Calypso  active=794ms recovery=1500ms
+[  73.4s] [t] TOTAL burst=18563ms
+[  73.4s] [read] bme=OK(T23.8 H45.7 gas14324) bmv=OK(pm2.5=0.0) co2=OK(670) co=NotInit(0.00) wind=OK(rx=27)  (all sensors, 18564ms)
+[  73.4s] [wind] angle=353.0 deg  speed=0.70
+[  73.4s] [store] reading 1/4 kept (tick 31)
+[  75.0s] [tx] 3V3 off for the transmit, 5V HELD UP (TX_KEEP_5V_RAIL)
+[  75.6s] TX [0..0/1] 75 bytes: 23.77,45.72,938.41,14324.08,0.00,0.00,0.00,670.00,-1.00,-1.00,353.00,0.70,1  (sent)
+[  77.4s] [stat] STAT,31,0,1,11101,0,3120,86,2  (cap 3.62V = 86% usable, flags from wake 31, 0 tick(s) ago) (sent)
+[  79.6s] [TEST BUILD] alarm state FORCED to ALARM - not from the sensors
+[  79.6s] [read] 3V3 rail recovery after the BME690 heater (5V stays up)
+[  85.7s] [t] BME690   active=37ms recovery=6101ms
+[  87.9s] [bmv080] laser off after 2056ms (pm2.5=9.0, frame)
+[  89.5s] [t] BMV080   active=2135ms recovery=1500ms
+[  92.9s] [cm1106 raw] 16 05 01 02 81 00 03 5E | status=OK frozenValueRun=0
+[  94.4s] [t] CM1106   active=3513ms recovery=1500ms
+[  95.9s] [t] SEN0466  active=0ms recovery=1500ms
+[  98.1s] [t] Calypso  active=774ms recovery=1500ms
+[  98.1s] [t] TOTAL burst=18565ms
+[  98.1s] [read] bme=OK(T23.7 H45.9 gas14559) bmv=OK(pm2.5=9.0) co2=OK(641) co=NotInit(0.00) wind=OK(rx=27)  (all sensors, 18566ms)
+[  98.1s] [wind] angle=353.0 deg  speed=0.60
+[  98.1s] [store] reading 1/4 kept (tick 31)
+[  99.6s] [tx] 3V3 off for the transmit, 5V HELD UP (TX_KEEP_5V_RAIL)
+[ 100.2s] TX [0..0/1] 76 bytes: 23.72,45.93,938.42,14558.69,4.00,9.00,13.00,641.00,-1.00,-1.00,353.00,0.60,1  (sent)
+[ 102.4s] [stat] STAT,31,0,1,11101,0,3120,86,2  (cap 3.62V = 86% usable, flags from wake 31, 0 tick(s) ago) (sent)
+[ 110.5s] [read] 3V3 rail recovery after the BME690 heater (5V stays up)
+[ 110.5s] [t] BME690   active=37ms recovery=6101ms
+[ 112.7s] [bmv080] laser off after 2054ms (pm2.5=9.0, frame)
+[ 114.2s] [t] BMV080   active=2133ms recovery=1500ms
+[ 117.6s] [cm1106 raw] 16 05 01 02 7B 00 03 64 | status=OK frozenValueRun=0
+[ 119.2s] [t] CM1106   active=3513ms recovery=1500ms
+[ 120.7s] [t] SEN0466  active=0ms recovery=1500ms
+[ 122.9s] [t] Calypso  active=783ms recovery=1500ms
+[ 122.9s] [t] TOTAL burst=18571ms
+[ 122.9s] [read] bme=OK(T23.7 H46.0 gas14669) bmv=OK(pm2.5=9.0) co2=OK(635) co=NotInit(0.00) wind=OK(rx=27)  (all sensors, 18572ms)
+[ 122.9s] [wind] angle=325.0 deg  speed=1.30
+[ 122.9s] [store] reading 1/4 kept (tick 31)
+[ 124.4s] [tx] 3V3 off for the transmit, 5V HELD UP (TX_KEEP_5V_RAIL)
+[ 125.1s] TX [0..0/1] 76 bytes: 23.69,46.03,938.42,14668.81,4.00,9.00,13.00,635.00,-1.00,-1.00,325.00,1.30,1  (sent)
+[ 126.9s] [stat] STAT,31,0,1,11101,0,3120,86,2  (cap 3.62V = 86% usable, flags from wake 31, 0 tick(s) ago) (sent)
+[ 129.1s] [TEST BUILD] alarm state FORCED to ALARM - not from the sensors
+[ 129.1s] [read] 3V3 rail recovery after the BME690 heater (5V stays up)
+[ 135.3s] [t] BME690   active=37ms recovery=6101ms
+[ 137.4s] [bmv080] laser off after 2059ms (pm2.5=18.0, frame)
+[ 139.0s] [t] BMV080   active=2138ms recovery=1500ms
+[ 142.3s] [cm1106 raw] 16 05 01 02 6D 00 03 72 | status=OK frozenValueRun=0
+[ 143.9s] [t] CM1106   active=3513ms recovery=1500ms
+[ 145.4s] [t] SEN0466  active=0ms recovery=1500ms
+[ 147.6s] [t] Calypso  active=784ms recovery=1500ms
+[ 147.6s] [t] TOTAL burst=18577ms
+[ 147.6s] [read] bme=OK(T23.7 H45.8 gas14599) bmv=OK(pm2.5=18.0) co2=OK(621) co=NotInit(0.00) wind=OK(rx=27)  (all sensors, 18578ms)
+[ 147.6s] [wind] angle=347.0 deg  speed=0.50
+[ 147.6s] [store] reading 1/4 kept (tick 31)
+[ 149.1s] [tx] 3V3 off for the transmit, 5V HELD UP (TX_KEEP_5V_RAIL)
+[ 149.7s] TX [0..0/1] 77 bytes: 23.68,45.78,938.42,14598.54,8.00,18.00,26.00,621.00,-1.00,-1.00,347.00,0.50,1  (sent)
+[ 151.9s] [stat] STAT,31,0,1,11101,0,3120,86,2  (cap 3.62V = 86% usable, flags from wake 31, 0 tick(s) ago) (sent)
+[ 153.7s] [read] 3V3 rail recovery after the BME690 heater (5V stays up)
+[ 159.9s] [t] BME690   active=37ms recovery=6101ms
+[ 162.0s] [bmv080] laser off after 2054ms (pm2.5=9.0, frame)
+[ 163.6s] [t] BMV080   active=2133ms recovery=1500ms
+[ 167.3s] [cm1106 raw] 16 05 01 02 69 00 03 76 | status=OK frozenValueRun=0
+[ 168.5s] [t] CM1106   active=3513ms recovery=1500ms
+[ 170.0s] [t] SEN0466  active=0ms recovery=1500ms
+[ 172.5s] [t] Calypso  active=774ms recovery=1500ms
+[ 172.5s] [t] TOTAL burst=18563ms
+[ 172.5s] [read] bme=OK(T23.7 H45.2 gas14699) bmv=OK(pm2.5=9.0) co2=OK(617) co=NotInit(0.00) wind=OK(rx=27)  (all sensors, 18564ms)
+[ 172.5s] [wind] angle=84.0 deg  speed=1.00
+[ 172.5s] [store] reading 1/4 kept (tick 31)
+[ 174.0s] [tx] 3V3 off for the transmit, 5V HELD UP (TX_KEEP_5V_RAIL)
+[ 174.3s] TX [0..0/1] 75 bytes: 23.68,45.21,938.42,14699.13,4.00,9.00,13.00,617.00,-1.00,-1.00,84.00,1.00,1  (sent)
+[ 176.5s] [stat] STAT,31,0,1,11101,0,3120,86,2  (cap 3.62V = 86% usable, flags from wake 31, 0 tick(s) ago) (sent)
+[ 178.6s] [TEST BUILD] alarm state FORCED to ALARM - not from the sensors
+[ 178.6s] [read] 3V3 rail recovery after the BME690 heater (5V stays up)
+[ 184.8s] [t] BME690   active=37ms recovery=6101ms
+[ 186.9s] [bmv080] laser off after 2069ms (pm2.5=18.0, frame)
+[ 188.5s] [t] BMV080   active=2148ms recovery=1500ms
+[ 191.9s] [cm1106 raw] 16 05 01 02 4F 00 03 90 | status=OK frozenValueRun=0
+[ 193.4s] [t] CM1106   active=3513ms recovery=1500ms
+[ 194.9s] [t] SEN0466  active=0ms recovery=1500ms
+[ 197.1s] [t] Calypso  active=763ms recovery=1501ms
+[ 197.1s] [t] TOTAL burst=18568ms
+[ 197.1s] [read] bme=OK(T23.7 H44.7 gas14894) bmv=OK(pm2.5=18.0) co2=OK(591) co=NotInit(0.00) wind=OK(rx=27)  (all sensors, 18569ms)
+[ 197.1s] [wind] angle=349.0 deg  speed=0.00
+[ 197.1s] [store] reading 1/4 kept (tick 31)
+[ 198.7s] [tx] 3V3 off for the transmit, 5V HELD UP (TX_KEEP_5V_RAIL)
+[ 201.5s] TX [0..0/1] 77 bytes: 23.67,44.66,938.42,14894.11,8.00,18.00,26.00,591.00,-1.00,-1.00,349.00,0.00,1  (sent)
+[ 201.5s] [stat] STAT,31,0,1,11101,0,3120,86,2  (cap 3.62V = 86% usable, flags from wake 31, 0 tick(s) ago) (sent)
+[ 209.6s] [read] 3V3 rail recovery after the BME690 heater (5V stays up)
+[ 209.6s] [t] BME690   active=37ms recovery=6101ms
+[ 211.7s] [bmv080] laser off after 2056ms (pm2.5=9.0, frame)
+[ 213.0s] [t] BMV080   active=2135ms recovery=1500ms
+[ 216.7s] [cm1106 raw] 16 05 01 02 3F 00 03 A0 | status=OK frozenValueRun=0
+[ 218.0s] [t] CM1106   active=3513ms recovery=1500ms
+[ 219.5s] [t] SEN0466  active=0ms recovery=1500ms
+[ 222.0s] [t] Calypso  active=783ms recovery=1500ms
+[ 222.0s] [t] TOTAL burst=18572ms
+[ 222.0s] [read] bme=OK(T23.7 H45.2 gas14999) bmv=OK(pm2.5=9.0) co2=OK(575) co=NotInit(0.00) wind=OK(rx=27)  (all sensors, 18573ms)
+[ 222.0s] [wind] angle=325.0 deg  speed=0.70
+[ 222.0s] [store] reading 1/4 kept (tick 31)
+[ 223.3s] [tx] 3V3 off for the transmit, 5V HELD UP (TX_KEEP_5V_RAIL)
+[ 223.9s] TX [0..0/1] 76 bytes: 23.65,45.20,938.41,14998.83,4.00,9.00,13.00,575.00,-1.00,-1.00,325.00,0.70,1  (sent)
+[ 226.1s] [stat] STAT,31,0,1,11101,0,3120,86,2  (cap 3.62V = 86% usable, flags from wake 31, 0 tick(s) ago) (sent)
+[ 229.2s] [TEST BUILD] alarm state FORCED to ALARM - not from the sensors
+[ 229.2s] [co] SEN0466 warmed 222s -> LIVE, CO now measured and alarm-capable
+[ 235.1s] [read] 3V3 rail recovery after the BME690 heater (5V stays up)
+[ 235.1s] [t] BME690   active=37ms recovery=6101ms
+[ 237.3s] [bmv080] laser off after 2069ms (pm2.5=9.0, frame)
+[ 238.8s] [t] BMV080   active=2148ms recovery=1500ms
+[ 242.2s] [cm1106 raw] 16 05 01 02 5F 00 03 80 | status=OK frozenValueRun=0
+[ 243.8s] [t] CM1106   active=3513ms recovery=1500ms
+[ 245.4s] [t] SEN0466  active=24ms recovery=1500ms
+[ 247.6s] [t] Calypso  active=791ms recovery=1500ms
+[ 247.6s] [t] TOTAL burst=18619ms
+[ 247.6s] [read] bme=OK(T23.6 H44.8 gas15073) bmv=OK(pm2.5=9.0) co2=OK(607) co=OK(0.00) wind=OK(rx=27)  (all sensors, 18620ms)
+[ 247.6s] [wind] angle=5.0 deg  speed=0.60
+[ 247.6s] [store] reading 1/4 kept (tick 31)
+[ 249.1s] [tx] 3V3 off for the transmit, 5V HELD UP (TX_KEEP_5V_RAIL)
+[ 249.7s] TX [0..0/1] 73 bytes: 23.65,44.81,938.42,15073.01,4.00,9.00,13.00,607.00,0.00,24.69,5.00,0.60,1  (sent)
+[ 251.9s] [stat] STAT,31,0,1,11111,0,3120,86,2  (cap 3.62V = 86% usable, flags from wake 31, 0 tick(s) ago) (sent)
+[ 260.1s] [read] 3V3 rail recovery after the BME690 heater (5V stays up)
+[ 260.1s] [t] BME690   active=37ms recovery=6101ms
+[ 263.8s] [bmv080] laser off after 2053ms (pm2.5=9.0, frame)
+[ 263.8s] [t] BMV080   active=2132ms recovery=1500ms
+[ 267.2s] [cm1106 raw] 16 05 01 02 68 00 03 77 | status=OK frozenValueRun=0
+[ 268.8s] [t] CM1106   active=3513ms recovery=1500ms
+[ 270.3s] [t] SEN0466  active=24ms recovery=1500ms
+[ 272.5s] [t] Calypso  active=764ms recovery=1500ms
+[ 272.5s] [t] TOTAL burst=18576ms
+[ 272.5s] [read] bme=OK(T23.6 H45.3 gas14967) bmv=OK(pm2.5=9.0) co2=OK(616) co=OK(0.00) wind=OK(rx=27)  (all sensors, 18577ms)
+[ 272.5s] [wind] angle=5.0 deg  speed=0.00
+[ 272.5s] [store] reading 1/4 kept (tick 31)
+[ 274.1s] [tx] 3V3 off for the transmit, 5V HELD UP (TX_KEEP_5V_RAIL)
+[ 274.4s] TX [0..0/1] 73 bytes: 23.64,45.30,938.41,14967.26,4.00,9.00,13.00,616.00,0.00,25.00,5.00,0.00,1  (sent)
+[ 276.6s] [stat] STAT,31,0,1,11111,0,3120,86,2  (cap 3.62V = 86% usable, flags from wake 31, 0 tick(s) ago) (sent)
+[ 278.8s] [TEST BUILD] alarm state FORCED to ALARM - not from the sensors
+[ 278.8s] [read] 3V3 rail recovery after the BME690 heater (5V stays up)
+=== fin ===
