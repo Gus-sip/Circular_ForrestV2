@@ -644,16 +644,63 @@ void ModemNBIoTMqtt::publishCommandLogApplied(long requestId, const char *status
   // int64 and %lld is NOT reliably compiled into this toolchain's snprintf -
   // nano newlib often omits it, which is why appendI64() exists at all. A %llu
   // here would have emitted a literal "llu" or garbage into live telemetry.
-  char payload[192];
-  int n = snprintf(payload, sizeof(payload),
-                   "{\"seguimientoCmd\":{\"requestId\":%ld,\"status\":\"%s\"", requestId, status);
-  if (n < 0) return;
-  size_t pos = (size_t)n;
+  // LA FORMA EXACTA QUE PIDE LA v2 DEL PROTOCOLO:
+  //
+  //   {"ts": 1790593196216,
+  //    "values": {"seguimientoCmd": {"requestId": 7,
+  //                                  "moduloC_id": "NodoC-1",
+  //                                  "status": "confirmado"}}}
+  //
+  // Tres diferencias con lo que esto publicaba, y ninguna es cosmetica:
+  //
+  //   - La hora va como `ts` DE LA PUBLICACION, fuera del objeto, igual que en la
+  //     telemetria de los sensores. Antes iba como `timestamp` dentro.
+  //   - `moduloC_id` es OBLIGATORIO. El documento explica por que: MODULO-A genera
+  //     el requestId por cada conexion del MODULO-B, empieza en 0 y vuelve a
+  //     empezar al reconectar, "asi que por si solo no identifica un comando".
+  //     Esto es exactamente lo que vimos el 2026-10-06, cuando los comandos
+  //     llegaron numerados 0 y 1 despues de haber ido por el 11.
+  //   - La clave es `seguimientoCmd`, no `commandLog` (ese era el nombre en v1).
+  //
+  // Construido a mano y no con un solo snprintf porque la hora es un int64 y
+  // %lld NO esta compilado de forma fiable en el snprintf de este toolchain -
+  // nano newlib suele omitirlo, que es la razon de que exista appendI64(). Un
+  // %llu aqui habria soltado un "llu" literal dentro de la telemetria.
+  char payload[224];
+  size_t pos = 0;
 
-  // Quotes and backslashes in `detail` would break the JSON. The node's ACK body
-  // is "k=v,k=v" and its NACK a short phrase, so neither should contain them -
-  // but a malformed packet must not be able to emit invalid telemetry, so they
-  // are dropped rather than trusted.
+  // Sin reloj de red no se puede sellar la publicacion. En ese caso se manda la
+  // forma plana y ThingsBoard sella al recibir, que es preferible a emitir un ts
+  // de 1970: ordenaria el registro como el mas antiguo de todo el sistema.
+  const bool stamped = _haveNetTime;
+  if (stamped) {
+    pos += (size_t)snprintf(payload, sizeof(payload), "{\"ts\":");
+    pos += appendI64(payload + pos, netNowMs());
+    pos += (size_t)snprintf(payload + pos, sizeof(payload) - pos, ",\"values\":{");
+  } else {
+    pos += (size_t)snprintf(payload, sizeof(payload), "{");
+  }
+
+  pos += (size_t)snprintf(payload + pos, sizeof(payload) - pos,
+                          "\"seguimientoCmd\":{\"requestId\":%ld", requestId);
+
+  if (device && *device && pos + 32 < sizeof(payload)) {
+    pos += (size_t)snprintf(payload + pos, sizeof(payload) - pos,
+                            ",\"moduloC_id\":\"%s\"", device);
+  }
+
+  pos += (size_t)snprintf(payload + pos, sizeof(payload) - pos,
+                          ",\"status\":\"%s\"", status);
+
+  // `detail` NO esta en el documento: es un anadido nuestro con las claves que el
+  // nodo aplico de verdad, o el motivo del rechazo. El documento solo acota los
+  // valores de `status`, no prohibe campos extra, y esto es lo unico que permite
+  // a MODULO-A mostrar el valor que el nodo esta usando en lugar del que pidio.
+  // Si su parser resultara estricto, se quita y no se pierde nada del protocolo.
+  //
+  // Las comillas y barras invertidas romperian el JSON. El cuerpo del ACK del
+  // nodo es "k=v,k=v" y su NACK una frase corta, asi que no deberian aparecer -
+  // pero un paquete malformado no puede poder emitir telemetria invalida.
   if (detail && *detail && pos + 24 < sizeof(payload)) {
     pos += (size_t)snprintf(payload + pos, sizeof(payload) - pos, ",\"detail\":\"");
     for (const char *p = detail; *p && pos < sizeof(payload) - 8; p++) {
@@ -664,14 +711,7 @@ void ModemNBIoTMqtt::publishCommandLogApplied(long requestId, const char *status
     payload[pos] = 0;
   }
 
-  if (_haveNetTime && pos + 40 < sizeof(payload)) {
-    pos += (size_t)snprintf(payload + pos, sizeof(payload) - pos, ",\"timestamp\":");
-    pos += appendI64(payload + pos, netNowMs());
-  }
-  // Without network time the field is OMITTED rather than sent as 0. A commandLog
-  // stamped 1970 would sort to the beginning of every dashboard and look like the
-  // oldest record in the system.
-  snprintf(payload + pos, sizeof(payload) - pos, "}}");
+  snprintf(payload + pos, sizeof(payload) - pos, stamped ? "}}}" : "}}");
 
   queueRpcReply(MQTT_TOPIC_DEVICE_TELEMETRY, payload);
 

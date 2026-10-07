@@ -1,0 +1,299 @@
+MODULO-B / Protocolo comandos AB
+Introducción
+El rol de B como intermediario entre ModA y ModC se puede representar en este flujo:
+MODULOA -> "RPC PETICION" -> MODULOB -> LoRa petición -> ModuloC
+ModuloC -> LoRa respuesta -> MODULOB -> RPC respuesta como Telemetría -> MODULOA
+Punto clave: La conexión TCP/MQTT entre MODULOB y TB es permanente y bidireccional. MODULOA publica comandos, MODULOB los recibe en tiempo real a través de esa conexión abierta.
+RPC (remote procedure call)  COMANDO. TB (ThingsBoard framework)
+Conexión MODULOB a MODULOA  (TB) para recibir comandos
+Librería MQTT
+	AsyncMqttClient (ya incluida en B)
+	Configuración Inicial
+mqttClient.connect("xxx.yyy.zzzz", NNNNN , "DEVICE_TOKEN")
+(como con la telemetría )
+....
+mqttClient.setCleanSession(false)           // ← Persistencia sesión
+mqttClient.subscribe("v1/devices/me/rpc/request/+", QoS=1)
+Siguientes tareas
+Abre conexión TCP permanente
+Se mantiene activa aunque no haya datos
+Se suscribe al "topic" (canal) de comandos
+Tiene que desmultiplexar los comandos y la telemetría. Todo se envía por la misma conexión
+Manejar las desconexiones (reconexión automática)
+Si desconexión:
+  Esperar N segundos
+  Reintentar conexión
+  Si WiFi está OK -> reconectar a MQTT
+  Si WiFi cae -> esperar a que se recupere
+Recibir Comandos desde MODULOA
+Topic a suscribirse
+El MODULO-B se suscribe una sola vez, al conectar, a:
+v1/devices/me/rpc/request/+
+El + es el comodín de MQTT: acepta cualquier valor en esa posición. Así el MODULO-B recibe todos los comandos sin conocer de antemano su número.
+Cada comando llega como un mensaje MQTT con dos partes: el topic, que termina en el número del comando, y el payload, que es el contenido. Ejemplo de un mensaje recibido:
+topic:   v1/devices/me/rpc/request/12345
+payload: {"method": "configurarModuloC", "params": {...}}
+El número del final del topic (12345) es el requestId. El MODULO-B lo lee del topic de cada mensaje que recibe y lo usa para contestar. Lo genera MODULO-A para cada conexión del MODULO-B: empieza en 0 y vuelve a empezar al reconectar, así que por sí solo no identifica un comando. Por eso hay que guardarlo junto con el moduloC_id.
+Payload ejemplo (JSON)
+{
+  "method": "configurarModuloC",
+  "params": {
+    "moduloC_id": "NodoC-1",
+    "action": "umbrales_de1variable" | "NxT_lectura" | "NxT_enviodatos" | "NxTglobalenviodatos",
+    "value": 1.5
+    // Campos según action: ver «Comandos definidos», al final.
+    // O para umbrales:
+    // "variable": "temp",
+    // "umbral_pre_on": 40.0, "umbral_pre_off": 35.0,
+    // "umbral_alarm_on": 60.0, "umbral_alarm_off": 55.0
+  }
+}
+Procesamiento en MODULOB
+Al recibir RPC:
+Extraer {requestId} del topic para luego confirmar la respuesta de C
+Parsear JSON
+Responder a MODULO-A inmediatamente, en menos de 30 s: {"status": "enviado", "requestId": N}
+Guardar comando en lista pendiente
+Enviar comando a ModuloC
+Esperar respuesta
+Código conceptual:
+onMqttMessage(topic, payload):
+  if "rpc/request" en topic:
+    requestId = extraer_del_topic(topic)
+    comando = parsear_json(payload)
+    responder_rpc(requestId, {"status": "enviado", "requestId": requestId})
+    guardar_pendiente(requestId, comando)
+    enviar_lora(requestId, comando)
+Comunicación MODULOB ↔ MODULOC (LoRa)
+MODULOB -> ModuloC:
+  Enviar por LoRa
+MODULOB recibe respuesta de C:
+  Parsear
+  Publicar la respuesta como telemetría en MODULOA con su requestID original
+  Eliminar de pendientes
+Cuando ModuloC responde (confirmado, error o timeout):
+ModuloB comunica el resultado en ModuloA como telemetría  en: v1/devices/me/telemetry
+Ejemplo:
+{
+  "ts": 1694857234000,
+  "values": {
+    "seguimientoCmd": {
+      "requestId": 12345,
+      "moduloC_id": "NodoC-1",
+      "status": "confirmado" | "error" | "timeout"
+    }
+  }
+}
+ts es la hora del resultado, en milisegundos desde 1970, igual que en la telemetría de las lecturas de los sensores. MODULO-A añade ts_rx con su hora de recepción.
+Control del Comando en MODULOA
+MODULOA recibe la telemetría
+Detecta "seguimientoCmd"
+Copia automáticamente a atributos del ModC
+Dashboard lee atributos (rápido)
+Histórico guardado en telemetría
+Estados del Comando
+Estado
+	Significado
+	enviado
+	RPC recibido, en tránsito a ModuloC
+	↓
+	confirmado
+	ModuloC procesó correctamente
+	✓
+	error
+	ModuloC rechazó comando
+	✓
+	timeout
+	Sin respuesta tras Tmax
+	✓
+	Flujo Temporal
+t=0s:   TB publica RPC request/12345 (que corresponde a un comando concreto)
+t=0.1s: MODULOB recibe
+        Responde: response/12345 -> {status: "enviado", requestId: 12345}
+        Guarda en pendientes
+        Envía a ModuloC por LoRa
+t=0-Tmax: Espera respuesta ModuloC
+t < Tmax:ModuloC responde por LoRa
+ModuloB recibe por Lora
+ModuloB publica confirmación como telemetría:
+        {ts: t, values: {seguimientoCmd:
+          {requestId: 12345, moduloC_id: "NodoC-1", status: "confirmado"}}}
+t=Xs: ModuloA  procesa
+        Guarda estado del comando e histórico del comando
+t=Ys: Dashboard se actualiza
+        Muestra "Último comando: confirmado"
+Hay que acordar un T=max: Si no llegó respuesta: status="timeout"
+Comandos definidos
+action
+	Qué cambia en el MODULO-C
+	Destino
+	Valor
+	En MODULO-A
+	umbrales_de1variable
+	Los 4 umbrales de una variable
+	Un MODULO-C
+	4 números
+	Pestaña UMBRALES
+	NxT_lectura
+	Periodo de lectura: N × periodo mínimo de lectura de cada sensor
+	Un MODULO-C
+	N ≥ 1, un decimal
+	Pestaña «Periodo de lectura»
+	NxT_enviodatos
+	Periodo de envío de datos al MODULO-B: N × periodo base de envío
+	Un MODULO-C
+	N > 0, un decimal
+	Definido; MODULO-A todavía no lo envía
+	NxTglobalenviodatos
+	Lo mismo que NxT_enviodatos, en todos a la vez
+	Todos los MODULO-C del MODULO-B
+	N > 0, un decimal
+	Definido; MODULO-A todavía no lo envía
+	umbrales_de1variable
+Fija los 4 umbrales de una variable. variable es una de estas: temp, rh, pres, gas, pm1, pm25, pm10, co, co2, windSpeed. MODULO-A comprueba el orden antes de enviar:
+en las variables cuyo riesgo aumenta al subir: pre_off ≤ pre_on ≤ alarm_off ≤ alarm_on;
+en rh y gas, cuyo riesgo aumenta al bajar, al revés.
+Mensaje que recibe el MODULO-B (en este ejemplo, ThingsBoard le ha dado el número 7):
+topic:   v1/devices/me/rpc/request/7
+payload:
+{
+  "method": "configurarModuloC",
+  "params": {
+    "moduloC_id": "NodoC-1",
+    "action": "umbrales_de1variable",
+    "variable": "temp",
+    "umbral_pre_off": 45,
+    "umbral_pre_on": 50,
+    "umbral_alarm_off": 55,
+    "umbral_alarm_on": 60
+  }
+}
+Respuesta inmediata del MODULO-B, con el número leído del topic:
+topic:   v1/devices/me/rpc/response/7
+payload: {"status": "enviado", "requestId": 7}
+Resultado final:
+topic:   v1/devices/me/telemetry
+payload:
+{
+  "ts": 1790593196216,
+  "values": {
+    "seguimientoCmd": {
+      "requestId": 7,
+      "moduloC_id": "NodoC-1",
+      "status": "confirmado"
+    }
+  }
+}
+Con confirmado, MODULO-A guarda los 4 umbrales como valores actuales de ese MODULO-C. Con error o timeout no cambia nada.
+NxT_lectura
+Cada sensor del MODULO-C se lee cada N × su periodo mínimo de lectura. N ≥ 1, con un decimal como máximo, sin máximo. Con N = 1 se lee al periodo mínimo.
+Mensaje que recibe el MODULO-B (en este ejemplo, ThingsBoard le ha dado el número 8):
+topic:   v1/devices/me/rpc/request/8
+payload:
+{
+  "method": "configurarModuloC",
+  "params": {"moduloC_id": "NodoC-1", "action": "NxT_lectura", "value": 1.5}
+}
+Respuesta inmediata del MODULO-B, con el número leído del topic:
+topic:   v1/devices/me/rpc/response/8
+payload: {"status": "enviado", "requestId": 8}
+Resultado final:
+topic:   v1/devices/me/telemetry
+payload:
+{
+  "ts": 1790593196216,
+  "values": {
+    "seguimientoCmd": {
+      "requestId": 8,
+      "moduloC_id": "NodoC-1",
+      "status": "confirmado"
+    }
+  }
+}
+NxT_enviodatos
+El MODULO-C envía sus datos al MODULO-B cada N × su periodo base de envío, fijado en su firmware.
+N > 0, con un decimal como máximo: con N < 1 envía más a menudo que el periodo base (0.5 = el doble de veces).
+Es independiente de NxT_lectura: el MODULO-C puede leer y enviar con periodos distintos.
+Manda el último recibido: sustituye al valor que hubiera puesto antes un NxTglobalenviodatos.
+Mensaje que recibe el MODULO-B (en este ejemplo, ThingsBoard le ha dado el número 9):
+topic:   v1/devices/me/rpc/request/9
+payload:
+{
+  "method": "configurarModuloC",
+  "params": {"moduloC_id": "NodoC-1", "action": "NxT_enviodatos", "value": 0.5}
+}
+Respuesta inmediata del MODULO-B, con el número leído del topic:
+topic:   v1/devices/me/rpc/response/9
+payload: {"status": "enviado", "requestId": 9}
+Resultado final:
+topic:   v1/devices/me/telemetry
+payload:
+{
+  "ts": 1790593196216,
+  "values": {
+    "seguimientoCmd": {
+      "requestId": 9,
+      "moduloC_id": "NodoC-1",
+      "status": "confirmado"
+    }
+  }
+}
+NxTglobalenviodatos
+Lo mismo que NxT_enviodatos, pero para todos los MODULO-C del MODULO-B a la vez. Sustituye al antiguo action: "frecuencia" (freq_normal | freq_prealarma | freq_alarma), que deja de usarse.
+No lleva moduloC_id: el MODULO-B lo reenvía por LoRa a cada uno de sus MODULO-C.
+Una sola respuesta inmediata.
+Un seguimientoCmd por cada MODULO-C, cada uno en su propia publicación y todos con el mismo requestId.
+Manda el último recibido: sustituye al NxT_enviodatos propio de cada MODULO-C, y un NxT_enviodatos posterior vuelve a sustituirlo en ese MODULO-C.
+Mensaje que recibe el MODULO-B (en este ejemplo, ThingsBoard le ha dado el número 10):
+topic:   v1/devices/me/rpc/request/10
+payload:
+{
+  "method": "configurarModuloC",
+  "params": {"action": "NxTglobalenviodatos", "value": 2}
+}
+Respuesta inmediata del MODULO-B, con el número leído del topic:
+topic:   v1/devices/me/rpc/response/10
+payload: {"status": "enviado", "requestId": 10}
+Resultado final, una publicación por cada MODULO-C. Para NodoC-1:
+topic:   v1/devices/me/telemetry
+payload:
+{
+  "ts": 1790593196216,
+  "values": {
+    "seguimientoCmd": {
+      "requestId": 10,
+      "moduloC_id": "NodoC-1",
+      "status": "confirmado"
+    }
+  }
+}
+Para NodoC-2:
+topic:   v1/devices/me/telemetry
+payload:
+{
+  "ts": 1790593226216,
+  "values": {
+    "seguimientoCmd": {
+      "requestId": 10,
+      "moduloC_id": "NodoC-2",
+      "status": "timeout"
+    }
+  }
+}
+Resumen de características
+Todos los comandos usan el mecanismo descrito en este documento. Lo que tienen en común:
+Recepción en B: por la suscripción al topic v1/devices/me/rpc/request/+.
+Cada comando es un mensaje cuyo topic termina en su requestId (.../request/7)
+y cuyo payload es {"method": "configurarModuloC", "params": {...}}.
+Los comandos se distinguen por params.action.
+Respuesta inmediata B  A: enviando al topic v1/devices/me/rpc/response/{requestId},
+con {"status": "enviado", "requestId": <el del topic>}, en menos de 30 s.
+Si no llega a tiempo, MODULO-A da el comando por no contestado por el MODULO-B.
+Resultado final del comando:  enviando al topic de telemetría v1/devices/me/telemetry
+con la clave seguimientoCmd, que contiene requestId, moduloC_id y status.
+status solo puede ser un valor entre: confirmado, error o timeout;
+MODULO-A trata cualquier otro valor como error.
+Hora del resultado: va como ts de la publicación, en milisegundos desde 1970, igual que en la telemetría de las lecturas de los sensores: {"ts": ..., "values": {"seguimientoCmd": {...}}}. MODULO-A añade ts_rx con su hora de recepción.
+moduloC_id es el nombre del MODULO-C en MODULO-A, el mismo con el que el MODULO-B publica su telemetría (por ejemplo NodoC-1).
+Números con decimal: van como número JSON (1.5), no como texto ("1.5").
+MODULO-B desconectado: MODULO-A guarda el comando hasta 1 hora y se lo entrega al reconectar (sesión persistente, setCleanSession(false)). Pasada la hora, lo da por caducado.
