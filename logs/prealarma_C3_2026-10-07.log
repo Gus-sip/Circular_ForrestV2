@@ -927,3 +927,930 @@ OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 
 [   8.4s] BME690: OK (bound to 0x76)
 [   8.4s] SEN0466: SKIPPED (210s settle - excluded from the sleeping cycle)
 [   8.4s] [step] cm1106.begin (SWAPPED: now before bmv080) ...
+[  11.5s] [step] cm1106.begin returned ...
+[  11.5s] [step] bmv080.begin (SWAPPED: now after cm1106) ...
+[  12.2s] BMV080: OK
+[  12.2s] [step] calypso.begin next ...
+[  12.2s] [step] calypso.begin returned - radio next ...
+[  12.2s] Configuring RYLR998 (link parameters must match pp1-lora-receiver):
+[  12.2s]   -> AT
+[  12.2s]   <- +OK
+[  12.2s]   -> AT+ADDRESS=4
+[  12.2s]   <- +OK
+[  12.2s]   -> AT+NETWORKID=5
+[  12.2s]   <- +OK
+[  12.2s]   -> AT+BAND=868000000
+[  12.2s]   <- +OK
+[  12.2s]   -> AT+PARAMETER=7,7,1,12
+[  12.2s]   <- +OK
+[  12.2s]   -> AT+CRFOP=14
+[  12.2s]   <- +OK
+[  12.2s] LoRa TX power -> 14 dBm: OK
+[  12.2s] Radio init OK
+[  12.2s] Setup complete.
+[  12.2s] 
+READ FAILED after 12.3s: SerialException("ClearCommError failed (PermissionError(13, 'El dispositivo no reconoce el comando.', None, 22))")
+=== fin ===
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+=== COM16 abierto, capturando 400s (el open resetea la placa) ===
+[   1.6s] 3V3: about to assert
+[   1.6s] 3V3: asserted
+[   1.9s] 3V3: settled
+[   1.9s] 5V: about to assert (plain write)
+[   1.9s] 5V: asserted
+[   2.5s] 5V: settled
+[   2.5s] LoRa: about to assert
+[   2.5s] LoRa: asserted
+[   2.5s] BMV080 EN: GPIO15 -> LOW
+[   3.1s] rails up
+[   3.1s] [PowerManager] enable3V3Sensors (stub - bench has no gating FET yet)
+[   3.1s] --- I2C scan (after rails, before sensor init) ---
+[   3.1s]   ACK at 0x57
+[   3.1s]   ACK at 0x74
+[   3.1s]   ACK at 0x76
+[   3.1s] [bme probe right after scan] 0x76 (addr-probe=0) chip ID = 0x61 (0x61 = BME69x, CORRECT)
+[   3.1s] [  4086][E][Wire.cpp:499] requestFrom(): i2cWriteReadNonStop returned Error -1
+[   3.1s] [bme probe right after scan] 0x77 accepted the register write but returned no data
+[   3.1s] Waiting 5000ms for BMV080 startup...
+[   8.1s] [bme probe after BMV080 wait, before begin] 0x76 (addr-probe=0) chip ID = 0x61 (0x61 = BME69x, CORRECT)
+[   8.1s] [  9095][E][Wire.cpp:499] requestFrom(): i2cWriteReadNonStop returned Error -1
+[   8.1s] [bme probe after BMV080 wait, before begin] 0x77 accepted the register write but returned no data
+[   8.1s] [step] bme690.begin ...
+[   8.1s] BME690: OK (bound to 0x76)
+[   8.1s] SEN0466: SKIPPED (210s settle - excluded from the sleeping cycle)
+[   8.1s] [step] cm1106.begin (SWAPPED: now before bmv080) ...
+[  11.2s] [step] cm1106.begin returned ...
+[  11.2s] [step] bmv080.begin (SWAPPED: now after cm1106) ...
+[  11.9s] BMV080: OK
+[  11.9s] [step] calypso.begin next ...
+[  11.9s] [step] calypso.begin returned - radio next ...
+[  11.9s] Configuring RYLR998 (link parameters must match pp1-lora-receiver):
+[  11.9s]   -> AT
+[  11.9s]   <- +OK
+[  11.9s]   -> AT+ADDRESS=4
+[  11.9s]   <- +OK
+[  11.9s]   -> AT+NETWORKID=5
+[  11.9s]   <- +OK
+[  11.9s]   -> AT+BAND=868000000
+[  11.9s]   <- +OK
+[  11.9s]   -> AT+PARAMETER=7,7,1,12
+[  11.9s]   <- +OK
+[  11.9s]   -> AT+CRFOP=14
+[  11.9s]   <- +OK
+[  11.9s] LoRa TX power -> 14 dBm: OK
+[  11.9s] Radio init OK
+[  11.9s] Setup complete.
+[  11.9s] 
+[  11.9s] [sentinel] bme=OK(T24.7 H48.9) co=NotInit(0.00)  (40ms)
+[  11.9s] [store] reading 2/4 kept (tick 27)
+[  13.4s] [tx] sensor rails off for the transmit
+[  14.0s] TX [0..1/2] 112 bytes: B,2,24.7,48.9,939.3,0,0.0,0.0,0.0,925,-1.0,-1.0,0,0.0,0,3;24.7,48.9,939.3,0,0.0,0.0,0.0,925,-1.0,-1.0,0,0.0,0,0;  (sent)
+READ FAILED after 16.1s: SerialException("ClearCommError failed (PermissionError(13, 'El dispositivo no reconoce el comando.', None, 22))")
+=== fin ===
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+=== COM16 abierto, capturando 400s (el open resetea la placa) ===
+[   1.6s] 3V3: about to assert
+[   1.6s] 3V3: asserted
+[   2.2s] 3V3: settled
+[   2.2s] 5V: about to assert (plain write)
+[   2.2s] 5V: asserted
+[   2.5s] 5V: settled
+[   2.5s] LoRa: about to assert
+[   2.5s] LoRa: asserted
+[   2.5s] BMV080 EN: GPIO15 -> LOW
+[   3.1s] rails up
+[   3.1s] [PowerManager] enable3V3Sensors (stub - bench has no gating FET yet)
+[   3.1s] --- I2C scan (after rails, before sensor init) ---
+[   3.1s]   ACK at 0x57
+[   3.1s]   ACK at 0x74
+[   3.1s]   ACK at 0x76
+[   3.1s] [bme probe right after scan] 0x76 (addr-probe=0) chip ID = 0x61 (0x61 = BME69x, CORRECT)
+[   3.1s] [  4085][E][Wire.cpp:499] requestFrom(): i2cWriteReadNonStop returned Error -1
+[   3.1s] [bme probe right after scan] 0x77 accepted the register write but returned no data
+[   3.1s] Waiting 5000ms for BMV080 startup...
+[   8.1s] [bme probe after BMV080 wait, before begin] 0x76 (addr-probe=0) chip ID = 0x61 (0x61 = BME69x, CORRECT)
+[   8.1s] [  9094][E][Wire.cpp:499] requestFrom(): i2cWriteReadNonStop returned Error -1
+[   8.1s] [bme probe after BMV080 wait, before begin] 0x77 accepted the register write but returned no data
+[   8.1s] [step] bme690.begin ...
+[   8.1s] BME690: OK (bound to 0x76)
+[   8.1s] SEN0466: SKIPPED (210s settle - excluded from the sleeping cycle)
+[   8.1s] [step] cm1106.begin (SWAPPED: now before bmv080) ...
+[  11.2s] [step] cm1106.begin returned ...
+[  11.2s] [step] bmv080.begin (SWAPPED: now after cm1106) ...
+[  11.8s] BMV080: OK
+[  11.8s] [step] calypso.begin next ...
+[  11.8s] [step] calypso.begin returned - radio next ...
+[  11.8s] Configuring RYLR998 (link parameters must match pp1-lora-receiver):
+[  11.8s]   -> AT
+[  11.8s]   <- +OK
+[  11.8s]   -> AT+ADDRESS=4
+[  11.8s]   <- +OK
+[  11.8s]   -> AT+NETWORKID=5
+[  11.8s]   <- +OK
+[  11.8s]   -> AT+BAND=868000000
+[  11.8s]   <- +OK
+[  11.8s]   -> AT+PARAMETER=7,7,1,12
+[  11.8s]   <- +OK
+[  11.8s]   -> AT+CRFOP=14
+[  11.8s]   <- +OK
+[  11.8s] LoRa TX power -> 14 dBm: OK
+[  11.8s] Radio init OK
+[  11.8s] Setup complete.
+[  11.8s] 
+READ FAILED after 12.0s: SerialException("ClearCommError failed (PermissionError(13, 'El dispositivo no reconoce el comando.', None, 22))")
+=== fin ===
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+=== COM16 abierto, capturando 400s (el open resetea la placa) ===
+[   1.9s] 3V3: about to assert
+[   1.9s] 3V3: asserted
+[   2.5s] 3V3: settled
+[   2.5s] 5V: about to assert (plain write)
+[   2.5s] 5V: asserted
+[   2.8s] 5V: settled
+[   2.8s] LoRa: about to assert
+[   2.8s] LoRa: asserted
+[   2.8s] BMV080 EN: GPIO15 -> LOW
+[   3.4s] rails up
+[   3.4s] [PowerManager] enable3V3Sensors (stub - bench has no gating FET yet)
+[   3.4s] --- I2C scan (after rails, before sensor init) ---
+[   3.4s]   ACK at 0x57
+[   3.4s]   ACK at 0x74
+[   3.4s]   ACK at 0x76
+[   3.4s] [bme probe right after scan] 0x76 (addr-probe=0) chip ID = 0x61 (0x61 = BME69x, CORRECT)
+[   3.4s] [  4086][E][Wire.cpp:499] requestFrom(): i2cWriteReadNonStop returned Error -1
+[   3.4s] [bme probe right after scan] 0x77 accepted the register write but returned no data
+[   3.4s] Waiting 5000ms for BMV080 startup...
+[   8.4s] [bme probe after BMV080 wait, before begin] 0x76 (addr-probe=0) chip ID = 0x61 (0x61 = BME69x, CORRECT)
+[   8.4s] [  9095][E][Wire.cpp:499] requestFrom(): i2cWriteReadNonStop returned Error -1
+[   8.4s] [bme probe after BMV080 wait, before begin] 0x77 accepted the register write but returned no data
+[   8.4s] [step] bme690.begin ...
+[   8.4s] BME690: OK (bound to 0x76)
+[   8.4s] SEN0466: SKIPPED (210s settle - excluded from the sleeping cycle)
+[   8.4s] [step] cm1106.begin (SWAPPED: now before bmv080) ...
+[  11.5s] [step] cm1106.begin returned ...
+[  11.5s] [step] bmv080.begin (SWAPPED: now after cm1106) ...
+[  12.2s] BMV080: OK
+[  12.2s] [step] calypso.begin next ...
+[  12.2s] [step] calypso.begin returned - radio next ...
+[  12.2s] Configuring RYLR998 (link parameters must match pp1-lora-receiver):
+[  12.2s]   -> AT
+[  12.2s]   <- +OK
+[  12.2s]   -> AT+ADDRESS=4
+[  12.2s]   <- +OK
+[  12.2s]   -> AT+NETWORKID=5
+[  12.2s]   <- +OK
+[  12.2s]   -> AT+BAND=868000000
+[  12.2s]   <- +OK
+[  12.2s]   -> AT+PARAMETER=7,7,1,12
+[  12.2s]   <- +OK
+[  12.2s]   -> AT+CRFOP=14
+[  12.2s]   <- +OK
+[  12.2s] LoRa TX power -> 14 dBm: OK
+[  12.2s] Radio init OK
+[  12.2s] Setup complete.
+[  12.2s] 
+[  12.5s] [sentinel] bme=OK(T24.8 H49.0) co=NotInit(0.00)  (40ms)
+[  13.7s] [tx] sensor rails off for the transmit
+[  14.3s] TX [0..0/1] 69 bytes: 24.77,49.21,939.30,0.00,0.00,0.00,0.00,925.00,-1.00,-1.00,0.00,0.00,0  (sent)
+READ FAILED after 16.4s: SerialException("ClearCommError failed (PermissionError(13, 'El dispositivo no reconoce el comando.', None, 22))")
+=== fin ===
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+=== COM16 abierto, capturando 400s (el open resetea la placa) ===
+[   1.9s] 3V3: about to assert
+[   1.9s] 3V3: asserted
+[   2.2s] 3V3: settled
+[   2.2s] 5V: about to assert (plain write)
+[   2.2s] 5V: asserted
+[   2.8s] 5V: settled
+[   2.8s] LoRa: about to assert
+[   2.8s] LoRa: asserted
+[   2.8s] BMV080 EN: GPIO15 -> LOW
+[   3.1s] rails up
+[   3.1s] [PowerManager] enable3V3Sensors (stub - bench has no gating FET yet)
+[   3.1s] --- I2C scan (after rails, before sensor init) ---
+[   3.1s]   ACK at 0x57
+[   3.1s]   ACK at 0x74
+[   3.1s]   ACK at 0x76
+[   3.1s] [bme probe right after scan] 0x76 (addr-probe=0) chip ID = 0x61 (0x61 = BME69x, CORRECT)
+[   3.1s] [  4085][E][Wire.cpp:499] requestFrom(): i2cWriteReadNonStop returned Error -1
+[   3.1s] [bme probe right after scan] 0x77 accepted the register write but returned no data
+[   3.1s] Waiting 5000ms for BMV080 startup...
+[   8.1s] [bme probe after BMV080 wait, before begin] 0x76 (addr-probe=0) chip ID = 0x61 (0x61 = BME69x, CORRECT)
+[   8.1s] [  9094][E][Wire.cpp:499] requestFrom(): i2cWriteReadNonStop returned Error -1
+[   8.4s] [bme probe after BMV080 wait, before begin] 0x77 accepted the register write but returned no data
+[   8.4s] [step] bme690.begin ...
+[   8.4s] BME690: OK (bound to 0x76)
+[   8.4s] SEN0466: SKIPPED (210s settle - excluded from the sleeping cycle)
+[   8.4s] [step] cm1106.begin (SWAPPED: now before bmv080) ...
+[  11.2s] [step] cm1106.begin returned ...
+[  11.2s] [step] bmv080.begin (SWAPPED: now after cm1106) ...
+READ FAILED after 12.1s: SerialException("ClearCommError failed (PermissionError(13, 'El dispositivo no reconoce el comando.', None, 22))")
+=== fin ===
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+=== COM16 abierto, capturando 400s (el open resetea la placa) ===
+[   1.9s] 3V3: about to assert
+[   1.9s] 3V3: asserted
+[   2.5s] 3V3: settled
+[   2.5s] 5V: about to assert (plain write)
+[   2.5s] 5V: asserted
+[   2.8s] 5V: settled
+[   2.8s] LoRa: about to assert
+[   2.8s] LoRa: asserted
+[   2.8s] BMV080 EN: GPIO15 -> LOW
+[   3.4s] rails up
+[   3.4s] [PowerManager] enable3V3Sensors (stub - bench has no gating FET yet)
+[   3.4s] --- I2C scan (after rails, before sensor init) ---
+[   3.4s]   ACK at 0x57
+[   3.4s]   ACK at 0x74
+[   3.4s]   ACK at 0x76
+[   3.4s] [bme probe right after scan] 0x76 (addr-probe=0) chip ID = 0x61 (0x61 = BME69x, CORRECT)
+[   3.4s] [  4085][E][Wire.cpp:499] requestFrom(): i2cWriteReadNonStop returned Error -1
+[   3.4s] [bme probe right after scan] 0x77 accepted the register write but returned no data
+[   3.4s] Waiting 5000ms for BMV080 startup...
+[   8.4s] [bme probe after BMV080 wait, before begin] 0x76 (addr-probe=0) chip ID = 0x61 (0x61 = BME69x, CORRECT)
+[   8.4s] [  9094][E][Wire.cpp:499] requestFrom(): i2cWriteReadNonStop returned Error -1
+[   8.4s] [bme probe after BMV080 wait, before begin] 0x77 accepted the register write but returned no data
+[   8.4s] [step] bme690.begin ...
+[   8.4s] BME690: OK (bound to 0x76)
+[   8.4s] SEN0466: SKIPPED (210s settle - excluded from the sleeping cycle)
+[   8.4s] [step] cm1106.begin (SWAPPED: now before bmv080) ...
+[  11.5s] [step] cm1106.begin returned ...
+[  11.5s] [step] bmv080.begin (SWAPPED: now after cm1106) ...
+[  12.2s] BMV080: OK
+[  12.2s] [step] calypso.begin next ...
+[  12.2s] [step] calypso.begin returned - radio next ...
+[  12.2s] Configuring RYLR998 (link parameters must match pp1-lora-receiver):
+[  12.2s]   -> AT
+[  12.2s]   <- +OK
+[  12.2s]   -> AT+ADDRESS=4
+[  12.2s]   <- +OK
+[  12.2s]   -> AT+NETWORKID=5
+[  12.2s]   <- +OK
+[  12.2s]   -> AT+BAND=868000000
+[  12.2s]   <- +OK
+[  12.2s]   -> AT+PARAMETER=7,7,1,12
+[  12.2s]   <- +OK
+[  12.2s]   -> AT+CRFOP=14
+[  12.2s]   <- +OK
+[  12.2s] LoRa TX power -> 14 dBm: OK
+[  12.2s] Radio init OK
+[  12.2s] Setup complete.
+[  12.2s] 
+[  12.2s] [sentinel] bme=OK(T24.8 H49.0) co=NotInit(0.00)  (40ms)
+[  13.7s] [tx] sensor rails off for the transmit
+[  14.3s] TX [0..0/1] 69 bytes: 24.79,48.88,939.32,0.00,0.00,0.00,0.00,925.00,-1.00,-1.00,0.00,0.00,0  (sent)
+READ FAILED after 16.4s: SerialException("ClearCommError failed (PermissionError(13, 'El dispositivo no reconoce el comando.', None, 22))")
+=== fin ===
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+=== COM16 abierto, capturando 400s (el open resetea la placa) ===
+[   2.2s] 3V3: about to assert
+[   2.2s] 3V3: asserted
+[   2.5s] 3V3: settled
+[   2.5s] 5V: about to assert (plain write)
+[   2.5s] 5V: asserted
+[   3.1s] 5V: settled
+[   3.1s] LoRa: about to assert
+[   3.1s] LoRa: asserted
+[   3.1s] BMV080 EN: GPIO15 -> LOW
+[   3.4s] rails up
+[   3.4s] [PowerManager] enable3V3Sensors (stub - bench has no gating FET yet)
+[   3.4s] --- I2C scan (after rails, before sensor init) ---
+[   3.4s]   ACK at 0x57
+[   3.4s]   ACK at 0x74
+[   3.4s]   ACK at 0x76
+[   3.4s] [bme probe right after scan] 0x76 (addr-probe=0) chip ID = 0x61 (0x61 = BME69x, CORRECT)
+[   3.4s] [  4084][E][Wire.cpp:499] requestFrom(): i2cWriteReadNonStop returned Error -1
+[   3.4s] [bme probe right after scan] 0x77 accepted the register write but returned no data
+[   3.4s] Waiting 5000ms for BMV080 startup...
+[   8.4s] [bme probe after BMV080 wait, before begin] 0x76 (addr-probe=0) chip ID = 0x61 (0x61 = BME69x, CORRECT)
+[   8.4s] [  9093][E][Wire.cpp:499] requestFrom(): i2cWriteReadNonStop returned Error -1
+[   8.4s] [bme probe after BMV080 wait, before begin] 0x77 accepted the register write but returned no data
+[   8.4s] [step] bme690.begin ...
+[   8.7s] BME690: OK (bound to 0x76)
+[   8.7s] SEN0466: SKIPPED (210s settle - excluded from the sleeping cycle)
+[   8.7s] [step] cm1106.begin (SWAPPED: now before bmv080) ...
+[  11.5s] [step] cm1106.begin returned ...
+[  11.5s] [step] bmv080.begin (SWAPPED: now after cm1106) ...
+READ FAILED after 12.4s: SerialException("ClearCommError failed (PermissionError(13, 'El dispositivo no reconoce el comando.', None, 22))")
+=== fin ===
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+=== COM16 abierto, capturando 400s (el open resetea la placa) ===
+[   1.6s] 3V3: about to assert
+[   1.6s] 3V3: asserted
+[   2.2s] 3V3: settled
+[   2.2s] 5V: about to assert (plain write)
+[   2.2s] 5V: asserted
+[   2.5s] 5V: settled
+[   2.5s] LoRa: about to assert
+[   2.8s] LoRa: asserted
+[   2.8s] BMV080 EN: GPIO15 -> LOW
+[   3.1s] rails up
+[   3.1s] [PowerManager] enable3V3Sensors (stub - bench has no gating FET yet)
+[   3.1s] --- I2C scan (after rails, before sensor init) ---
+[   3.1s]   ACK at 0x57
+[   3.1s]   ACK at 0x74
+[   3.1s]   ACK at 0x76
+[   3.1s] [bme probe right after scan] 0x76 (addr-probe=0) chip ID = 0x61 (0x61 = BME69x, CORRECT)
+[   3.1s] [  4087][E][Wire.cpp:499] requestFrom(): i2cWriteReadNonStop returned Error -1
+[   3.1s] [bme probe right after scan] 0x77 accepted the register write but returned no data
+[   3.1s] Waiting 5000ms for BMV080 startup...
+[   8.1s] [bme probe after BMV080 wait, before begin] 0x76 (addr-probe=0) chip ID = 0x61 (0x61 = BME69x, CORRECT)
+[   8.1s] [  9096][E][Wire.cpp:499] requestFrom(): i2cWriteReadNonStop returned Error -1
+[   8.1s] [bme probe after BMV080 wait, before begin] 0x77 accepted the register write but returned no data
+[   8.1s] [step] bme690.begin ...
+[   8.1s] BME690: OK (bound to 0x76)
+[   8.1s] SEN0466: SKIPPED (210s settle - excluded from the sleeping cycle)
+[   8.1s] [step] cm1106.begin (SWAPPED: now before bmv080) ...
+[  11.2s] [step] cm1106.begin returned ...
+[  11.2s] [step] bmv080.begin (SWAPPED: now after cm1106) ...
+[  11.8s] BMV080: OK
+[  11.8s] [step] calypso.begin next ...
+[  11.8s] [step] calypso.begin returned - radio next ...
+[  11.8s] Configuring RYLR998 (link parameters must match pp1-lora-receiver):
+[  11.8s]   -> AT
+[  11.8s]   <- +OK
+[  11.8s]   -> AT+ADDRESS=4
+[  11.8s]   <- +OK
+[  11.8s]   -> AT+NETWORKID=5
+[  12.2s]   <- +OK
+[  12.2s]   -> AT+BAND=868000000
+[  12.2s]   <- +OK
+[  12.2s]   -> AT+PARAMETER=7,7,1,12
+[  12.2s]   <- +OK
+[  12.2s]   -> AT+CRFOP=14
+[  12.2s]   <- +OK
+[  12.2s] LoRa TX power -> 14 dBm: OK
+[  12.2s] Radio init OK
+[  12.2s] Setup complete.
+[  12.2s] 
+[  12.2s] [sentinel] bme=OK(T24.8 H48.8) co=NotInit(0.00)  (40ms)
+[  12.2s] [store] reading 2/4 kept (tick 39)
+[  13.7s] [tx] sensor rails off for the transmit
+[  14.3s] TX [0..1/2] 112 bytes: B,2,24.8,48.8,939.3,0,0.0,0.0,0.0,925,-1.0,-1.0,0,0.0,0,3;24.8,48.8,939.3,0,0.0,0.0,0.0,925,-1.0,-1.0,0,0.0,0,0;  (sent)
+[  16.2s] [stat] STAT,39,8,0,00100,39,3120,86,0  (cap 3.62V = 86% usable, flags from wake 0, 39 tick(s) ago) (sent)
+[  16.2s] 
+[  16.2s] [sleep] tick work done - sleeping 10s
+READ FAILED after 16.2s: SerialException("ClearCommError failed (PermissionError(13, 'El dispositivo no reconoce el comando.', None, 22))")
+=== fin ===
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+=== COM16 abierto, capturando 400s (el open resetea la placa) ===
+[   1.5s] 3V3: about to assert
+[   1.5s] 3V3: asserted
+[   2.2s] 3V3: settled
+[   2.2s] 5V: about to assert (plain write)
+[   2.2s] 5V: asserted
+[   2.8s] 5V: settled
+[   2.8s] LoRa: about to assert
+[   2.8s] LoRa: asserted
+[   2.8s] BMV080 EN: GPIO15 -> LOW
+[   3.1s] rails up
+[   3.1s] [PowerManager] enable3V3Sensors (stub - bench has no gating FET yet)
+[   3.1s] --- I2C scan (after rails, before sensor init) ---
+[   3.1s]   ACK at 0x57
+[   3.1s]   ACK at 0x74
+[   3.1s]   ACK at 0x76
+[   3.1s] [bme probe right after scan] 0x76 (addr-probe=0) chip ID = 0x61 (0x61 = BME69x, CORRECT)
+[   3.1s] [  4085][E][Wire.cpp:499] requestFrom(): i2cWriteReadNonStop returned Error -1
+[   3.1s] [bme probe right after scan] 0x77 accepted the register write but returned no data
+[   3.1s] Waiting 5000ms for BMV080 startup...
+[   8.1s] [bme probe after BMV080 wait, before begin] 0x76 (addr-probe=0) chip ID = 0x61 (0x61 = BME69x, CORRECT)
+[   8.1s] [  9094][E][Wire.cpp:499] requestFrom(): i2cWriteReadNonStop returned Error -1
+[   8.1s] [bme probe after BMV080 wait, before begin] 0x77 accepted the register write but returned no data
+[   8.1s] [step] bme690.begin ...
+[   8.4s] BME690: OK (bound to 0x76)
+[   8.4s] SEN0466: SKIPPED (210s settle - excluded from the sleeping cycle)
+[   8.4s] [step] cm1106.begin (SWAPPED: now before bmv080) ...
+[  11.2s] [step] cm1106.begin returned ...
+[  11.2s] [step] bmv080.begin (SWAPPED: now after cm1106) ...
+[  11.8s] BMV080: OK
+[  11.8s] [step] calypso.begin next ...
+[  11.8s] [step] calypso.begin returned - radio next ...
+READ FAILED after 12.0s: SerialException("ClearCommError failed (PermissionError(13, 'El dispositivo no reconoce el comando.', None, 22))")
+=== fin ===
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+=== COM16 abierto, capturando 400s (el open resetea la placa) ===
+[   1.9s] 3V3: about to assert
+[   1.9s] 3V3: asserted
+[   2.5s] 3V3: settled
+[   2.5s] 5V: about to assert (plain write)
+[   2.5s] 5V: asserted
+[   2.8s] 5V: settled
+[   2.8s] LoRa: about to assert
+[   2.8s] LoRa: asserted
+[   2.8s] BMV080 EN: GPIO15 -> LOW
+[   3.4s] rails up
+[   3.4s] [PowerManager] enable3V3Sensors (stub - bench has no gating FET yet)
+[   3.4s] --- I2C scan (after rails, before sensor init) ---
+[   3.4s]   ACK at 0x57
+[   3.4s]   ACK at 0x74
+[   3.4s]   ACK at 0x76
+[   3.4s] [bme probe right after scan] 0x76 (addr-probe=0) chip ID = 0x61 (0x61 = BME69x, CORRECT)
+[   3.4s] [  4087][E][Wire.cpp:499] requestFrom(): i2cWriteReadNonStop returned Error -1
+[   3.4s] [bme probe right after scan] 0x77 accepted the register write but returned no data
+[   3.4s] Waiting 5000ms for BMV080 startup...
+[   8.4s] [bme probe after BMV080 wait, before begin] 0x76 (addr-probe=0) chip ID = 0x61 (0x61 = BME69x, CORRECT)
+[   8.4s] [  9096][E][Wire.cpp:499] requestFrom(): i2cWriteReadNonStop returned Error -1
+[   8.4s] [bme probe after BMV080 wait, before begin] 0x77 accepted the register write but returned no data
+[   8.4s] [step] bme690.begin ...
+[   8.4s] BME690: OK (bound to 0x76)
+[   8.4s] SEN0466: SKIPPED (210s settle - excluded from the sleeping cycle)
+[   8.4s] [step] cm1106.begin (SWAPPED: now before bmv080) ...
+[  11.5s] [step] cm1106.begin returned ...
+[  11.5s] [step] bmv080.begin (SWAPPED: now after cm1106) ...
+[  12.1s] BMV080: OK
+[  12.1s] [step] calypso.begin next ...
+[  12.1s] [step] calypso.begin returned - radio next ...
+[  12.1s] Configuring RYLR998 (link parameters must match pp1-lora-receiver):
+[  12.1s]   -> AT
+[  12.1s]   <- +OK
+[  12.1s]   -> AT+ADDRESS=4
+[  12.1s]   <- +OK
+[  12.1s]   -> AT+NETWORKID=5
+[  12.1s]   <- +OK
+[  12.1s]   -> AT+BAND=868000000
+[  12.1s]   <- +OK
+[  12.1s]   -> AT+PARAMETER=7,7,1,12
+[  12.1s]   <- +OK
+[  12.1s]   -> AT+CRFOP=14
+[  12.1s]   <- +OK
+[  12.1s] LoRa TX power -> 14 dBm: OK
+[  12.1s] Radio init OK
+[  12.1s] Setup complete.
+[  12.1s] 
+[  12.1s] [sentinel] bme=OK(T24.9 H48.6) co=NotInit(0.00)  (40ms)
+[  13.7s] [tx] sensor rails off for the transmit
+[  14.3s] TX [0..0/1] 69 bytes: 24.86,48.72,939.30,0.00,0.00,0.00,0.00,925.00,-1.00,-1.00,0.00,0.00,0  (sent)
+READ FAILED after 16.4s: SerialException("ClearCommError failed (PermissionError(13, 'El dispositivo no reconoce el comando.', None, 22))")
+=== fin ===
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+=== COM16 abierto, capturando 400s (el open resetea la placa) ===
+[   1.9s] 3V3: about to assert
+[   1.9s] 3V3: asserted
+[   2.5s] 3V3: settled
+[   2.5s] 5V: about to assert (plain write)
+[   2.5s] 5V: asserted
+[   2.8s] 5V: settled
+[   2.8s] LoRa: about to assert
+[   2.8s] LoRa: asserted
+[   2.8s] BMV080 EN: GPIO15 -> LOW
+[   3.4s] rails up
+[   3.4s] [PowerManager] enable3V3Sensors (stub - bench has no gating FET yet)
+[   3.4s] --- I2C scan (after rails, before sensor init) ---
+[   3.4s]   ACK at 0x57
+[   3.4s]   ACK at 0x74
+[   3.4s]   ACK at 0x76
+[   3.4s] [bme probe right after scan] 0x76 (addr-probe=0) chip ID = 0x61 (0x61 = BME69x, CORRECT)
+[   3.4s] [  4085][E][Wire.cpp:499] requestFrom(): i2cWriteReadNonStop returned Error -1
+[   3.4s] [bme probe right after scan] 0x77 accepted the register write but returned no data
+[   3.4s] Waiting 5000ms for BMV080 startup...
+[   8.4s] [bme probe after BMV080 wait, before begin] 0x76 (addr-probe=0) chip ID = 0x61 (0x61 = BME69x, CORRECT)
+[   8.4s] [  9094][E][Wire.cpp:499] requestFrom(): i2cWriteReadNonStop returned Error -1
+[   8.4s] [bme probe after BMV080 wait, before begin] 0x77 accepted the register write but returned no data
+[   8.4s] [step] bme690.begin ...
+[   8.4s] BME690: OK (bound to 0x76)
+[   8.4s] SEN0466: SKIPPED (210s settle - excluded from the sleeping cycle)
+[   8.4s] [step] cm1106.begin (SWAPPED: now before bmv080) ...
+[  11.6s] [step] cm1106.begin returned ...
+[  11.6s] [step] bmv080.begin (SWAPPED: now after cm1106) ...
+[  12.2s] BMV080: OK
+[  12.2s] [step] calypso.begin next ...
+[  12.2s] [step] calypso.begin returned - radio next ...
+[  12.2s] Configuring RYLR998 (link parameters must match pp1-lora-receiver):
+[  12.2s]   -> AT
+[  12.2s]   <- +OK
+[  12.2s]   -> AT+ADDRESS=4
+[  12.2s]   <- +OK
+[  12.2s]   -> AT+NETWORKID=5
+[  12.2s]   <- +OK
+[  12.2s]   -> AT+BAND=868000000
+[  12.2s]   <- +OK
+[  12.2s]   -> AT+PARAMETER=7,7,1,12
+[  12.2s]   <- +OK
+[  12.2s]   -> AT+CRFOP=14
+[  12.2s]   <- +OK
+[  12.2s] LoRa TX power -> 14 dBm: OK
+[  12.2s] Radio init OK
+[  12.2s] Setup complete.
+[  12.2s] 
+[  12.2s] [sentinel] bme=OK(T24.9 H48.5) co=NotInit(0.00)  (40ms)
+[  12.2s] [store] reading 1/4 kept (tick 45)
+[  12.2s] 
+[  12.2s] [sleep] tick work done - sleeping 10s
+READ FAILED after 12.3s: SerialException("ClearCommError failed (PermissionError(13, 'El dispositivo no reconoce el comando.', None, 22))")
+=== fin ===
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+=== COM16 abierto, capturando 400s (el open resetea la placa) ===
+[   1.9s] 3V3: about to assert
+[   1.9s] 3V3: asserted
+[   2.5s] 3V3: settled
+[   2.5s] 5V: about to assert (plain write)
+[   2.5s] 5V: asserted
+[   2.8s] 5V: settled
+[   2.8s] LoRa: about to assert
+[   2.8s] LoRa: asserted
+[   2.8s] BMV080 EN: GPIO15 -> LOW
+[   3.4s] rails up
+[   3.4s] [PowerManager] enable3V3Sensors (stub - bench has no gating FET yet)
+[   3.4s] --- I2C scan (after rails, before sensor init) ---
+[   3.4s]   ACK at 0x57
+[   3.4s]   ACK at 0x74
+[   3.4s]   ACK at 0x76
+[   3.4s] [bme probe right after scan] 0x76 (addr-probe=0) chip ID = 0x61 (0x61 = BME69x, CORRECT)
+[   3.4s] [  4087][E][Wire.cpp:499] requestFrom(): i2cWriteReadNonStop returned Error -1
+[   3.4s] [bme probe right after scan] 0x77 accepted the register write but returned no data
+[   3.4s] Waiting 5000ms for BMV080 startup...
+[   8.4s] [bme probe after BMV080 wait, before begin] 0x76 (addr-probe=0) chip ID = 0x61 (0x61 = BME69x, CORRECT)
+[   8.4s] [  9096][E][Wire.cpp:499] requestFrom(): i2cWriteReadNonStop returned Error -1
+[   8.4s] [bme probe after BMV080 wait, before begin] 0x77 accepted the register write but returned no data
+[   8.4s] [step] bme690.begin ...
+[   8.4s] BME690: OK (bound to 0x76)
+[   8.4s] SEN0466: SKIPPED (210s settle - excluded from the sleeping cycle)
+[   8.4s] [step] cm1106.begin (SWAPPED: now before bmv080) ...
+[  11.5s] [step] cm1106.begin returned ...
+[  11.5s] [step] bmv080.begin (SWAPPED: now after cm1106) ...
+[  12.2s] BMV080: OK
+[  12.2s] [step] calypso.begin next ...
+[  12.2s] [step] calypso.begin returned - radio next ...
+[  12.2s] Configuring RYLR998 (link parameters must match pp1-lora-receiver):
+[  12.2s]   -> AT
+[  12.2s]   <- +OK
+[  12.2s]   -> AT+ADDRESS=4
+[  12.2s]   <- +OK
+[  12.2s]   -> AT+NETWORKID=5
+[  12.2s]   <- +OK
+[  12.2s]   -> AT+BAND=868000000
+[  12.2s]   <- +OK
+[  12.2s]   -> AT+PARAMETER=7,7,1,12
+[  12.2s]   <- +OK
+[  12.2s]   -> AT+CRFOP=14
+[  12.2s]   <- +OK
+[  12.2s] LoRa TX power -> 14 dBm: OK
+[  12.2s] Radio init OK
+[  12.2s] Setup complete.
+[  12.2s] 
+[  12.2s] [sentinel] bme=OK(T25.0 H48.5) co=NotInit(0.00)  (40ms)
+[  13.7s] [tx] sensor rails off for the transmit
+[  14.3s] TX [0..0/1] 69 bytes: 24.93,48.51,939.33,0.00,0.00,0.00,0.00,925.00,-1.00,-1.00,0.00,0.00,0  (sent)
+READ FAILED after 16.4s: SerialException("ClearCommError failed (PermissionError(13, 'El dispositivo no reconoce el comando.', None, 22))")
+=== fin ===
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+OPEN FAILED: SerialException("could not open port 'COM16': FileNotFoundError(2, 'El sistema no puede encontrar el archivo especificado.', None, 2)")
+=== COM16 abierto, capturando 400s (el open resetea la placa) ===
+[   1.9s] 3V3: about to assert
+[   1.9s] 3V3: asserted
+[   2.5s] 3V3: settled
+[   2.5s] 5V: about to assert (plain write)
+[   2.5s] 5V: asserted
+[   3.1s] 5V: settled
+[   3.1s] LoRa: about to assert
+[   3.1s] LoRa: asserted
+[   3.1s] BMV080 EN: GPIO15 -> LOW
+[   3.4s] rails up
+[   3.4s] [PowerManager] enable3V3Sensors (stub - bench has no gating FET yet)
+[   3.4s] --- I2C scan (after rails, before sensor init) ---
+[   3.4s]   ACK at 0x57
+[   3.4s]   ACK at 0x74
+[   3.4s]   ACK at 0x76
+[   3.4s] [bme probe right after scan] 0x76 (addr-probe=0) chip ID = 0x61 (0x61 = BME69x, CORRECT)
+[   3.4s] [  4085][E][Wire.cpp:499] requestFrom(): i2cWriteReadNonStop returned Error -1
+[   3.4s] [bme probe right after scan] 0x77 accepted the register write but returned no data
+[   3.4s] Waiting 5000ms for BMV080 startup...
+[   8.4s] [bme probe after BMV080 wait, before begin] 0x76 (addr-probe=0) chip ID = 0x61 (0x61 = BME69x, CORRECT)
+[   8.4s] [  9094][E][Wire.cpp:499] requestFrom(): i2cWriteReadNonStop returned Error -1
+[   8.4s] [bme probe after BMV080 wait, before begin] 0x77 accepted the register write but returned no data
+[   8.4s] [step] bme690.begin ...
+[   8.7s] BME690: OK (bound to 0x76)
+[   8.7s] SEN0466: SKIPPED (210s settle - excluded from the sleeping cycle)
+[   8.7s] [step] cm1106.begin (SWAPPED: now before bmv080) ...
+[  11.5s] [step] cm1106.begin returned ...
+[  11.5s] [step] bmv080.begin (SWAPPED: now after cm1106) ...
+[  12.1s] BMV080: OK
+[  12.1s] [step] calypso.begin next ...
+[  12.1s] [step] calypso.begin returned - radio next ...
+[  12.5s] Configuring RYLR998 (link parameters must match pp1-lora-receiver):
+[  12.5s]   -> AT
+[  12.5s]   <- +OK
+[  12.5s]   -> AT+ADDRESS=4
+[  12.5s]   <- +OK
+[  12.5s]   -> AT+NETWORKID=5
+[  12.5s]   <- +OK
+[  12.5s]   -> AT+BAND=868000000
+[  12.5s]   <- +OK
+[  12.5s]   -> AT+PARAMETER=7,7,1,12
+[  12.5s]   <- +OK
+[  12.5s]   -> AT+CRFOP=14
+[  12.5s]   <- +OK
+[  12.5s] LoRa TX power -> 14 dBm: OK
+[  12.5s] Radio init OK
+[  12.5s] Setup complete.
+[  12.5s] 
+[  12.5s] [sentinel] bme=OK(T25.1 H49.5) co=NotInit(0.00)  (40ms)
+[  12.5s] 
+[  12.5s] *** PRE-ALARM: temp *** (was NORMAL) - staying awake, all sensors continuous
+[  12.5s] [store] reading 1/4 kept (tick 48)
+[  12.5s] [co] 5V rail up - warming the SEN0466, 210s before it is trusted
+[  18.7s] [read] 3V3 rail recovery after the BME690 heater (5V stays up)
+[  18.7s] [t] BME690   active=188ms recovery=6100ms
+[  20.9s] [bmv080] laser off after 2111ms (pm2.5=0.0, frame)
+[  22.4s] [t] BMV080   active=2191ms recovery=1499ms
+[  25.9s] [cm1106 raw] 16 05 01 04 3E 00 03 9F | status=OK frozenValueRun=0
+[  27.4s] [t] CM1106   active=3513ms recovery=1500ms
+[  29.0s] [t] SEN0466  active=0ms recovery=1500ms
+[  31.8s] [t] Calypso  active=1500ms recovery=1500ms
+[  31.8s] [t] TOTAL burst=19496ms
+[  31.8s] [read] bme=OK(T25.1 H49.5 gas10589) bmv=OK(pm2.5=0.0) co2=OK(1086) co=NotInit(0.00) wind=silent(rx=0)  (all sensors, 19497ms)
+[  31.8s] [store] reading 2/4 kept (tick 48)
+[  33.4s] [tx] sensor rails off for the transmit
+[  34.0s] TX [0..1/2] 117 bytes: B,2,25.1,49.5,939.4,0,0.0,0.0,0.0,925,-1.0,-1.0,0,0.0,0,0;25.1,49.5,939.4,10589,0.0,0.0,0.0,1086,-1.0,-1.0,0,0.0,0,0;  (sent)
+[  36.2s] [stat] STAT,48,8,0,11100,0,3120,86,1  (cap 3.62V = 86% usable, flags from wake 48, 0 tick(s) ago) (sent)
+[  38.0s] Boot guard: run marked good, NVS counter cleared
+[  38.0s] [co] 5V rail dropped - SEN0466 warm-up restarts from zero
+[  44.3s] [read] 3V3 rail recovery after the BME690 heater (5V stays up)
+[  44.3s] [t] BME690   active=38ms recovery=6100ms
+[  46.5s] [bmv080] laser off after 2074ms (pm2.5=0.0, frame)
+[  48.1s] [t] BMV080   active=2154ms recovery=1499ms
+[  52.4s] [cm1106 raw] (nothing received)| status=Timeout frozenValueRun=0
+[  54.0s] [t] CM1106   active=4500ms recovery=1499ms
+[  55.6s] [t] SEN0466  active=0ms recovery=1500ms
+[  58.4s] [t] Calypso  active=1500ms recovery=1500ms
+[  58.4s] [t] TOTAL burst=20295ms
+[  58.4s] [read] bme=OK(T25.3 H49.4 gas5685) bmv=OK(pm2.5=0.0) co2=Timeout(1086) co=NotInit(0.00) wind=silent(rx=0)  (all sensors, 20296ms)
+[  58.4s] [store] reading 1/4 kept (tick 48)
+[  59.9s] [tx] sensor rails off for the transmit
+[  60.5s] TX [0..0/1] 73 bytes: 25.34,49.45,939.35,5684.85,0.00,0.00,0.00,1086.00,-1.00,-1.00,0.00,0.00,0  (sent)
+[  62.7s] [stat] STAT,48,8,0,11000,0,3120,86,1  (cap 3.62V = 86% usable, flags from wake 48, 0 tick(s) ago) (sent)
+[  70.8s] [read] 3V3 rail recovery after the BME690 heater (5V stays up)
+[  70.8s] [t] BME690   active=38ms recovery=6099ms
+[  73.0s] [bmv080] laser off after 2035ms (pm2.5=0.0, frame)
+[  74.3s] [t] BMV080   active=2115ms recovery=1499ms
+[  78.9s] [cm1106 raw] (nothing received)| status=Timeout frozenValueRun=0
+[  80.5s] [t] CM1106   active=4500ms recovery=1499ms
+[  81.8s] [t] SEN0466  active=0ms recovery=1500ms
+[  84.9s] [t] Calypso  active=1500ms recovery=1500ms
+[  84.9s] [t] TOTAL burst=20255ms
+[  84.9s] [read] bme=OK(T25.3 H50.8 gas5685) bmv=OK(pm2.5=0.0) co2=Timeout(1086) co=NotInit(0.00) wind=silent(rx=0)  (all sensors, 20256ms)
+[  84.9s] [store] reading 1/4 kept (tick 48)
+[  86.4s] [tx] sensor rails off for the transmit
+[  87.1s] TX [0..0/1] 73 bytes: 25.30,50.76,939.35,5684.85,0.00,0.00,0.00,1086.00,-1.00,-1.00,0.00,0.00,0  (sent)
+[  88.9s] [stat] STAT,48,8,0,11000,0,3120,86,1  (cap 3.62V = 86% usable, flags from wake 48, 0 tick(s) ago) (sent)
+[  91.1s] [ 91630][E][Wire.cpp:499] requestFrom(): i2cWriteReadNonStop returned Error -1
+[  91.1s] [ 91669][E][Wire.cpp:499] requestFrom(): i2cWriteReadNonStop returned Error -1
+[  91.1s] [ 91696][E][Wire.cpp:499] requestFrom(): i2cWriteReadNonStop returned Error -1
+[  91.1s] [ 91736][E][Wire.cpp:499] requestFrom(): i2cWriteReadNonStop returned Error -1
+[  97.4s] [read] 3V3 rail recovery after the BME690 heater (5V stays up)
+[  97.4s] [t] BME690   active=134ms recovery=6101ms
+[  99.5s] [bmv080] laser off after 2082ms (pm2.5=0.0, frame)
+[ 101.1s] [t] BMV080   active=2162ms recovery=1499ms
+[ 105.5s] [cm1106 raw] (nothing received)| status=Timeout frozenValueRun=0
+[ 107.0s] [t] CM1106   active=4500ms recovery=1499ms
+[ 108.6s] [t] SEN0466  active=0ms recovery=1500ms
+[ 111.4s] [t] Calypso  active=1500ms recovery=1500ms
+[ 111.4s] [t] TOTAL burst=20399ms
+[ 111.4s] [read] bme=Timeout(T25.3 H50.8 gas5685) bmv=OK(pm2.5=0.0) co2=Timeout(1086) co=NotInit(0.00) wind=silent(rx=0)  (all sensors, 20400ms)
+[ 111.4s] [store] reading 1/4 kept (tick 48)
+[ 112.9s] [tx] sensor rails off for the transmit
+[ 113.3s] TX [0..0/1] 73 bytes: 25.30,50.76,939.35,5684.85,0.00,0.00,0.00,1086.00,-1.00,-1.00,0.00,0.00,0  (send FAILED)
+[ 115.4s] [stat] STAT,48,8,0,01000,0,3120,86,1  (cap 3.62V = 86% usable, flags from wake 48, 0 tick(s) ago) (sent)
+[ 123.5s] [read] 3V3 rail recovery after the BME690 heater (5V stays up)
+[ 123.5s] [t] BME690   active=38ms recovery=6100ms
+[ 127.3s] [bmv080] laser off after 2082ms (pm2.5=0.0, frame)
+[ 127.3s] [t] BMV080   active=2162ms recovery=1499ms
+[ 131.6s] [cm1106 raw] (nothing received)| status=Timeout frozenValueRun=0
+[ 133.2s] [t] CM1106   active=4500ms recovery=1499ms
+[ 134.7s] [t] SEN0466  active=0ms recovery=1500ms
+[ 137.9s] [t] Calypso  active=1500ms recovery=1500ms
+[ 137.9s] [t] TOTAL burst=20302ms
+[ 137.9s] [read] bme=OK(T25.3 H50.3 gas5685) bmv=OK(pm2.5=0.0) co2=Timeout(1086) co=NotInit(0.00) wind=silent(rx=0)  (all sensors, 20303ms)
+[ 137.9s] [store] reading 1/4 kept (tick 48)
+[ 139.4s] [tx] sensor rails off for the transmit
+[ 139.7s] TX [0..0/1] 73 bytes: 25.28,50.33,939.35,5684.85,0.00,0.00,0.00,1086.00,-1.00,-1.00,0.00,0.00,0  (sent)
+[ 141.9s] [stat] STAT,48,8,0,11000,0,3120,86,1  (cap 3.62V = 86% usable, flags from wake 48, 0 tick(s) ago) (sent)
+[ 150.0s] [read] 3V3 rail recovery after the BME690 heater (5V stays up)
+[ 150.0s] [t] BME690   active=38ms recovery=6100ms
+[ 152.2s] [bmv080] laser off after 2055ms (pm2.5=0.0, frame)
+[ 153.8s] [t] BMV080   active=2135ms recovery=1499ms
+[ 158.1s] [cm1106 raw] (nothing received)| status=Timeout frozenValueRun=0
+[ 159.7s] [t] CM1106   active=4500ms recovery=1499ms
+[ 161.3s] [t] SEN0466  active=0ms recovery=1500ms
+[ 164.1s] [t] Calypso  active=1500ms recovery=1500ms
+[ 164.1s] [t] TOTAL burst=20276ms
+[ 164.1s] [read] bme=OK(T25.3 H50.2 gas5685) bmv=OK(pm2.5=0.0) co2=Timeout(1086) co=NotInit(0.00) wind=silent(rx=0)  (all sensors, 20277ms)
+[ 164.1s] [store] reading 1/4 kept (tick 48)
+[ 165.6s] [tx] sensor rails off for the transmit
+[ 166.3s] TX [0..0/1] 73 bytes: 25.31,50.18,939.36,5684.85,0.00,0.00,0.00,1086.00,-1.00,-1.00,0.00,0.00,0  (sent)
+[ 168.5s] [stat] STAT,48,8,0,11000,0,3120,86,1  (cap 3.62V = 86% usable, flags from wake 48, 0 tick(s) ago) (sent)
+[ 176.6s] [read] 3V3 rail recovery after the BME690 heater (5V stays up)
+[ 176.6s] [t] BME690   active=38ms recovery=6100ms
+[ 178.7s] [bmv080] laser off after 2035ms (pm2.5=0.0, frame)
+[ 180.3s] [t] BMV080   active=2115ms recovery=1499ms
+[ 184.7s] [cm1106 raw] (nothing received)| status=Timeout frozenValueRun=0
+[ 186.2s] [t] CM1106   active=4500ms recovery=1499ms
+[ 187.8s] [t] SEN0466  active=0ms recovery=1500ms
+[ 190.6s] [t] Calypso  active=1500ms recovery=1500ms
+[ 190.6s] [t] TOTAL burst=20255ms
+[ 190.6s] [read] bme=OK(T25.3 H48.8 gas5685) bmv=OK(pm2.5=0.0) co2=Timeout(1086) co=NotInit(0.00) wind=silent(rx=0)  (all sensors, 20256ms)
+[ 190.6s] [store] reading 1/4 kept (tick 48)
+[ 192.1s] [tx] sensor rails off for the transmit
+[ 192.8s] TX [0..0/1] 73 bytes: 25.33,48.82,939.36,5684.85,0.00,0.00,0.00,1086.00,-1.00,-1.00,0.00,0.00,0  (sent)
+[ 194.9s] [stat] STAT,48,8,0,11000,0,3120,86,1  (cap 3.62V = 86% usable, flags from wake 48, 0 tick(s) ago) (sent)
+[ 203.1s] [read] 3V3 rail recovery after the BME690 heater (5V stays up)
+[ 203.1s] [t] BME690   active=38ms recovery=6100ms
+[ 204.9s] [bmv080] laser off after 2035ms (pm2.5=0.0, frame)
+[ 206.5s] [t] BMV080   active=2115ms recovery=1499ms
+[ 211.2s] [cm1106 raw] (nothing received)| status=Timeout frozenValueRun=0
+[ 212.4s] [t] CM1106   active=4500ms recovery=1499ms
+[ 214.0s] [t] SEN0466  active=0ms recovery=1500ms
+[ 217.1s] [t] Calypso  active=1500ms recovery=1500ms
+[ 217.1s] [t] TOTAL burst=20256ms
+[ 217.1s] [read] bme=OK(T25.3 H49.4 gas5685) bmv=OK(pm2.5=0.0) co2=Timeout(1086) co=NotInit(0.00) wind=silent(rx=0)  (all sensors, 20257ms)
+[ 217.1s] [store] reading 1/4 kept (tick 48)
+[ 218.7s] [tx] sensor rails off for the transmit
+[ 219.3s] TX [0..0/1] 73 bytes: 25.35,49.36,939.36,5684.85,0.00,0.00,0.00,1086.00,-1.00,-1.00,0.00,0.00,0  (sent)
+[ 221.2s] [stat] STAT,48,8,0,11000,0,3120,86,1  (cap 3.62V = 86% usable, flags from wake 48, 0 tick(s) ago) (sent)
+[ 223.3s] [read] 3V3 rail recovery after the BME690 heater (5V stays up)
+[ 229.3s] [t] BME690   active=38ms recovery=6100ms
+[ 231.5s] [bmv080] laser off after 2035ms (pm2.5=0.0, frame)
+[ 233.0s] [t] BMV080   active=2115ms recovery=1499ms
+[ 237.4s] [cm1106 raw] (nothing received)| status=Timeout frozenValueRun=0
+[ 238.9s] [t] CM1106   active=4500ms recovery=1499ms
+[ 240.5s] [t] SEN0466  active=0ms recovery=1500ms
+[ 243.6s] [t] Calypso  active=1500ms recovery=1500ms
+[ 243.6s] [t] TOTAL burst=20255ms
+[ 243.6s] [read] bme=OK(T25.3 H47.9 gas5685) bmv=OK(pm2.5=0.0) co2=Timeout(1086) co=NotInit(0.00) wind=silent(rx=0)  (all sensors, 20256ms)
+[ 243.6s] [store] reading 1/4 kept (tick 48)
+[ 244.9s] [tx] sensor rails off for the transmit
+[ 245.5s] TX [0..0/1] 73 bytes: 25.34,47.95,939.35,5684.85,0.00,0.00,0.00,1086.00,-1.00,-1.00,0.00,0.00,0  (sent)
+[ 247.7s] [stat] STAT,48,8,0,11000,0,3120,86,1  (cap 3.62V = 86% usable, flags from wake 48, 0 tick(s) ago) (sent)
+[ 255.8s] [read] 3V3 rail recovery after the BME690 heater (5V stays up)
+[ 255.8s] [t] BME690   active=38ms recovery=6100ms
+[ 257.9s] [bmv080] laser off after 2035ms (pm2.5=0.0, frame)
+[ 259.5s] [t] BMV080   active=2115ms recovery=1499ms
+[ 263.9s] [cm1106 raw] (nothing received)| status=Timeout frozenValueRun=0
+[ 265.4s] [t] CM1106   active=4500ms recovery=1499ms
+[ 267.0s] [t] SEN0466  active=0ms recovery=1500ms
+[ 269.8s] [t] Calypso  active=1500ms recovery=1500ms
+[ 269.8s] [t] TOTAL burst=20255ms
+[ 269.8s] [read] bme=OK(T25.3 H47.7 gas5685) bmv=OK(pm2.5=0.0) co2=Timeout(1086) co=NotInit(0.00) wind=silent(rx=0)  (all sensors, 20256ms)
+[ 269.8s] [store] reading 1/4 kept (tick 48)
+[ 271.4s] [tx] sensor rails off for the transmit
+[ 272.0s] TX [0..0/1] 73 bytes: 25.34,47.68,939.34,5684.85,0.00,0.00,0.00,1086.00,-1.00,-1.00,0.00,0.00,0  (sent)
+[ 274.2s] [stat] STAT,48,8,0,11000,0,3120,86,1  (cap 3.62V = 86% usable, flags from wake 48, 0 tick(s) ago) (sent)
+[ 282.3s] [read] 3V3 rail recovery after the BME690 heater (5V stays up)
+[ 282.3s] [t] BME690   active=38ms recovery=6100ms
+[ 284.4s] [bmv080] laser off after 2035ms (pm2.5=0.0, frame)
+[ 286.0s] [t] BMV080   active=2115ms recovery=1499ms
+[ 290.3s] [cm1106 raw] (nothing received)| status=Timeout frozenValueRun=0
+[ 291.9s] [t] CM1106   active=4500ms recovery=1499ms
+[ 293.5s] [t] SEN0466  active=0ms recovery=1500ms
+[ 296.3s] [t] Calypso  active=1500ms recovery=1500ms
+[ 296.3s] [t] TOTAL burst=20256ms
+[ 296.3s] [read] bme=OK(T25.3 H47.2 gas5685) bmv=OK(pm2.5=0.0) co2=Timeout(1086) co=NotInit(0.00) wind=silent(rx=0)  (all sensors, 20257ms)
+[ 296.3s] [store] reading 1/4 kept (tick 48)
+[ 297.8s] [tx] sensor rails off for the transmit
+[ 300.6s] TX [0..0/1] 73 bytes: 25.33,47.19,939.34,5684.85,0.00,0.00,0.00,1086.00,-1.00,-1.00,0.00,0.00,0  (sent)
+[ 300.6s] [stat] STAT,48,8,0,11000,0,3120,86,1  (cap 3.62V = 86% usable, flags from wake 48, 0 tick(s) ago) (sent)
+[ 308.7s] [read] 3V3 rail recovery after the BME690 heater (5V stays up)
+[ 308.7s] [t] BME690   active=38ms recovery=6099ms
+[ 310.9s] [bmv080] laser off after 2035ms (pm2.5=0.0, frame)
+[ 312.2s] [t] BMV080   active=2115ms recovery=1499ms
+[ 316.8s] [cm1106 raw] (nothing received)| status=Timeout frozenValueRun=0
+[ 318.4s] [t] CM1106   active=4500ms recovery=1499ms
+[ 320.0s] [t] SEN0466  active=0ms recovery=1500ms
+[ 322.7s] [t] Calypso  active=1500ms recovery=1500ms
+[ 322.7s] [t] TOTAL burst=20255ms
+[ 322.7s] [read] bme=OK(T25.3 H46.9 gas5685) bmv=OK(pm2.5=0.0) co2=Timeout(1086) co=NotInit(0.00) wind=silent(rx=0)  (all sensors, 20256ms)
+[ 322.7s] [store] reading 1/4 kept (tick 48)
+[ 324.3s] [tx] sensor rails off for the transmit
+[ 324.9s] TX [0..0/1] 73 bytes: 25.32,46.93,939.33,5684.85,0.00,0.00,0.00,1086.00,-1.00,-1.00,0.00,0.00,0  (sent)
+[ 327.1s] [stat] STAT,48,8,0,11000,0,3120,86,1  (cap 3.62V = 86% usable, flags from wake 48, 0 tick(s) ago) (sent)
+[ 329.0s] [read] 3V3 rail recovery after the BME690 heater (5V stays up)
+[ 335.2s] [t] BME690   active=38ms recovery=6100ms
+[ 337.4s] [bmv080] laser off after 2035ms (pm2.5=0.0, frame)
+[ 338.6s] [t] BMV080   active=2115ms recovery=1499ms
+[ 343.3s] [cm1106 raw] (nothing received)| status=Timeout frozenValueRun=0
+[ 344.9s] [t] CM1106   active=4500ms recovery=1499ms
+[ 346.1s] [t] SEN0466  active=0ms recovery=1500ms
+[ 349.2s] [t] Calypso  active=1500ms recovery=1500ms
+[ 349.2s] [t] TOTAL burst=20256ms
+[ 349.2s] [read] bme=OK(T25.3 H47.2 gas5685) bmv=OK(pm2.5=0.0) co2=Timeout(1086) co=NotInit(0.00) wind=silent(rx=0)  (all sensors, 20257ms)
+[ 349.2s] [store] reading 1/4 kept (tick 48)
+[ 350.8s] [tx] sensor rails off for the transmit
+[ 351.4s] TX [0..0/1] 73 bytes: 25.31,47.22,939.33,5684.85,0.00,0.00,0.00,1086.00,-1.00,-1.00,0.00,0.00,0  (sent)
+[ 353.3s] [stat] STAT,48,8,0,11000,0,3120,86,1  (cap 3.62V = 86% usable, flags from wake 48, 0 tick(s) ago) (sent)
+[ 355.5s] [read] 3V3 rail recovery after the BME690 heater (5V stays up)
+[ 361.4s] [t] BME690   active=38ms recovery=6100ms
+[ 363.6s] [bmv080] laser off after 2037ms (pm2.5=0.0, frame)
+[ 365.1s] [t] BMV080   active=2117ms recovery=1499ms
+[ 369.8s] [cm1106 raw] (nothing received)| status=Timeout frozenValueRun=0
+[ 371.0s] [t] CM1106   active=4500ms recovery=1499ms
+[ 372.6s] [t] SEN0466  active=0ms recovery=1500ms
+[ 375.7s] [t] Calypso  active=1500ms recovery=1500ms
+[ 375.7s] [t] TOTAL burst=20256ms
+[ 375.7s] [read] bme=OK(T25.3 H47.1 gas5685) bmv=OK(pm2.5=0.0) co2=Timeout(1086) co=NotInit(0.00) wind=silent(rx=0)  (all sensors, 20257ms)
+[ 375.7s] [store] reading 1/4 kept (tick 48)
+[ 377.3s] [tx] sensor rails off for the transmit
+[ 377.6s] TX [0..0/1] 73 bytes: 25.31,47.12,939.33,5684.85,0.00,0.00,0.00,1086.00,-1.00,-1.00,0.00,0.00,0  (sent)
+[ 379.8s] [stat] STAT,48,8,0,11000,0,3120,86,1  (cap 3.62V = 86% usable, flags from wake 48, 0 tick(s) ago) (sent)
+[ 387.9s] [read] 3V3 rail recovery after the BME690 heater (5V stays up)
+[ 387.9s] [t] BME690   active=38ms recovery=6100ms
+[ 391.6s] [bmv080] laser off after 2035ms (pm2.5=0.0, frame)
+[ 391.6s] [t] BMV080   active=2115ms recovery=1499ms
+[ 396.0s] [cm1106 raw] (nothing received)| status=Timeout frozenValueRun=0
+[ 397.5s] [t] CM1106   active=4500ms recovery=1499ms
+[ 399.1s] [t] SEN0466  active=0ms recovery=1500ms
+=== fin ===
