@@ -427,6 +427,17 @@ private:
   // that had been delivered to a healthy node. Seen on requestId 7, 2026-10-05.
   //
   // The gap guard is load-bearing, not caution: see DOWNLINK_RETRY_MIN_GAP_MS.
+  // Cuantos huecos quedan. Una accion global necesita uno POR NODO, y hay que
+  // saberlo ANTES de encolar nada: encolar la mitad de un comando que va a todos
+  // los nodos deja el sistema diciendo que lo aplico cuando no es cierto.
+  uint8_t freeNodeCmdSlots() const {
+    uint8_t n = 0;
+    for (uint8_t i = 0; i < kNodeCmdQueue; i++) {
+      if (!_nodeCmds[i].pending) n++;
+    }
+    return n;
+  }
+
   int deliverableIndexFor(const char *device) const {
     // ONE COMMAND PER NODE PER WINDOW.
     //

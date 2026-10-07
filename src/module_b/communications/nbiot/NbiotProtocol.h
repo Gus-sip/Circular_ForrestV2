@@ -118,6 +118,18 @@ bool parseQmtrecv(const char *line, MqttMessage &out);
 // JSON: it has no notion of scope, so a key repeated at a different depth
 // would match the first occurrence.
 bool jsonString(const char *json, const char *key, char *out, size_t cap);
+
+// Lee el valor de `key` sea cadena entrecomillada O NUMERO JSON DESNUDO, y lo
+// devuelve como texto tal cual venia.
+//
+// jsonString() exige comillas, y la v2 del protocolo A->C dice explicitamente:
+// "Numeros con decimal: van como numero JSON (1.5), no como texto". Los tres
+// comandos NxT mandan su N asi, de modo que sin esto no se pueden leer.
+//
+// Se devuelve como TEXTO y no como float a proposito: el valor viaja despues
+// dentro de una cadena CFG y es el nodo quien lo interpreta, asi que convertirlo
+// aqui solo anadiria una conversion de ida y vuelta donde se pierde precision.
+bool jsonScalar(const char *json, const char *key, char *out, size_t cap);
 bool jsonInt(const char *json, const char *key, long &out);
 // Extracts the brace-balanced object that follows "<key>": - used to pull the
 // "data" and "params" sub-objects out of a gateway RPC payload.

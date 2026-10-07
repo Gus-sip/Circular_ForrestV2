@@ -896,6 +896,78 @@ static bool applyConfigCommand(const char *payload, uint8_t len, char *ackPayloa
         }
         g_txPeriodMs = (uint32_t)seconds * 1000UL;
         snprintf(appliedKv, sizeof(appliedKv), "INTERVAL=%ld", seconds);
+      // ---- NxT: multiplicadores de la v2 del protocolo A->C ----
+      //
+      // LA MULTIPLICACION LA HACE EL NODO, NO MODULO B.
+      //
+      // Los periodos base - 3 ticks para los centinelas, 90 para el burst, 4 para
+      // transmitir - son constantes de ESTE fichero. Si Modulo B calculara los
+      // ticks tendria que llevarlas duplicadas, y se desincronizarian en cuanto
+      // alguien tocara una aqui. Modulo B manda la N en crudo; el nodo multiplica
+      // contra sus propios valores, valida, y ACKea los ticks que de verdad
+      // aplico - que es lo unico que permite a Modulo A mostrar el periodo real.
+      //
+      // El ACK devuelve los ticks resultantes y no la N, a proposito: con N=1.5 y
+      // base 3 salen 5 ticks (4.5 redondeado), y lo que importa saber es 5.
+      } else if (strcmp(key, "NXT_LECTURA") == 0) {
+        // "Cada sensor se lee cada N x su periodo minimo de lectura. N >= 1."
+        // Escala los DOS contadores de lectura a la vez, manteniendo la relacion
+        // entre centinelas y burst que esta disenada a proposito: los baratos
+        // vigilan seguido y los caros confirman de tanto en tanto.
+        const float n = (float)atof(valueStr);
+        const long sr = lroundf((float)SENSOR_READ_EVERY_DEFAULT * n);
+        const long bu = lroundf((float)BURST_EVERY_DEFAULT * n);
+        if (n < 1.0f) {
+          Serial.printf("[downlink] NXT_LECTURA=%.2f fuera de rango (N >= 1) - ignorado\n",
+                        (double)n);
+          matched = false;
+        } else if (sr < COUNTER_EVERY_MIN || sr > COUNTER_EVERY_MAX ||
+                   bu < COUNTER_EVERY_MIN || bu > COUNTER_EVERY_MAX) {
+          Serial.printf("[downlink] NXT_LECTURA=%.2f da SENSOR_READ=%ld BURST=%ld, "
+                        "fuera de [%d..%d] - ignorado\n",
+                        (double)n, sr, bu, COUNTER_EVERY_MIN, COUNTER_EVERY_MAX);
+          matched = false;
+        } else if (readingsPerPacket((uint16_t)sr, g_loraTransEvery) > READINGS_PER_PACKET_MAX) {
+          // Subir el periodo de lectura mete mas lecturas en cada paquete, igual
+          // que bajarlo haria con SENSOR_READ a secas.
+          Serial.printf("[downlink] NXT_LECTURA=%.2f (SENSOR_READ=%ld) metria %u lecturas "
+                        "por paquete, maximo %d - ignorado\n",
+                        (double)n, sr, (unsigned)readingsPerPacket((uint16_t)sr, g_loraTransEvery),
+                        READINGS_PER_PACKET_MAX);
+          matched = false;
+        } else {
+          g_sensorReadEvery = (uint16_t)sr;
+          g_burstEvery = (uint16_t)bu;
+          g_sensorReadCount = 0;
+          g_burstCount = g_burstEvery;  // que el primer burst no se haga esperar
+          snprintf(appliedKv, sizeof(appliedKv), "SENSOR_READ=%ld,BURST=%ld", sr, bu);
+        }
+
+      } else if (strcmp(key, "NXT_ENVIO") == 0) {
+        // "Envia cada N x su periodo base de envio. N > 0; con N < 1 envia mas a
+        // menudo que el periodo base." Es independiente de NXT_LECTURA.
+        const float n = (float)atof(valueStr);
+        const long lt = lroundf((float)LORA_TRANS_EVERY_DEFAULT * n);
+        if (n <= 0.0f) {
+          Serial.printf("[downlink] NXT_ENVIO=%.2f fuera de rango (N > 0) - ignorado\n",
+                        (double)n);
+          matched = false;
+        } else if (lt < COUNTER_EVERY_MIN || lt > COUNTER_EVERY_MAX) {
+          Serial.printf("[downlink] NXT_ENVIO=%.2f da LORA_TRANS=%ld, fuera de [%d..%d] "
+                        "- ignorado\n", (double)n, lt, COUNTER_EVERY_MIN, COUNTER_EVERY_MAX);
+          matched = false;
+        } else if (readingsPerPacket(g_sensorReadEvery, (uint16_t)lt) > READINGS_PER_PACKET_MAX) {
+          Serial.printf("[downlink] NXT_ENVIO=%.2f (LORA_TRANS=%ld) metria %u lecturas por "
+                        "paquete, maximo %d con SENSOR_READ=%u - ignorado\n",
+                        (double)n, lt, (unsigned)readingsPerPacket(g_sensorReadEvery, (uint16_t)lt),
+                        READINGS_PER_PACKET_MAX, (unsigned)g_sensorReadEvery);
+          matched = false;
+        } else {
+          g_loraTransEvery = (uint16_t)lt;
+          g_loraTransCount = 0;
+          snprintf(appliedKv, sizeof(appliedKv), "LORA_TRANS=%ld", lt);
+        }
+
       } else if (strcmp(key, "SENSOR_READ") == 0) {
         long n = atol(valueStr);
         if (n < COUNTER_EVERY_MIN || n > COUNTER_EVERY_MAX) {

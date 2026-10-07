@@ -770,15 +770,26 @@ void ModemNBIoTMqtt::handleConfigurarModuloC(const NbiotProtocol::MqttMessage &m
     refuse("missing params");
     return;
   }
-  if (!NbiotProtocol::jsonString(params, "moduloC_id", device, sizeof(device))) {
+  // moduloC_id NO es obligatorio para todas las acciones: NxTglobalenviodatos va
+  // dirigido a todos los MODULO-C del MODULO-B y por eso no lo lleva. Se exige
+  // mas abajo, una vez se sabe que accion es.
+  NbiotProtocol::jsonString(params, "moduloC_id", device, sizeof(device));
+  NbiotProtocol::jsonString(params, "action", action, sizeof(action));
+
+  // jsonScalar y no jsonString: la v2 manda la N como NUMERO JSON (1.5), sin
+  // comillas, y jsonString() exige comillas. Acepta las dos formas.
+  NbiotProtocol::jsonScalar(params, "value", value, sizeof(value));
+
+  const bool isGlobal = (strcmp(action, "NxTglobalenviodatos") == 0);
+  if (!isGlobal && !device[0]) {
     refuse("missing moduloC_id");
     return;
   }
-  NbiotProtocol::jsonString(params, "action", action, sizeof(action));
-  NbiotProtocol::jsonString(params, "value", value, sizeof(value));
 
-  const int slot = freeNodeCmdSlot();
-  if (slot < 0) {
+  // Una accion global necesita un hueco POR NODO, no uno.
+  const uint8_t nodeCount = (uint8_t)(sizeof(NBIOT_NODE_NAMES) / sizeof(NBIOT_NODE_NAMES[0]));
+  const uint8_t slotsNeeded = isGlobal ? nodeCount : 1;
+  if (freeNodeCmdSlots() < slotsNeeded) {
     refuse("command queue full");
     return;
   }
@@ -852,21 +863,60 @@ void ModemNBIoTMqtt::handleConfigurarModuloC(const NbiotProtocol::MqttMessage &m
                      "already name their magnitude");
     }
 
+  } else if (strcmp(action, "NxT_lectura") == 0) {
+    // "Cada sensor se lee cada N x su periodo minimo de lectura. N >= 1."
+    // La N viaja en crudo: multiplica el NODO, que es quien conoce sus periodos
+    // base y quien puede validar y ACKear los ticks que de verdad aplico.
+    if (!value[0]) {
+      refuse("NxT_lectura sin value");
+      return;
+    }
+    snprintf(cfg, sizeof(cfg), "CFG,NXT_LECTURA=%s", value);
+
+  } else if (strcmp(action, "NxT_enviodatos") == 0 || isGlobal) {
+    // Mismo comando para el nodo; lo unico que cambia es a cuantos va.
+    // NxTglobalenviodatos "sustituye al antiguo action: frecuencia, que deja de
+    // usarse" - de ahi que `frecuencia` siga aceptandose pero ya no se documente.
+    if (!value[0]) {
+      refuse(isGlobal ? "NxTglobalenviodatos sin value" : "NxT_enviodatos sin value");
+      return;
+    }
+    snprintf(cfg, sizeof(cfg), "CFG,NXT_ENVIO=%s", value);
+
   } else {
-    refuse("unknown action, expected 'frecuencia' or 'umbral'");
+    refuse("unknown action, expected 'umbrales_de1variable', 'NxT_lectura', "
+           "'NxT_enviodatos' or 'NxTglobalenviodatos'");
     return;
   }
 
-  NodeCommand &nc = _nodeCmds[slot];
-  strncpy(nc.device, device, sizeof(nc.device) - 1);
-  nc.device[sizeof(nc.device) - 1] = 0;
-  strncpy(nc.cfg, cfg, sizeof(nc.cfg) - 1);
-  nc.cfg[sizeof(nc.cfg) - 1] = 0;
-  nc.rpcId = requestId;
-  nc.queuedMs = millis();
-  nc.awaitingAck = false;
-  nc.viaCommandLog = true;   // outcome goes out as commandLog, not as this RPC
-  nc.pending = true;
+  // UNA ENTRADA POR NODO DESTINO, TODAS CON EL MISMO requestId.
+  //
+  // El documento lo pide asi para la accion global: "Una sola respuesta
+  // inmediata. Un seguimientoCmd por cada MODULO-C, cada uno en su propia
+  // publicacion y todos con el mismo requestId." Como cada hueco reporta su
+  // propio resultado, eso sale solo: basta con encolar uno por nodo.
+  //
+  // Y sirve para algo mas que la simetria - cada nodo puede responder distinto.
+  // El ejemplo del propio documento lo ensena: NodoC-1 confirmado y NodoC-2
+  // timeout, bajo el mismo numero de peticion.
+  for (uint8_t t = 0; t < slotsNeeded; t++) {
+    const char *target = isGlobal ? NBIOT_NODE_NAMES[t].name : device;
+    const int slot = freeNodeCmdSlot();
+    if (slot < 0) break;  // comprobado arriba; defensivo
+
+    NodeCommand &nc = _nodeCmds[slot];
+    strncpy(nc.device, target, sizeof(nc.device) - 1);
+    nc.device[sizeof(nc.device) - 1] = 0;
+    strncpy(nc.cfg, cfg, sizeof(nc.cfg) - 1);
+    nc.cfg[sizeof(nc.cfg) - 1] = 0;
+    nc.rpcId = requestId;
+    nc.queuedMs = millis();
+    nc.awaitingAck = false;
+    nc.attempts = 0;
+    nc.lastSentMs = 0;
+    nc.viaCommandLog = true;   // el resultado sale como seguimientoCmd, no por este RPC
+    nc.pending = true;
+  }
 
   // ANSWER NOW. The node may be minutes from its next uplink window, and an RPC
   // held open that long times out in ThingsBoard and reports a failure for a
@@ -874,8 +924,14 @@ void ModemNBIoTMqtt::handleConfigurarModuloC(const NbiotProtocol::MqttMessage &m
   snprintf(reply, sizeof(reply), "{\"status\":\"enviado\",\"requestId\":%ld}", requestId);
   queueRpcReply(respTopic, reply);
 
-  Serial.printf("[nbiot-mqtt] configurarModuloC %ld -> %s: \"%s\" (enviado; esperando ventana)\n",
-                requestId, nc.device, nc.cfg);
+  if (isGlobal) {
+    Serial.printf("[nbiot-mqtt] configurarModuloC %ld -> LOS %u NODOS: \"%s\" "
+                  "(enviado; esperando sus ventanas)\n",
+                  requestId, (unsigned)slotsNeeded, cfg);
+  } else {
+    Serial.printf("[nbiot-mqtt] configurarModuloC %ld -> %s: \"%s\" (enviado; esperando ventana)\n",
+                  requestId, device, cfg);
+  }
 }
 
 void ModemNBIoTMqtt::queueRpcReply(const char *topic, const char *payload) {

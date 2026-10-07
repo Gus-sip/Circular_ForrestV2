@@ -310,6 +310,24 @@ const char *jsonSeekValue(const char *json, const char *key) {
 
 }  // namespace
 
+bool jsonScalar(const char *json, const char *key, char *out, size_t cap) {
+  const char *p = jsonSeekValue(json, key);
+  if (!p) return false;
+  if (*p == '"') return jsonString(json, key, out, cap);
+
+  // Token desnudo: numero, true, false o null. Termina en el primer separador.
+  const char *e = p;
+  while (*e && *e != ',' && *e != '}' && *e != ']' &&
+         *e != ' ' && *e != '\t' && *e != '\r' && *e != '\n') {
+    e++;
+  }
+  const size_t len = (size_t)(e - p);
+  if (len == 0 || len >= cap) return false;
+  memcpy(out, p, len);
+  out[len] = '\0';
+  return true;
+}
+
 bool jsonString(const char *json, const char *key, char *out, size_t cap) {
   const char *p = jsonSeekValue(json, key);
   if (!p || *p != '"') return false;
