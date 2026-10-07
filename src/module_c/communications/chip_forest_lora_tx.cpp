@@ -550,7 +550,11 @@ static bool railsArePowered() { return g_railsUp; }
 // Both counters live in RTC memory and both are settable from Module A, so the
 // balance between detection latency and battery life can be retuned in the field
 // without a reflash.
-#define BURST_EVERY_DEFAULT 90   // ticks; 90 x 10s = 15 minutes
+// Overridable from platformio.ini so a measurement build can force a burst every
+// tick without touching the source - see medir-normal-t.
+#ifndef BURST_EVERY_DEFAULT
+#define BURST_EVERY_DEFAULT 90   // ticks; 90 x 10s nominal = 15 min, 26.7 min real
+#endif
 
 // NOTE ON THE SENTINEL CADENCE. The sentinels are cheap in SENSOR terms, but on
 // this board they are not free: the BME690 sits behind the gated 3V3 rail, so
