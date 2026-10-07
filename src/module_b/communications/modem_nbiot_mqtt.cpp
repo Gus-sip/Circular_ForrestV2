@@ -640,206 +640,104 @@ void ModemNBIoTMqtt::publishCommandLog(long requestId, const char *status) {
 
 void ModemNBIoTMqtt::publishCommandLogApplied(long requestId, const char *status,
                                               const char *detail, const char *device) {
-  // Built by hand rather than with one snprintf because the timestamp is an
-  // int64 and %lld is NOT reliably compiled into this toolchain's snprintf -
-  // nano newlib often omits it, which is why appendI64() exists at all. A %llu
-  // here would have emitted a literal "llu" or garbage into live telemetry.
-  // LA FORMA EXACTA QUE PIDE LA v2 DEL PROTOCOLO:
+  // EL OBJETO SE CONSTRUYE UNA VEZ Y LOS TRES ENVIOS SE COMPONEN DE EL.
   //
-  //   {"ts": 1790593196216,
-  //    "values": {"seguimientoCmd": {"requestId": 7,
-  //                                  "moduloC_id": "NodoC-1",
-  //                                  "status": "confirmado"}}}
+  // Antes el espejo y los atributos reutilizaban `payload` entero recortandole
+  // llaves. Mientras `payload` fue plano colo; en cuanto la v2 del protocolo le
+  // metio su propio {"ts":...,"values":{...}} salieron las dos cosas rotas a la
+  // vez, y asi se vieron en el log del 2026-10-07:
   //
-  // Tres diferencias con lo que esto publicaba, y ninguna es cosmetica:
+  //   espejo:    {"NodoC-3":[{"ts":N,"values":{"ts":N,"values":{...}}}]}   <- duplicado
+  //   atributos: {"NodoC-3":{"seguimientoCmd":{...}},"temp_pre_off":20,...}}  <- descuadrado
   //
-  //   - La hora va como `ts` DE LA PUBLICACION, fuera del objeto, igual que en la
-  //     telemetria de los sensores. Antes iba como `timestamp` dentro.
-  //   - `moduloC_id` es OBLIGATORIO. El documento explica por que: MODULO-A genera
-  //     el requestId por cada conexion del MODULO-B, empieza en 0 y vuelve a
-  //     empezar al reconectar, "asi que por si solo no identifica un comando".
-  //     Esto es exactamente lo que vimos el 2026-10-06, cuando los comandos
-  //     llegaron numerados 0 y 1 despues de haber ido por el 11.
-  //   - La clave es `seguimientoCmd`, no `commandLog` (ese era el nombre en v1).
+  // Contar llaves a mano sobre una cadena que otro sitio construye es fragil por
+  // naturaleza: el dia que cambia el formato, rompe en silencio y lejos de aqui.
+  // Con una sola fuente no hay nada que recortar.
   //
-  // Construido a mano y no con un solo snprintf porque la hora es un int64 y
-  // %lld NO esta compilado de forma fiable en el snprintf de este toolchain -
-  // nano newlib suele omitirlo, que es la razon de que exista appendI64(). Un
-  // %llu aqui habria soltado un "llu" literal dentro de la telemetria.
-  char payload[224];
-  size_t pos = 0;
+  // appendI64() y no %lld: nano newlib no lo trae de forma fiable.
 
-  // Sin reloj de red no se puede sellar la publicacion. En ese caso se manda la
-  // forma plana y ThingsBoard sella al recibir, que es preferible a emitir un ts
-  // de 1970: ordenaria el registro como el mas antiguo de todo el sistema.
+  // ---- el objeto, sin llaves exteriores: "seguimientoCmd":{...} ----
+  char inner[224];
+  size_t ip = (size_t)snprintf(inner, sizeof(inner),
+                               "\"seguimientoCmd\":{\"requestId\":%ld", requestId);
+
+  // moduloC_id es OBLIGATORIO en la v2: el requestId lo genera MODULO-A por cada
+  // conexion, empieza en 0 y se reinicia al reconectar, asi que por si solo no
+  // identifica un comando.
+  if (device && *device && ip + 32 < sizeof(inner)) {
+    ip += (size_t)snprintf(inner + ip, sizeof(inner) - ip, ",\"moduloC_id\":\"%s\"", device);
+  }
+  ip += (size_t)snprintf(inner + ip, sizeof(inner) - ip, ",\"status\":\"%s\"", status);
+
+  // `detail` no esta en el documento: lleva las claves que el nodo aplico de
+  // verdad, o el motivo del rechazo. El documento acota los valores de status, no
+  // prohibe campos extra. Las comillas y barras se descartan porque un paquete
+  // malformado no puede poder emitir telemetria invalida.
+  if (detail && *detail && ip + 24 < sizeof(inner)) {
+    ip += (size_t)snprintf(inner + ip, sizeof(inner) - ip, ",\"detail\":\"");
+    for (const char *p = detail; *p && ip < sizeof(inner) - 8; p++) {
+      if (*p == '"' || *p == '\\' || (unsigned char)*p < 0x20) continue;
+      inner[ip++] = *p;
+    }
+    if (ip < sizeof(inner) - 4) inner[ip++] = '"';
+  }
+  if (ip < sizeof(inner) - 2) inner[ip++] = '}';
+  inner[ip] = 0;
+
+  // ---- los umbrales aplicados, como campos sueltos ----
+  // Solo una confirmacion lleva valores aplicados: el detail de un timeout es
+  // prosa y el de un error un motivo de rechazo, no umbrales.
+  char extra[200];
+  extra[0] = 0;
+  if (detail && *detail && strcmp(status, "confirmado") == 0 && strchr(detail, '=')) {
+    appendKvAsJson(extra, sizeof(extra), detail);
+  }
+
   const bool stamped = _haveNetTime;
+  const int64_t nowMs = stamped ? netNowMs() : 0;
+
+  // ---- 1. telemetria del gateway: la forma exacta que exige la v2 ----
+  // Sin reloj de red se manda plano y ThingsBoard sella al recibir, que es mejor
+  // que emitir un ts de 1970: ordenaria el registro como el mas antiguo de todos.
+  char payload[288];
+  size_t pos = 0;
   if (stamped) {
     pos += (size_t)snprintf(payload, sizeof(payload), "{\"ts\":");
-    pos += appendI64(payload + pos, netNowMs());
-    pos += (size_t)snprintf(payload + pos, sizeof(payload) - pos, ",\"values\":{");
+    pos += appendI64(payload + pos, nowMs);
+    pos += (size_t)snprintf(payload + pos, sizeof(payload) - pos, ",\"values\":{%s}}", inner);
   } else {
-    pos += (size_t)snprintf(payload, sizeof(payload), "{");
+    snprintf(payload, sizeof(payload), "{%s}", inner);
   }
-
-  pos += (size_t)snprintf(payload + pos, sizeof(payload) - pos,
-                          "\"seguimientoCmd\":{\"requestId\":%ld", requestId);
-
-  if (device && *device && pos + 32 < sizeof(payload)) {
-    pos += (size_t)snprintf(payload + pos, sizeof(payload) - pos,
-                            ",\"moduloC_id\":\"%s\"", device);
-  }
-
-  pos += (size_t)snprintf(payload + pos, sizeof(payload) - pos,
-                          ",\"status\":\"%s\"", status);
-
-  // `detail` NO esta en el documento: es un anadido nuestro con las claves que el
-  // nodo aplico de verdad, o el motivo del rechazo. El documento solo acota los
-  // valores de `status`, no prohibe campos extra, y esto es lo unico que permite
-  // a MODULO-A mostrar el valor que el nodo esta usando en lugar del que pidio.
-  // Si su parser resultara estricto, se quita y no se pierde nada del protocolo.
-  //
-  // Las comillas y barras invertidas romperian el JSON. El cuerpo del ACK del
-  // nodo es "k=v,k=v" y su NACK una frase corta, asi que no deberian aparecer -
-  // pero un paquete malformado no puede poder emitir telemetria invalida.
-  if (detail && *detail && pos + 24 < sizeof(payload)) {
-    pos += (size_t)snprintf(payload + pos, sizeof(payload) - pos, ",\"detail\":\"");
-    for (const char *p = detail; *p && pos < sizeof(payload) - 8; p++) {
-      if (*p == '"' || *p == '\\' || (unsigned char)*p < 0x20) continue;
-      payload[pos++] = *p;
-    }
-    if (pos < sizeof(payload) - 4) payload[pos++] = '"';
-    payload[pos] = 0;
-  }
-
-  snprintf(payload + pos, sizeof(payload) - pos, stamped ? "}}}" : "}}");
-
   queueRpcReply(MQTT_TOPIC_DEVICE_TELEMETRY, payload);
 
-  // THE SAME RECORD, ALSO ON THE NODE'S OWN TELEMETRY.
-  //
-  // v1/devices/me/telemetry carries the gateway's access token, so `seguimientoCmd`
-  // lands on the GATEWAY device (CON-1) and never on NodoC-3. "enviado" goes to
-  // the node's RPC response topic, so a dashboard bound to the node sees the
-  // command leave and never sees it confirmed - it sits at "en transito al
-  // MODULO-C" indefinitely while Module B's log says confirmado and the broker
-  // acked the publish. Reported repeatedly on 2026-10-05 for requests 6..10.
-  //
-  // Which device the dashboard is actually bound to is not something this
-  // firmware can know, so the record goes to BOTH rather than being moved from
-  // one to the other - moving it would break whichever side is working today.
-  // Same key, same shape, no new vocabulary invented: that is what the last two
-  // bugs came from.
-  //
-  // `values` for the gateway topic is exactly the device-topic payload, so the
-  // object is reused rather than rebuilt - there is no second place for the two
-  // to drift apart.
   if (device && *device) {
-    // The node mirror's values: the commandLog record, PLUS one field per
-    // threshold the node reported applying. Built by reopening the payload's
-    // closing brace rather than formatting the record twice, so the two copies
-    // cannot drift.
-    char vals[384];
-    size_t vp = 0;
-    const size_t plen = strlen(payload);
-    if (plen >= 2 && plen < sizeof(vals) - 2) {
-      memcpy(vals, payload, plen - 1);  // everything but the final '}'
-      vp = plen - 1;
-      vals[vp] = 0;
-      // Only a confirmation carries applied values. A timeout's detail is prose
-      // and an error's is a refusal reason - neither is a threshold.
-      if (detail && *detail && strcmp(status, "confirmado") == 0 && strchr(detail, '=')) {
-        vp += appendKvAsJson(vals + vp, sizeof(vals) - vp, detail);
-      }
-      if (vp + 2 < sizeof(vals)) { vals[vp++] = '}'; vals[vp] = 0; }
+    // ---- 2. el mismo registro en la telemetria del propio nodo ----
+    // v1/devices/me/telemetry lleva el token del gateway, asi que seguimientoCmd
+    // aterriza en el dispositivo GATEWAY y nunca en el nodo. Esto lo pone tambien
+    // bajo el nodo, con los umbrales como claves propias para que se puedan
+    // graficar.
+    char mirror[560];
+    if (stamped) {
+      size_t mp = (size_t)snprintf(mirror, sizeof(mirror), "{\"%s\":[{\"ts\":", device);
+      mp += appendI64(mirror + mp, nowMs);
+      snprintf(mirror + mp, sizeof(mirror) - mp, ",\"values\":{%s%s}}]}", inner, extra);
     } else {
-      snprintf(vals, sizeof(vals), "%s", payload);
+      snprintf(mirror, sizeof(mirror), "{\"%s\":[{%s%s}]}", device, inner, extra);
     }
+    queueRpcReply("v1/gateway/telemetry", mirror);
 
-    char mirror[480];
-    if (_haveNetTime) {
-      int m = snprintf(mirror, sizeof(mirror), "{\"%s\":[{\"ts\":", device);
-      if (m > 0 && (size_t)m < sizeof(mirror)) {
-        size_t mp = (size_t)m;
-        mp += appendI64(mirror + mp, netNowMs());
-        if (mp + strlen(vals) + 16 < sizeof(mirror)) {
-          snprintf(mirror + mp, sizeof(mirror) - mp, ",\"values\":%s}]}", vals);
-          queueRpcReply("v1/gateway/telemetry", mirror);
-        }
-      }
-    } else {
-      // No network clock: send it flat and let ThingsBoard stamp it on receipt,
-      // rather than emitting a 1970 timestamp that sorts to the top of every
-      // dashboard - the same reasoning as the omitted field above.
-      int m = snprintf(mirror, sizeof(mirror), "{\"%s\":[%s]}", device, vals);
-      if (m > 0 && (size_t)m < sizeof(mirror)) queueRpcReply("v1/gateway/telemetry", mirror);
-    }
-  }
-
-  // THE DASHBOARD READS ATTRIBUTES, NOT TELEMETRY.
-  //
-  // Straight from the protocol document, under "Control del Comando en MODULOA":
-  //
-  //     MODULOA recibe la telemetria
-  //     Detecta "seguimientoCmd" (v2; la v1 lo llamaba "commandLog")
-  //     Copia automaticamente a atributos del ModC
-  //     Dashboard lee atributos (rapido)
-  //     Historico guardado en telemetria
-  //
-  // So the telemetry record above is the HISTORY, and the dashboard reads the
-  // node's ATTRIBUTES - with Module A responsible for copying one to the other
-  // via a ThingsBoard rule chain. If that copy is not configured, the telemetry
-  // arrives, the broker acks it, Module B's log says confirmado, and the
-  // dashboard sits at "en transito al MODULO-C" forever with nothing wrong
-  // anywhere in the firmware. That is exactly what was happening.
-  //
-  // Writing the attributes here removes the dependency on that rule chain
-  // existing. It does not replace the telemetry record, which the document
-  // requires and which remains the history.
-  //
-  // Key names: `seguimientoCmd` is what Module A actually subscribes to. v1 of the
-  // protocol document says `commandLog`, and that is what this published until
-  // 2026-10-07 - v2 of the document renamed it and we were working from v1. The
-  // records were arriving and being stored correctly the whole time under a name
-  // nothing was listening for. The threshold keys are the node's own
-  // vocabulary, as echoed in its ACK. Nothing is invented - inventing names is
-  // what the action-name mismatch cost us.
-  if (device && *device) {
-    char attrs[480];
-    int a = snprintf(attrs, sizeof(attrs), "{\"%s\":{\"seguimientoCmd\":", device);
-    if (a > 0 && (size_t)a < sizeof(attrs)) {
-      size_t ap = (size_t)a;
-      // The record without its {"commandLog": wrapper - reuse, do not rebuild.
-      // sizeof-1 for the length, not a hand-counted offset. Counting it by eye
-      // gave 15 for a 13-character key and ate the "{\"" of "{\"requestId\"",
-      // putting {"NodoC-3":{"commandLog":requestId":11,... on the wire - valid
-      // MQTT carrying invalid JSON, which ThingsBoard drops without complaint.
-      static const char kKey[] = "\"seguimientoCmd\":";
-      const char *inner = strstr(payload, kKey);
-      if (inner) {
-        inner += sizeof(kKey) - 1;
-        const size_t ilen = strlen(inner);
-        if (ilen >= 1 && ap + ilen + 8 < sizeof(attrs)) {
-          memcpy(attrs + ap, inner, ilen - 1);  // drop payload's outer closing brace
-          ap += ilen - 1;
-          attrs[ap] = 0;
-          if (detail && *detail && strcmp(status, "confirmado") == 0 && strchr(detail, '=')) {
-            ap += appendKvAsJson(attrs + ap, sizeof(attrs) - ap, detail);
-          }
-          // TWO braces: one closes the per-device object, one closes the
-          // envelope. {"NodoC-3":{ ... }} - the envelope's was missing.
-          if (ap + 4 < sizeof(attrs)) {
-            attrs[ap++] = '}';
-            attrs[ap++] = '}';
-            attrs[ap] = 0;
-            queueRpcReply("v1/gateway/attributes", attrs);
-          }
-        }
-      }
-    }
+    // ---- 3. atributos del nodo ----
+    // La seccion 5 del documento dice que el dashboard lee ATRIBUTOS y que
+    // MODULO-A los copia desde la telemetria. Escribirlos aqui quita esa
+    // dependencia. Son atributos de CLIENTE: por MQTT un dispositivo no puede
+    // escribir los de servidor.
+    char attrs[560];
+    snprintf(attrs, sizeof(attrs), "{\"%s\":{%s%s}}", device, inner, extra);
+    queueRpcReply("v1/gateway/attributes", attrs);
   }
 
   Serial.printf("[nbiot-mqtt] seguimientoCmd %ld -> %s%s\n", requestId, status,
-                (device && *device) ? " (gateway telemetry + node telemetry + node attributes)" : "");
+                (device && *device) ? " (gateway + nodo + atributos)" : "");
 }
 
 // {"method":"configurarModuloC",
