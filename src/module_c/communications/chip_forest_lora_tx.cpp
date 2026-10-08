@@ -847,6 +847,145 @@ enum AlarmState : uint8_t { ALARM_NORMAL = 0, ALARM_PREALARM = 1, ALARM_FIRE = 2
 RTC_NOINIT_ATTR uint8_t g_alarmState;
 RTC_NOINIT_ATTR uint16_t g_alarmClearRun;   // consecutive clean reads while in pre-alarm
 
+// ===========================================================================
+//  PLANIFICADOR POR TIEMPO
+// ===========================================================================
+//
+// Sustituye al planificador por ticks. El viejo contaba "cada N ticks", y un tick
+// no media tiempo: el sueno eran 10 s fijos ADEMAS del trabajo, asi que el tick
+// real salia 18,8 s y variaba con lo que tardara cada lectura. Toda cadencia
+// quedaba ~1,9x mas lenta que la configurada y ninguna constante podia acertar.
+//
+// Aqui cada trabajo tiene su periodo EN MINUTOS y por estado de alarma. La tabla
+// es la especificacion del usuario del 2026-10-08; ver
+// notes/estrategia_lectura_por_tiempo.md.
+//
+// ALINEADO AL RELOJ DE PARED, no al arranque. Una lectura de periodo P cae en los
+// multiplos de P de la hora real, asi que los tres nodos miden en EL MISMO
+// INSTANTE y sus datos son comparables entre si. Mientras el nodo no haya
+// recibido su primer CFG,TIME usa su tiempo propio con la misma formula, y se
+// re-fasea al sincronizar.
+enum SensorJobId : uint8_t {
+  JOB_BME_THP = 0,  // temperatura, humedad, presion - readFast(), calefactor OFF
+  JOB_BME_VOC,      // resistencia de gas - read(), calefactor a 320 C
+  JOB_CM1106,       // CO2
+  JOB_SEN0466,      // CO
+  JOB_BMV080,       // PM1 / PM2.5 / PM10
+  JOB_CALYPSO,      // viento: angulo Y velocidad
+  JOB_TX,           // transmision a Modulo B
+  JOB_COUNT
+};
+
+struct SensorJob {
+  const char *name;
+  uint16_t periodMin[3];  // indexado por AlarmState: NORMAL, PREALARMA, FUEGO
+  uint32_t prepMs;        // cuanto ANTES hay que despertar para que el dato exista al vencer
+  uint32_t offsetMs;      // desfase sobre el multiplo; solo el envio lo usa
+};
+
+// EL DESFASE DEL ENVIO ES DELIBERADO. En el minuto 30 vencen cinco lecturas a la
+// vez y los sensores no pueden leerse en paralelo - en paralelo reinician la placa
+// - asi que van en fila y tardan ~22 s calculados, 19,3 s medidos. Transmitir en
+// el minuto exacto mandaria el paquete con las particulas y el CO2 a medias. Un
+// minuto de desfase da margen de sobra.
+//
+// NO es un periodo de 31 minutos: eso derivaria un minuto por vuelta hasta perder
+// toda relacion con el barrido. Es periodo 30 + desfase 1.
+#define TX_OFFSET_NORMAL_MS 60000UL
+
+static const SensorJob kJobs[JOB_COUNT] = {
+    //  nombre        NORM  PREA  FUEGO   preparacion   desfase
+    {"BME690_T/H/P",  {   5,    3,    1},       1200UL,                   0},
+    {"BME690_VOC",    {  20,   10,    5},      11000UL,                   0},
+    {"CM1106_CO2",    {  30,   30,   30},       4000UL,                   0},
+    {"SEN0466_CO",    {  30,   10,    5},        500UL,                   0},
+    {"BMV080_PM",     {  30,   10,    5},       8000UL,                   0},
+    {"Calypso_viento",{   5,    5,    5},       1500UL,                   0},
+    {"ENVIO",         {  30,   15,    3},        500UL, TX_OFFSET_NORMAL_MS},
+};
+
+// Cuando vence cada trabajo, en la misma base de tiempo que devuelve schedNowMs().
+// En RTC porque el calendario tiene que sobrevivir al sueno: si se reiniciara en
+// cada despertar, el nodo volveria a medirlo todo cada vez.
+RTC_NOINIT_ATTR uint64_t g_nextDueMs[JOB_COUNT];
+
+// Multiplicadores de Modulo A. NXT_LECTURA escala TODOS los periodos de sensor,
+// NXT_ENVIO solo el de transmision. Sustituyen a SENSOR_READ / BURST / LORA_TRANS,
+// que contaban ticks y ya no existen.
+RTC_NOINIT_ATTR float g_readMultiplier;
+RTC_NOINIT_ATTR float g_txMultiplier;
+
+#define SCHED_MULT_MIN 0.1f
+#define SCHED_MULT_MAX 10.0f
+
+// LA BASE DE TIEMPO DEL PLANIFICADOR, y por que no es siempre la misma.
+//
+// Con reloj sincronizado se planifica sobre la hora real, que es lo que alinea a
+// los tres nodos. Sin el - antes del primer CFG,TIME, o tras una perdida de
+// corriente - se planifica sobre el tiempo propio del nodo, que siempre existe.
+// La formula de alineacion es la misma; lo unico que cambia es el origen.
+static uint64_t schedNowMs() { return g_clockSynced ? wallNowMs() : nodeNowMs(); }
+
+// Siguiente instante ESTRICTAMENTE posterior a `now` que sea multiplo de
+// `periodMs` mas `offsetMs`. Es lo que alinea las medidas a minutos redondos del
+// reloj: con periodMs = 5 min cae en :00, :05, :10...
+static uint64_t alignedNextDue(uint64_t now, uint32_t periodMs, uint32_t offsetMs) {
+  if (periodMs == 0) return now + 60000ULL;  // defensivo: nunca un bucle cerrado
+  const uint64_t shifted = (now >= offsetMs) ? (now - offsetMs) : 0;
+  return (shifted / periodMs + 1ULL) * (uint64_t)periodMs + (uint64_t)offsetMs;
+}
+
+// Periodo efectivo de un trabajo: su minuto de tabla para el estado actual, por el
+// multiplicador que corresponda.
+static uint32_t jobPeriodMs(uint8_t job, uint8_t state) {
+  if (job >= JOB_COUNT) return 60000UL;
+  if (state > ALARM_FIRE) state = ALARM_NORMAL;
+  const float mult = (job == JOB_TX) ? g_txMultiplier : g_readMultiplier;
+  const double ms = (double)kJobs[job].periodMin[state] * 60000.0 * (double)mult;
+  // Un periodo de cero pararia el trabajo para siempre; el suelo son 10 s, que es
+  // mas rapido de lo que cualquier sensor de esta placa puede leer.
+  if (ms < 10000.0) return 10000UL;
+  if (ms > 86400000.0) return 86400000UL;  // 24 h
+  return (uint32_t)ms;
+}
+
+// El desfase tambien se escala, o el envio dejaria de caer despues del barrido en
+// cuanto Modulo A cambiara el multiplicador.
+static uint32_t jobOffsetMs(uint8_t job, uint8_t state) {
+  if (job != JOB_TX) return 0;
+  // Solo en normal: en prealarma y alarma el nodo no duerme y transmite seguido,
+  // asi que no hay barrido que esperar.
+  if (state != ALARM_NORMAL) return 0;
+  return kJobs[job].offsetMs;
+}
+
+// Recalcula el calendario entero desde `now`. Se llama al arrancar, al cambiar de
+// estado de alarma y al sincronizar el reloj - los tres momentos en los que el
+// calendario viejo deja de significar lo que decia.
+static void schedRephase(uint64_t now, uint8_t state, const char *why) {
+  for (uint8_t j = 0; j < JOB_COUNT; j++) {
+    g_nextDueMs[j] = alignedNextDue(now, jobPeriodMs(j, state), jobOffsetMs(j, state));
+  }
+  Serial.printf("[sched] re-fasado (%s) en t=%lus, estado %u\n", why,
+                (unsigned long)(now / 1000ULL), (unsigned)state);
+}
+
+// Instante en el que hay que DESPERTAR, que no es cuando vence el primer trabajo
+// sino antes: cada sensor necesita su tiempo de preparacion para que el dato
+// exista EN el instante pedido en vez de empezar a calentar entonces. El VOC del
+// BME690 son 10,8 s de calefactor; el BMV080, 5 s de arranque mas 2 de laser.
+static uint64_t schedNextWakeMs(uint8_t state) {
+  uint64_t best = UINT64_MAX;
+  for (uint8_t j = 0; j < JOB_COUNT; j++) {
+    const uint64_t due = g_nextDueMs[j];
+    const uint64_t prep = (uint64_t)kJobs[j].prepMs;
+    const uint64_t wake = (due > prep) ? (due - prep) : 0;
+    if (wake < best) best = wake;
+  }
+  (void)state;
+  return best;
+}
+
 // Milliseconds accumulated in pre-alarm, and why it is not just a millis() stamp.
 //
 // g_alarmState is RTC_NOINIT and survives a reset, so a node that browns out
@@ -1008,10 +1147,22 @@ static bool applyConfigCommand(const char *payload, uint8_t len, char *ackPayloa
             }
           }
 
+          const bool primera = !g_clockSynced;
           g_epochMsAtSync = epochMs;
           g_nodeMsAtSync = nodeNow;
           g_clockSynced = 1;
           g_clockSyncCount++;
+
+          // LA PRIMERA SINCRONIZACION CAMBIA LA BASE DE TIEMPO bajo los pies del
+          // planificador: hasta ahora contaba sobre el tiempo propio del nodo, que
+          // empieza en cero al energizar, y a partir de aqui cuenta sobre la epoca
+          // real, que son 1,76e12 ms. Los vencimientos guardados quedan
+          // astronomicamente en el pasado, asi que todos los trabajos vencerian a
+          // la vez y para siempre. Hay que re-fasear.
+          //
+          // Y es justo lo que queremos ademas: ese re-faseo es el que ALINEA al
+          // nodo con el reloj de pared, y por tanto con los otros nodos.
+          if (primera) schedRephase(schedNowMs(), g_alarmState, "primera hora de red");
           Serial.printf("[clock] sincronizado #%lu: epoca %lu, nodo %lus, deriva %ld ppm\n",
                         (unsigned long)g_clockSyncCount, epochS,
                         (unsigned long)(nodeNow / 1000ULL),
@@ -1705,6 +1856,13 @@ void setup() {
     g_clockSynced = 0;
     g_clockSyncCount = 0;
     g_clockDrift = 1.0f;
+
+    // El calendario arranca vacio y se re-fasea mas abajo, ya con el estado de
+    // alarma sembrado. Los multiplicadores a 1.0 = los minutos de la tabla tal
+    // cual, que es lo que el usuario especifico.
+    g_readMultiplier = 1.0f;
+    g_txMultiplier = 1.0f;
+    for (uint8_t j = 0; j < JOB_COUNT; j++) g_nextDueMs[j] = 0;
     // The reading cache lives in RTC_NOINIT too, so it holds garbage on a true
     // power-on and must be seeded here with everything else.
     g_temp = g_hum = g_pres = g_gas = 0.0f;

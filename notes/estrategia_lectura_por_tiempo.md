@@ -190,6 +190,37 @@ Opciones, de mejor a peor:
    mandar 2 seguidos.
 3. Descartar lecturas y mandar sólo las 3 últimas. Se pierde dato.
 
+## Decisiones del planificador (2026-10-08)
+
+**1. Los periodos se alinean al RELOJ DE PARED**, no al arranque. Una lectura de
+periodo P cae en los múltiplos de P de la hora real: T/H/P a las :00, :05, :10...
+Eso hace que **los tres nodos midan en el mismo instante**, así que sus datos son
+comparables entre sí y con cualquier otra fuente - que es lo que de verdad
+significa "medida en el minuto exacto". Mientras el nodo no haya recibido su
+primer `CFG,TIME` planifica con su tiempo propio y se re-fasea al sincronizar.
+
+**2. En PREALARMA el nodo NO duerme**, igual que en alarma. Sólo el estado normal
+duerme. Así prealarma y alarma comparten camino de código, y durante los 10
+minutos de confirmación - cuando se decide si hay fuego - el nodo está reactivo.
+
+**3. Al cambiar de estado se mide INMEDIATAMENTE y se re-fasea.** Entrar en
+prealarma significa que algo cruzó un umbral: ese es el momento de mirar, no tres
+minutos después. El calendario arranca desde ese instante con los periodos nuevos.
+
+**Ojo con la tensión entre 1 y 3:** re-fasear rompe la alineación al reloj. No
+importa mientras dure el episodio, porque ahí el nodo está despierto y manda la
+latencia; pero **al volver a normal hay que re-alinearse al reloj de pared**.
+
+## Los comandos de Módulo A sobrevivien como MULTIPLICADORES
+
+`INTERVAL`, `NXT_LECTURA` y `NXT_ENVIO` son las tres claves que Módulo B genera
+desde las acciones de Módulo A, y hoy están atadas a ticks. Pasan a multiplicar
+los minutos de la tabla: `NXT_LECTURA=2` duplica todos los periodos de sensor,
+`NXT_ENVIO=0.5` divide a la mitad el de envío. La cadena A->B->C sigue funcionando
+sin tocar Módulo A ni Módulo B. Ver [[downlink-a-to-b-unresolved]].
+
+Las claves atadas a ticks que desaparecen: `SENSOR_READ`, `BURST`, `LORA_TRANS`.
+
 ## Abierto
 - **El T/H/P en los minutos que coinciden con VOC**: reaprovechar la lectura
   completa o tomar una rápida aparte (recomendado lo segundo, ver arriba).
