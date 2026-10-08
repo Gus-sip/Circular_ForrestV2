@@ -377,7 +377,7 @@ private:
     bool awaitingAck = false;  // already sent over LoRa, waiting for the node's ACK
     char device[24] = {0};     // ThingsBoard child-device name, e.g. "NodoC-1"
     char cfg[128] = {0};       // "CFG,INTERVAL=300,BMV080=0" as Module C expects it
-    char action[24] = {0};     // la accion de la v2, para que un comando sustituya al anterior
+    char supKey[24] = {0};     // que AJUSTE toca, para que un comando sustituya al anterior
     long rpcId = 0;
     uint32_t queuedMs = 0;
     uint8_t attempts = 0;      // delivery attempts so far - reported, and retried
@@ -447,15 +447,59 @@ private:
   // Solo sustituye comandos que AUN NO SE HAN ENVIADO. Uno ya entregado y
   // esperando ACK se deja en paz: el nodo ya lo tiene, y su resultado hay que
   // reportarlo.
-  int supersedableIndexFor(const char *device, const char *action) const {
+  int supersedableIndexFor(const char *device, const char *supKey) const {
     for (uint8_t i = 0; i < kNodeCmdQueue; i++) {
       const NodeCommand &nc = _nodeCmds[i];
       if (!nc.pending || nc.awaitingAck) continue;
       if (strcmp(nc.device, device) != 0) continue;
-      if (strcmp(nc.action, action) != 0) continue;
+      if (strcmp(nc.supKey, supKey) != 0) continue;
       return (int)i;
     }
     return -1;
+  }
+
+  // QUE AJUSTE toca este comando, derivado del CFG que se va a mandar al nodo.
+  //
+  // Agrupar por `action` era un error: TODOS los umbrales comparten la accion
+  // `umbrales_de1variable`, asi que configurar temp y despues rh en el mismo nodo
+  // cancelaba el primero y lo reportaba como error. La cola esta dimensionada "lo
+  // suficiente para cada magnitud de un nodo" precisamente para que eso no pase.
+  //
+  // Se deriva del CFG y no de la accion porque el CFG es lo que de verdad va a
+  // cambiar en el nodo, y eso agrupa bien dos casos que por accion no coinciden:
+  // `umbral` y `umbrales_de1variable` son alias, y `NxT_enviodatos` y
+  // `NxTglobalenviodatos` producen el mismo CFG,NXT_ENVIO. Dos nombres para un
+  // mismo ajuste no deben ocupar dos huecos.
+  //
+  //   "CFG,temp_pre_off=44,temp_pre_on=50"  ->  "temp"
+  //   "CFG,NXT_ENVIO=0.5"                   ->  "NXT_ENVIO"
+  //   "CFG,INTERVAL=300"                    ->  "INTERVAL"
+  static void supersedeKeyFromCfg(const char *cfg, char *out, size_t cap) {
+    out[0] = 0;
+    const char *p = strchr(cfg, ',');       // saltar el "CFG"
+    if (!p) return;
+    p++;
+    const char *eq = strchr(p, '=');
+    if (!eq) return;
+
+    size_t len = (size_t)(eq - p);
+    if (len >= cap) len = cap - 1;
+    memcpy(out, p, len);
+    out[len] = 0;
+
+    // Un umbral se nombra <magnitud><sufijo>. Recortar el sufijo deja la
+    // magnitud, que es el ajuste real: dos ordenes sobre `temp` se sustituyen,
+    // una sobre `temp` y otra sobre `rh` no.
+    static const char *kSuf[] = {"_pre_off", "_pre_on", "_alarma_off", "_alarma_on",
+                                 "_alarm_off", "_alarm_on"};
+    for (size_t i = 0; i < sizeof(kSuf) / sizeof(kSuf[0]); i++) {
+      const size_t sl = strlen(kSuf[i]);
+      const size_t ol = strlen(out);
+      if (ol > sl && strcmp(out + ol - sl, kSuf[i]) == 0) {
+        out[ol - sl] = 0;
+        return;
+      }
+    }
   }
 
   uint8_t freeNodeCmdSlots() const {

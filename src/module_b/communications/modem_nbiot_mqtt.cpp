@@ -793,15 +793,9 @@ void ModemNBIoTMqtt::handleConfigurarModuloC(const NbiotProtocol::MqttMessage &m
   // Los huecos que este comando puede REUTILIZAR por sustituir a otro igual no
   // cuentan como ocupados: si no, seis ordenes repetidas seguirian llenando la
   // cola aunque solo una vaya a sobrevivir.
-  uint8_t reusables = 0;
-  for (uint8_t t = 0; t < slotsNeeded; t++) {
-    const char *target = isGlobal ? NBIOT_NODE_NAMES[t].name : device;
-    if (supersedableIndexFor(target, action) >= 0) reusables++;
-  }
-  if (freeNodeCmdSlots() + reusables < slotsNeeded) {
-    refuse("command queue full");
-    return;
-  }
+  // La comprobacion de huecos NO puede ir aqui: necesita saber QUE ajuste toca el
+  // comando, y eso sale del CFG, que todavia no se ha construido. Va justo antes
+  // de encolar.
 
   // ---- action -> the CFG vocabulary Module C already parses ----
   char cfg[128] = {0};
@@ -898,6 +892,24 @@ void ModemNBIoTMqtt::handleConfigurarModuloC(const NbiotProtocol::MqttMessage &m
     return;
   }
 
+  // Ya se sabe que CFG se va a mandar, asi que ya se puede saber que ajuste toca
+  // y cuantos huecos hacen falta de verdad.
+  char supKey[24];
+  supersedeKeyFromCfg(cfg, supKey, sizeof(supKey));
+
+  // Los huecos que este comando puede REUTILIZAR por sustituir a otro del mismo
+  // ajuste no cuentan como ocupados: si no, ordenes repetidas seguirian llenando
+  // la cola aunque solo una vaya a sobrevivir.
+  uint8_t reusables = 0;
+  for (uint8_t t = 0; t < slotsNeeded; t++) {
+    const char *target = isGlobal ? NBIOT_NODE_NAMES[t].name : device;
+    if (supersedableIndexFor(target, supKey) >= 0) reusables++;
+  }
+  if (freeNodeCmdSlots() + reusables < slotsNeeded) {
+    refuse("command queue full");
+    return;
+  }
+
   // UNA ENTRADA POR NODO DESTINO, TODAS CON EL MISMO requestId.
   //
   // El documento lo pide asi para la accion global: "Una sola respuesta
@@ -915,13 +927,21 @@ void ModemNBIoTMqtt::handleConfigurarModuloC(const NbiotProtocol::MqttMessage &m
     // diciendo por que: el documento acota status a confirmado/error/timeout, y
     // dejarlo sin respuesta seria peor - Modulo A lo mostraria "en transito"
     // para siempre, que es exactamente el sintoma que estamos arreglando.
-    int slot = supersedableIndexFor(target, action);
+    int slot = supersedableIndexFor(target, supKey);
     if (slot >= 0) {
       const long viejo = _nodeCmds[slot].rpcId;
       if (viejo != requestId) {
         char motivo[72];
         snprintf(motivo, sizeof(motivo), "sustituido por el comando %ld", requestId);
-        publishCommandLogApplied(viejo, "error", motivo, target);
+        // SIN `device`, a proposito: eso publica solo el registro del gateway en
+        // vez de tres mensajes. Un comando sustituido no llego a aplicar nada, asi
+        // que el espejo en el nodo y los atributos no tienen valores que llevar.
+        //
+        // Y evita desbordar el anillo de respuestas: una sustitucion global son 3
+        // nodos, que a tres mensajes cada uno serian 9 mas el `enviado` = 10 en un
+        // anillo de 8, y el mas viejo que se tira puede ser el `enviado` de otro
+        // comando - justo el fallo del que avisa el comentario del anillo.
+        publishCommandLogApplied(viejo, "error", motivo, nullptr);
         Serial.printf("[nbiot-mqtt] %ld sustituye al %ld en %s (misma accion)\n",
                       requestId, viejo, target);
       }
@@ -935,8 +955,8 @@ void ModemNBIoTMqtt::handleConfigurarModuloC(const NbiotProtocol::MqttMessage &m
     nc.device[sizeof(nc.device) - 1] = 0;
     strncpy(nc.cfg, cfg, sizeof(nc.cfg) - 1);
     nc.cfg[sizeof(nc.cfg) - 1] = 0;
-    strncpy(nc.action, action, sizeof(nc.action) - 1);
-    nc.action[sizeof(nc.action) - 1] = 0;
+    strncpy(nc.supKey, supKey, sizeof(nc.supKey) - 1);
+    nc.supKey[sizeof(nc.supKey) - 1] = 0;
     nc.rpcId = requestId;
     nc.queuedMs = millis();
     nc.awaitingAck = false;
