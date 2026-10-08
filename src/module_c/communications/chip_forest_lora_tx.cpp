@@ -711,7 +711,22 @@ RYLR998 radio(Serial0, LORA_RX_PIN, LORA_TX_PIN);  // UART0 is free - UART1/UART
 // changes - so without the bump a board with existing state would come up with
 // g_hibernating holding whatever junk was in that address, and could hibernate
 // immediately on a full pack. This trap has cost three debugging sessions already.
-#define BOOTCOUNT_MAGIC 0xC0FFEE07UL  // bumped: seeds g_thr[][] from kAlarmRules
+// SUBIR ESTE NUMERO CADA VEZ QUE SE ANADE ESTADO EN RTC_NOINIT. No es opcional.
+//
+// La memoria RTC_NOINIT sobrevive al RE-FLASHEO, no solo al sueno. Asi que un
+// firmware nuevo con variables nuevas arranca encontrando el magic ANTERIOR
+// intacto, se salta el bloque de siembra entero, y esas variables se quedan con
+// la basura que hubiera en esas direcciones.
+//
+// Visto en vivo el 2026-10-08 con este mismo cambio: g_clockDrift, los
+// multiplicadores y el calendario quedaron sin sembrar. El sueno se divide por la
+// deriva, asi que una deriva basura da un sueno arbitrario, y el planificador
+// nunca llego a re-fasear - en el log no aparecia ni una linea [sched].
+//
+// 0xC0FFEE08: planificador por tiempo (g_nextDueMs, multiplicadores,
+//             g_schedPhasedForState) y reloj (g_nodeBaseMs, g_clockDrift, ...)
+// 0xC0FFEE07: g_thr[][] sembrado desde kAlarmRules
+#define BOOTCOUNT_MAGIC 0xC0FFEE08UL
 RTC_NOINIT_ATTR uint32_t g_bootMagic;
 RTC_NOINIT_ATTR uint32_t g_bootCount;
 
@@ -1981,7 +1996,18 @@ void setup() {
   // estaria media hora sin reloj - y por tanto sin poder alinearse.
   if (isColdBoot()) {
     schedRephase(schedNowMs(), g_alarmState, "arranque en frio");
-    g_nextDueMs[JOB_TX] = 0;  // vence ya: hablar, conseguir la hora, alinearse
+    // TODO vence ya, no solo el envio.
+    //
+    // Re-fasear deja todos los vencimientos en el FUTURO, asi que sin esto un nodo
+    // recien encendido transmitia vacio y se dormia sin haber medido nada - visto
+    // en el arranque del 2026-10-08, donde no aparecio ni una linea [t] y el envio
+    // fue "nothing stored this cycle".
+    //
+    // Al encender un nodo se quiere una lectura completa inmediata: confirma que
+    // cada sensor responde, le da al estado de alarma algo real sobre lo que
+    // decidir en vez de los ceros de la siembra, y hace que la primera trama lleve
+    // datos. El envio va incluido porque es el ultimo del bucle.
+    for (uint8_t j = 0; j < JOB_COUNT; j++) g_nextDueMs[j] = 0;
   }
   schedEvaluate();
 
