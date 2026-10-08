@@ -607,7 +607,22 @@ static uint16_t readingsPerPacket(uint16_t sensorReadEvery, uint16_t loraTransEv
 // cycle and the BMV080's startup delay that follows it, so it is far wider than
 // when the slots merely ran back to back.
 #define SENSOR_READ_WINDOW_MS 45000UL
-#define SLEEP_SKIP_SEN0466 1            // 210s settle: out of the SLEEPING cycle - see below
+// EL SEN0466 VA CABLEADO DIRECTO A CORRIENTE, SALTANDOSE EL TRANSISTOR.
+//
+// Puesto a 0 el 2026-10-08, cuando se confirmo ese cableado. Antes valia 1 y el
+// sensor quedaba fuera del ciclo entero, porque con el rail conmutado sus 210 s de
+// estabilizacion habria que pagarlos EN CADA DESPERTAR - imposible contra un tick
+// de 17.8 s.
+//
+// Alimentado permanentemente eso ya no aplica: los 210 s se pagan UNA VEZ, al
+// energizar la placa, y a partir de ahi el sensor esta siempre caliente y listo.
+// El centinela ya lo lee - el codigo estaba, solo faltaba que el arranque lo
+// inicializara - asi que el CO pasa a medirse en cada lectura de centinela, que es
+// lo que pide el documento de estrategia: "SEN0466 (CO, encendido 24/7)".
+//
+// Si alguna placa NO lleva ese cableado directo, su SEN0466 volvera a dar NotInit
+// tras el primer sueno y hay que ponerlo a 1 para esa placa.
+#define SLEEP_SKIP_SEN0466 0
 
 // The SEN0466's stabilisation time, from its datasheet and confirmed by the
 // 210s the bring-up has always quoted. It needs this much CONTINUOUS power; any
