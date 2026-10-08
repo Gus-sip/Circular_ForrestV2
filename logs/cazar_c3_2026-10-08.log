@@ -1,0 +1,26 @@
+=== esperando a que C3 (28:84:85:6F:82:88) enumere ===
+=== APARECIO en COM16 tras 0.0s y 0 sondeos - abriendo ===
+[   1.2s] [step] cm1106.begin returned ...
+[   1.2s] [step] bmv080.begin (SWAPPED: now after cm1106) ...
+[   1.9s] BMV080: OK
+[   1.9s] [step] calypso.begin next ...
+[   1.9s] [step] calypso.begin returned - radio next ...
+[   1.9s] Configuring RYLR998 (link parameters must match pp1-lora-receiver):
+[   1.9s]   -> AT
+[   1.9s]   <- +OK
+[   1.9s]   -> AT+ADDRESS=4
+[   1.9s]   <- +OK
+[   1.9s]   -> AT+NETWORKID=5
+[   1.9s]   <- +OK
+[   1.9s]   -> AT+BAND=868000000
+[   1.9s]   <- +OK
+[   1.9s]   -> AT+PARAMETER=7,7,1,12
+[   1.9s]   <- +OK
+[   1.9s]   -> AT+CRFOP=14
+[   1.9s]   <- +OK
+[   1.9s] LoRa TX power -> 14 dBm: OK
+[   1.9s] Radio init OK
+[   1.9s] Setup complete.
+[   1.9s] 
+=== puerto perdido tras 2.0s: ClearCommError failed (PermissionError(13, 'El dispositivo no reconoce el comando.', None, 22)) ===
+=== fin ===
