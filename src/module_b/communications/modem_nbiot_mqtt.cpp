@@ -789,7 +789,16 @@ void ModemNBIoTMqtt::handleConfigurarModuloC(const NbiotProtocol::MqttMessage &m
   // Una accion global necesita un hueco POR NODO, no uno.
   const uint8_t nodeCount = (uint8_t)(sizeof(NBIOT_NODE_NAMES) / sizeof(NBIOT_NODE_NAMES[0]));
   const uint8_t slotsNeeded = isGlobal ? nodeCount : 1;
-  if (freeNodeCmdSlots() < slotsNeeded) {
+
+  // Los huecos que este comando puede REUTILIZAR por sustituir a otro igual no
+  // cuentan como ocupados: si no, seis ordenes repetidas seguirian llenando la
+  // cola aunque solo una vaya a sobrevivir.
+  uint8_t reusables = 0;
+  for (uint8_t t = 0; t < slotsNeeded; t++) {
+    const char *target = isGlobal ? NBIOT_NODE_NAMES[t].name : device;
+    if (supersedableIndexFor(target, action) >= 0) reusables++;
+  }
+  if (freeNodeCmdSlots() + reusables < slotsNeeded) {
     refuse("command queue full");
     return;
   }
@@ -901,7 +910,24 @@ void ModemNBIoTMqtt::handleConfigurarModuloC(const NbiotProtocol::MqttMessage &m
   // timeout, bajo el mismo numero de peticion.
   for (uint8_t t = 0; t < slotsNeeded; t++) {
     const char *target = isGlobal ? NBIOT_NODE_NAMES[t].name : device;
-    const int slot = freeNodeCmdSlot();
+
+    // Sustituir antes que encolar. El comando anterior se cierra como `error`
+    // diciendo por que: el documento acota status a confirmado/error/timeout, y
+    // dejarlo sin respuesta seria peor - Modulo A lo mostraria "en transito"
+    // para siempre, que es exactamente el sintoma que estamos arreglando.
+    int slot = supersedableIndexFor(target, action);
+    if (slot >= 0) {
+      const long viejo = _nodeCmds[slot].rpcId;
+      if (viejo != requestId) {
+        char motivo[72];
+        snprintf(motivo, sizeof(motivo), "sustituido por el comando %ld", requestId);
+        publishCommandLogApplied(viejo, "error", motivo, target);
+        Serial.printf("[nbiot-mqtt] %ld sustituye al %ld en %s (misma accion)\n",
+                      requestId, viejo, target);
+      }
+    } else {
+      slot = freeNodeCmdSlot();
+    }
     if (slot < 0) break;  // comprobado arriba; defensivo
 
     NodeCommand &nc = _nodeCmds[slot];
@@ -909,6 +935,8 @@ void ModemNBIoTMqtt::handleConfigurarModuloC(const NbiotProtocol::MqttMessage &m
     nc.device[sizeof(nc.device) - 1] = 0;
     strncpy(nc.cfg, cfg, sizeof(nc.cfg) - 1);
     nc.cfg[sizeof(nc.cfg) - 1] = 0;
+    strncpy(nc.action, action, sizeof(nc.action) - 1);
+    nc.action[sizeof(nc.action) - 1] = 0;
     nc.rpcId = requestId;
     nc.queuedMs = millis();
     nc.awaitingAck = false;

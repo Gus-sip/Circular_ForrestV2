@@ -377,6 +377,7 @@ private:
     bool awaitingAck = false;  // already sent over LoRa, waiting for the node's ACK
     char device[24] = {0};     // ThingsBoard child-device name, e.g. "NodoC-1"
     char cfg[128] = {0};       // "CFG,INTERVAL=300,BMV080=0" as Module C expects it
+    char action[24] = {0};     // la accion de la v2, para que un comando sustituya al anterior
     long rpcId = 0;
     uint32_t queuedMs = 0;
     uint8_t attempts = 0;      // delivery attempts so far - reported, and retried
@@ -430,6 +431,33 @@ private:
   // Cuantos huecos quedan. Una accion global necesita uno POR NODO, y hay que
   // saberlo ANTES de encolar nada: encolar la mitad de un comando que va a todos
   // los nodos deja el sistema diciendo que lo aplico cuando no es cierto.
+  // UN COMANDO NUEVO SUSTITUYE AL ANTERIOR DEL MISMO NODO Y LA MISMA ACCION.
+  //
+  // Sin esto, seis ordenes identicas al mismo nodo ocupan los seis huecos y la
+  // cola se bloquea, aunque la primera ya haga el trabajo. Pasa constantemente:
+  // el operador repite el comando al no ver respuesta, y ademas ThingsBoard
+  // guarda hasta una hora los RPC no entregados y se los descarga a Modulo B de
+  // golpe al reconectar, llenando la cola en el arranque.
+  //
+  // El propio documento v2 ya establece el principio para NxT_enviodatos: "Manda
+  // el ultimo recibido". Se aplica a todas las acciones, que es lo coherente -
+  // si llegan dos umbrales distintos para la misma variable, el que vale es el
+  // ultimo que mando el operador, no el primero que entro en la cola.
+  //
+  // Solo sustituye comandos que AUN NO SE HAN ENVIADO. Uno ya entregado y
+  // esperando ACK se deja en paz: el nodo ya lo tiene, y su resultado hay que
+  // reportarlo.
+  int supersedableIndexFor(const char *device, const char *action) const {
+    for (uint8_t i = 0; i < kNodeCmdQueue; i++) {
+      const NodeCommand &nc = _nodeCmds[i];
+      if (!nc.pending || nc.awaitingAck) continue;
+      if (strcmp(nc.device, device) != 0) continue;
+      if (strcmp(nc.action, action) != 0) continue;
+      return (int)i;
+    }
+    return -1;
+  }
+
   uint8_t freeNodeCmdSlots() const {
     uint8_t n = 0;
     for (uint8_t i = 0; i < kNodeCmdQueue; i++) {

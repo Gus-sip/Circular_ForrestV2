@@ -1,0 +1,112 @@
+=== COM10 abierto, capturando 1700s (el open resetea la placa) ===
+[   0.3s] 
+[   0.3s] === CHIP FOREST LoRa ground-station receiver ===
+[   0.3s] WiFi AP: SSID="CHIP-FOREST-RX"  password="chipforest1"
+[   0.3s] Dashboard: http://192.168.4.1/
+[   0.3s] Web server started - reading history CSV at http://192.168.4.1/history
+[   0.3s] OLED: init OK
+[   0.6s] Configuring RYLR998 (link parameters must match the sensor node):
+[   0.6s]   -> AT
+[   0.6s]   <- +OK
+[   0.6s]   -> AT+ADDRESS=2
+[   0.6s]   <- +OK
+[   0.6s]   -> AT+NETWORKID=5
+[   0.9s]   <- +OK
+[   0.9s]   -> AT+BAND=868000000
+[   0.9s]   <- +OK
+[   0.9s]   -> AT+PARAMETER=7,7,1,12
+[   0.9s]   <- +OK
+[   0.9s] Radio init OK - listening for packets.
+[   0.9s] 
+[   0.9s] Starting NB-IoT/MQTT uplink to ThingsBoard - non-blocking, see modem_nbiot_mqtt.h:
+[   0.9s] 
+[   0.9s] [nbiot-mqtt] state OFF -> POWERING
+[   3.7s] [nbiot-mqtt] state POWERING -> WAIT_AT
+[   3.7s] [nbiot-mqtt] -> AT
+[   3.7s] [nbiot-mqtt] <- 
+[   3.7s] [nbiot-mqtt] <- OK
+[   3.7s] [nbiot-mqtt] state WAIT_AT -> CONFIG
+[   3.7s] [nbiot-mqtt] -> ATE0
+[   3.7s] [nbiot-mqtt] <- OK
+[   3.7s] [nbiot-mqtt] -> AT+CMEE=2
+[   3.7s] [nbiot-mqtt] <- OK
+[   3.7s] [nbiot-mqtt] -> AT+CTZU=1
+[   3.7s] [nbiot-mqtt] <- OK
+[   3.7s] [nbiot-mqtt] -> AT+QSCLK=0
+[   3.7s] [nbiot-mqtt] <- OK
+[   3.7s] [nbiot-mqtt] -> AT+CFUN=1
+[   4.0s] [nbiot-mqtt] <- OK
+[   4.0s] [nbiot-mqtt] -> AT+CPIN?
+[   4.0s] [nbiot-mqtt] <- +CPIN: READY
+[   4.0s] [nbiot-mqtt] <- OK
+[   4.0s] [nbiot-mqtt] -> AT+CFUN=0
+[   4.7s] [nbiot-mqtt] <- OK
+[   4.7s] [nbiot-mqtt] urc: +CEREG: 0
+[   4.7s] [nbiot-mqtt] urc: +CPIN: NOT READY
+[   4.7s] [nbiot-mqtt] +QMTSTAT fired (err=7) - session marked dead, will reconnect from IDLE
+[   7.5s] [nbiot-mqtt] -> AT+QCGDEFCONT="IP","sensor.net"
+[   7.5s] [nbiot-mqtt] <- OK
+[   7.5s] [nbiot-mqtt] -> AT+CFUN=1
+[   7.8s] [nbiot-mqtt] <- OK
+[   7.8s] [nbiot-mqtt] state CONFIG -> ATTACHING
+[   7.8s] [nbiot-mqtt] -> AT+CEREG?
+[   7.8s] [nbiot-mqtt] <- +CEREG: 1,0
+[   7.8s] [nbiot-mqtt] <- OK
+[   8.4s] [nbiot-mqtt] urc: +CPIN: READY
+[   8.4s] [nbiot-mqtt] urc: +CEREG: 2
+[  10.0s] [nbiot-mqtt] -> AT+CEREG?
+[  10.0s] [nbiot-mqtt] <- +CEREG: 1,2
+[  10.0s] [nbiot-mqtt] <- OK
+[  11.8s] [nbiot-mqtt] -> AT+CEREG?
+[  11.8s] [nbiot-mqtt] <- +CEREG: 1,2
+[  11.8s] [nbiot-mqtt] <- OK
+[  12.8s] [nbiot-mqtt] urc: +IP: 10.0.0.1
+[  12.8s] [nbiot-mqtt] urc: +CEREG: 5
+[  14.0s] [nbiot-mqtt] -> AT+CEREG?
+[  14.0s] [nbiot-mqtt] <- +CEREG: 1,5
+[  14.0s] [nbiot-mqtt] <- OK
+[  14.0s] [nbiot-mqtt] -> AT+CGPADDR=0
+[  14.0s] [nbiot-mqtt] <- +CGPADDR: 0,"10.0.0.1"
+[  14.0s] [nbiot-mqtt] <- OK
+[  14.0s] [nbiot-mqtt] -> AT+CSQ
+[  14.0s] [nbiot-mqtt] <- +CSQ: 31,0
+[  14.0s] [nbiot-mqtt] <- OK
+[  14.0s] [nbiot-mqtt] -> AT+CCLK?
+[  14.0s] [nbiot-mqtt] <- +CCLK: 26/10/08,10:39:23+08
+[  14.0s] [nbiot-mqtt] <- OK
+[  14.0s] [nbiot-mqtt] network time acquired: epoch 1791455963000 ms - uplink readings will carry per-reading ts
+[  14.0s] [nbiot-mqtt] state ATTACHING -> MQTT_CONNECT
+[  14.0s] [nbiot-mqtt] -> AT+QMTCFG="keepalive",0,120
+[  14.0s] [nbiot-mqtt] <- OK
+[  14.0s] [nbiot-mqtt] -> AT+QMTCFG="session",0,0
+[  14.0s] [nbiot-mqtt] <- OK
+[  14.0s] [nbiot-mqtt] -> AT+QMTOPEN=0,"test-moduloa.home.kg",18831
+[  14.0s] [nbiot-mqtt] <- OK
+[  14.9s] [nbiot-mqtt] <- +QMTOPEN: 0,0
+[  14.9s] [nbiot-mqtt] -> AT+QMTCONN=0,"CON-1","QRPJgyk5COJPCavycmpp"
+[  14.9s] [nbiot-mqtt] <- OK
+[  15.5s] [nbiot-mqtt] <- +QMTCONN: 0,0,0
+[  15.5s] [nbiot-mqtt] -> AT+QMTSUB=0,1,"v1/devices/me/rpc/request/+",1
+[  15.5s] [nbiot-mqtt] <- OK
+[  16.2s] [nbiot-mqtt] <- +QMTSUB: 0,1,0,1
+[  16.2s] [nbiot-mqtt] -> AT+QMTSUB=0,2,"v1/gateway/rpc",1
+[  16.2s] [nbiot-mqtt] <- OK
+[  16.8s] [nbiot-mqtt] <- +QMTSUB: 0,2,0,1
+[  16.8s] [nbiot-mqtt] downlink live - announcing the nodes next
+[  16.8s] [nbiot-mqtt] announcing NodoC-1 to the gateway
+[  16.8s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/gateway/connect"
+[  16.8s] [nbiot-mqtt] payload (20 bytes): {"device":"NodoC-1"}
+[  16.8s] [nbiot-mqtt] <- OK
+[  17.1s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[  17.1s] [nbiot-mqtt] announcing NodoC-2 to the gateway
+[  17.1s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/gateway/connect"
+[  17.1s] [nbiot-mqtt] payload (20 bytes): {"device":"NodoC-2"}
+[  17.1s] [nbiot-mqtt] <- OK
+[  17.1s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[  17.1s] [nbiot-mqtt] announcing NodoC-3 to the gateway
+[  17.1s] [nbiot-mqtt] -> AT+QMTPUB=0,0,0,0,"v1/gateway/connect"
+[  17.1s] [nbiot-mqtt] payload (20 bytes): {"device":"NodoC-3"}
+[  17.1s] [nbiot-mqtt] <- OK
+[  17.1s] [nbiot-mqtt] <- +QMTPUB: 0,0,0
+[  17.1s] [nbiot-mqtt] 3 node(s) announced - downlink live
+[  17.1s] [nbiot-mqtt] state MQTT_CONNECT -> IDLE
