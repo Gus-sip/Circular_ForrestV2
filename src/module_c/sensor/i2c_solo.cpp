@@ -119,12 +119,41 @@ void setup() {
   Serial.println("Wire iniciado a 100 kHz.");
 }
 
+// El BMV080 acusa su direccion en el escaneo pero el SDK de Bosch falla al
+// abrirlo con E_BMV080_ERROR_HW_WRITE (106), que significa que LA ESCRITURA
+// falla, no que no encuentre el chip.
+//
+// Esto separa las dos capas: si una escritura I2C cruda al mismo chip SI es
+// aceptada, el problema esta en el SDK o en la libreria de bus que hay debajo; si
+// tampoco pasa, el problema es el chip o su habilitacion.
+static void probarBmv(uint8_t addr) {
+  // Escritura de longitud cero: solo la direccion. Es la que el escaneo ya hace.
+  Wire.beginTransmission(addr);
+  const uint8_t soloDir = Wire.endTransmission();
+
+  // Escritura de un registro de 16 bits MSB primero, que es como direcciona este
+  // chip. Si el chip esta vivo y habilitado deberia acusarla.
+  Wire.beginTransmission(addr);
+  Wire.write((uint8_t)0x00);
+  Wire.write((uint8_t)0x00);
+  const uint8_t conReg = Wire.endTransmission();
+
+  Serial.printf("    0x%02X  solo-direccion=%u  registro-16bit=%u  -> %s\n", addr,
+                (unsigned)soloDir, (unsigned)conReg,
+                (soloDir == 0 && conReg == 0)
+                    ? "acepta escrituras crudas: el chip responde, sospechoso el SDK"
+                    : (soloDir == 0 ? "acusa la direccion pero RECHAZA el registro"
+                                    : "no responde"));
+}
+
 void loop() {
   Serial.println("\n--- escaneo ---");
   escanear();
   Serial.println("--- BME690 por chip ID ---");
   preguntarBme(0x76);
   preguntarBme(0x77);
+  Serial.println("--- BMV080 crudo, sin SDK ---");
+  for (uint8_t a : {0x57, 0x56, 0x55, 0x54}) probarBmv(a);
   Serial.printf("--- lineas: SDA=%s  SCL=%s ---\n", estadoLinea(PIN_I2C_SDA),
                 estadoLinea(PIN_I2C_SCL));
   // estadoLinea() deja los pines como GPIO sueltos, asi que hay que devolverlos
