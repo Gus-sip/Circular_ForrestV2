@@ -737,6 +737,76 @@ RTC_NOINIT_ATTR uint32_t g_sleepFlag;
 RTC_NOINIT_ATTR bool g_hibernating;
 RTC_NOINIT_ATTR uint32_t g_txPeriodMsPersist;
 
+// ---------------------------------------------------------------------------
+// RELOJ DEL NODO
+// ---------------------------------------------------------------------------
+//
+// EL PROBLEMA. El nodo no tiene reloj. Durmiendo, el tiempo lo cuenta el
+// oscilador RC interno del ESP32, que tiene entre ±1% y ±2% de error y ademas
+// deriva con la temperatura - que en un bosque cambia 20 °C entre el dia y la
+// noche. Sobre un periodo de 30 minutos eso son 18-36 segundos, y lo peor es que
+// SE ACUMULA: si cada sueno se pasa 18 s, al decimo envio llevas 3 minutos de
+// retraso y sigue creciendo. Una estrategia que dice "mide cada 5 minutos" no
+// significa nada si nadie sabe cuanto dura un minuto.
+//
+// LA SOLUCION. Modulo B si tiene la hora de red (AT+CCLK? por cada enganche,
+// `netNowMs()`), y el nodo ya abre una ventana de escucha de 2 s despues de cada
+// transmision por donde recibe comandos CFG. Asi que la sincronizacion no
+// necesita protocolo nuevo: es una clave CFG mas, `CFG,TIME=<epoca en ms>`.
+//
+// DOS RELOJES, Y HAY QUE NO CONFUNDIRLOS:
+//
+//   * nodeNowMs()  - monotono, propio del nodo, empieza en 0 al energizar y
+//                    sobrevive al sueno. SIEMPRE existe. Es con lo que se
+//                    planifica, porque no depende de haber hablado con nadie.
+//   * wallNowMs()  - hora real, epoca en ms. Solo existe tras la primera
+//                    sincronizacion. Es con lo que se FECHAN las lecturas.
+//
+// `millis()` se reinicia en cada despertar, asi que el tiempo del nodo se
+// acumula explicitamente en RTC: antes de dormir se suma lo que se estuvo
+// despierto mas lo que se va a dormir. La diferencia entre lo que se pidio
+// dormir y lo que de verdad se durmio ES el error del RC, y es justo lo que
+// corrige el factor de deriva.
+RTC_NOINIT_ATTR uint64_t g_nodeBaseMs;     // tiempo del nodo acumulado ANTES de este arranque
+RTC_NOINIT_ATTR uint64_t g_epochMsAtSync;  // epoca real recibida en la ultima sincronizacion
+RTC_NOINIT_ATTR uint64_t g_nodeMsAtSync;   // tiempo del nodo en ese mismo instante
+RTC_NOINIT_ATTR uint8_t g_clockSynced;     // 0 = nunca sincronizado; planifica relativo
+RTC_NOINIT_ATTR uint32_t g_clockSyncCount; // cuantas veces, para el diagnostico
+
+// Cuantos milisegundos REALES vale un milisegundo contado por el nodo. 1.0 = el
+// oscilador es perfecto; 1.013 = va un 1,3% lento y hay que dormir menos.
+//
+// Es el refinamiento que de verdad mata la deriva, y sale gratis: en cada
+// sincronizacion el nodo compara cuanto tiempo cree el que ha pasado contra
+// cuanto dice la red, y se corrige. Tras un par de sincronizaciones incluso los
+// intervalos ENTRE sincronizaciones son precisos, sin tocar hardware.
+RTC_NOINIT_ATTR float g_clockDrift;
+
+// Fuera de estos limites el factor no se cree: un RC puede desviarse un 2%, no un
+// 20%. Un valor absurdo viene de una hora de red mala o de un desbordamiento, y
+// aplicarlo dejaria al nodo midiendo a un ritmo arbitrario sin forma de volver.
+#define CLOCK_DRIFT_MIN 0.90f
+#define CLOCK_DRIFT_MAX 1.10f
+
+// Por debajo de esto no se aprende deriva: medir un error del 1% sobre un
+// intervalo corto es medir ruido. Una sincronizacion por envio en estado normal
+// son 31 minutos, de sobra.
+#define CLOCK_DRIFT_MIN_SPAN_MS 300000ULL  // 5 min
+
+// Tiempo propio del nodo, monotono y a prueba de suenos. Es lo unico con lo que
+// se puede planificar antes de haber hablado con Modulo B.
+static uint64_t nodeNowMs() { return g_nodeBaseMs + (uint64_t)millis(); }
+
+// Hora real en epoca-ms, o 0 si el nodo todavia no se ha sincronizado nunca.
+// CERO ES "NO SE", no "1 de enero de 1970": quien la use tiene que comprobarlo,
+// porque fechar una lectura con un cero la situa 56 anos en el pasado y eso en
+// ThingsBoard no se distingue de un dato legitimo antiguo.
+static uint64_t wallNowMs() {
+  if (!g_clockSynced) return 0;
+  const uint64_t elapsed = nodeNowMs() - g_nodeMsAtSync;
+  return g_epochMsAtSync + (uint64_t)((double)elapsed * (double)g_clockDrift);
+}
+
 // Tick counters and their end-user thresholds. Counters advance every tick and
 // reset on reaching their threshold; thresholds arrive by downlink from Module A.
 RTC_NOINIT_ATTR uint16_t g_sensorReadCount;
@@ -897,7 +967,58 @@ static bool applyConfigCommand(const char *payload, uint8_t len, char *ackPayloa
       char appliedKv[24] = {0};
       bool matched = true;
 
-      if (strcmp(key, "INTERVAL") == 0) {
+      // ---- TIME: la hora de red que Modulo B baja en la ventana de escucha ----
+      //
+      // EN SEGUNDOS, NO EN MILISEGUNDOS, a proposito. Una epoca en segundos cabe
+      // en 32 bits hasta 2106, asi que ni el parseo ni el ACK necesitan enteros de
+      // 64 bits - y `%lld` no es de fiar con la nano-newlib que lleva este build,
+      // que ya nos costo un fallo en Modulo B. Se pierde precision por debajo del
+      // segundo, que contra periodos de minutos es irrelevante.
+      if (strcmp(key, "TIME") == 0) {
+        const unsigned long epochS = strtoul(valueStr, nullptr, 10);
+        // Antes de 2023 no es una hora, es un modem que todavia no ha cogido la
+        // hora de red y esta devolviendo su valor de fabrica. Modulo B ya filtra
+        // por esto, pero aceptarla aqui situaria todas las lecturas en 1970.
+        if (epochS < 1672531200UL) {  // 2023-01-01
+          Serial.printf("[clock] TIME=%lu ignorado: anterior a 2023\n", epochS);
+          matched = false;
+        } else {
+          const uint64_t epochMs = (uint64_t)epochS * 1000ULL;
+          const uint64_t nodeNow = nodeNowMs();
+
+          // APRENDER LA DERIVA. Solo se puede a partir de la SEGUNDA
+          // sincronizacion, que es la primera con dos puntos que comparar.
+          if (g_clockSynced && epochMs > g_epochMsAtSync && nodeNow > g_nodeMsAtSync) {
+            const uint64_t dReal = epochMs - g_epochMsAtSync;
+            const uint64_t dNode = nodeNow - g_nodeMsAtSync;
+            if (dNode >= CLOCK_DRIFT_MIN_SPAN_MS) {
+              const float f = (float)((double)dReal / (double)dNode);
+              if (f >= CLOCK_DRIFT_MIN && f <= CLOCK_DRIFT_MAX) {
+                Serial.printf("[clock] deriva %ld ppm -> %ld ppm\n",
+                              (long)((g_clockDrift - 1.0f) * 1000000.0f),
+                              (long)((f - 1.0f) * 1000000.0f));
+                g_clockDrift = f;
+              } else {
+                // Fuera de rango no es deriva: es una hora mala o un salto. Un
+                // factor absurdo dejaria al nodo midiendo a un ritmo arbitrario
+                // sin forma de volver, asi que se conserva el anterior.
+                Serial.printf("[clock] factor %ld ppm fuera de rango, descartado\n",
+                              (long)((f - 1.0f) * 1000000.0f));
+              }
+            }
+          }
+
+          g_epochMsAtSync = epochMs;
+          g_nodeMsAtSync = nodeNow;
+          g_clockSynced = 1;
+          g_clockSyncCount++;
+          Serial.printf("[clock] sincronizado #%lu: epoca %lu, nodo %lus, deriva %ld ppm\n",
+                        (unsigned long)g_clockSyncCount, epochS,
+                        (unsigned long)(nodeNow / 1000ULL),
+                        (long)((g_clockDrift - 1.0f) * 1000000.0f));
+          snprintf(appliedKv, sizeof(appliedKv), "TIME=%lu", epochS);
+        }
+      } else if (strcmp(key, "INTERVAL") == 0) {
         long seconds = atol(valueStr);
         // Also persisted to RTC at sleep, so a downlink-set period survives.
         const long minSeconds = LORA_TX_PERIOD_MIN_MS / 1000;
@@ -1570,6 +1691,20 @@ void setup() {
     g_sensorReadCount = 0;
     g_loraTransCount = 0;
     g_slotCursor = 0;
+    // El reloj arranca sin hora y sin deriva conocida. Es lo correcto tras una
+    // perdida de corriente: la hora que hubiera guardada seria de antes del corte
+    // y no hay forma de saber cuanto duro. El nodo planifica con su tiempo propio
+    // hasta que Modulo B le mande CFG,TIME en la primera ventana de escucha.
+    //
+    // La deriva arranca en 1.0 - "supongo que mi oscilador es perfecto" - y se
+    // corrige sola en la SEGUNDA sincronizacion, que es la primera que tiene dos
+    // puntos que comparar.
+    g_nodeBaseMs = 0;
+    g_epochMsAtSync = 0;
+    g_nodeMsAtSync = 0;
+    g_clockSynced = 0;
+    g_clockSyncCount = 0;
+    g_clockDrift = 1.0f;
     // The reading cache lives in RTC_NOINIT too, so it holds garbage on a true
     // power-on and must be seeded here with everything else.
     g_temp = g_hum = g_pres = g_gas = 0.0f;
@@ -1904,6 +2039,21 @@ static void enterDeepSleep(const char *why, uint32_t seconds) {
   delay(SLEEP_USB_DRAIN_MS);
 
   g_sleepFlag = SLEEP_FLAG_MAGIC;  // so the next boot knows it came from sleep
+
+  // EL TIEMPO DEL NODO SE ACUMULA AQUI, Y ESTE ES EL UNICO SITIO.
+  //
+  // `millis()` se reinicia en cada despertar, asi que sin esto el nodo no tendria
+  // ninguna nocion de cuanto lleva vivo mas alla del arranque actual. Se suma lo
+  // que se estuvo despierto MAS lo que se va a dormir, porque despues de
+  // esp_deep_sleep_start() no se ejecuta ninguna linea mas: no hay un "despues"
+  // donde apuntarlo.
+  //
+  // Lo que se apunta es lo que se PIDIO dormir, no lo que de verdad se durmio -
+  // que nadie puede medir sin un reloj mejor que el que estamos usando. Esa
+  // diferencia es exactamente el error del oscilador RC, y es lo que corrige
+  // g_clockDrift cuando llega la siguiente sincronizacion con Modulo B.
+  g_nodeBaseMs += (uint64_t)millis() + (uint64_t)seconds * 1000ULL;
+
   esp_sleep_enable_timer_wakeup((uint64_t)seconds * 1000000ULL);
   esp_deep_sleep_start();
   // never returns

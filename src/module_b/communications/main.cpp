@@ -362,6 +362,40 @@ void loop() {
         bool sent = radio.send(msg.senderAddr, cfg, (uint8_t)strlen(cfg));
         Serial.printf("  -> downlink to %s: %s (%s)\n", nodeName, cfg, sent ? "sent" : "SEND FAILED");
         if (sent) modem.onNodeCommandDelivered(nodeName);
+      } else {
+        // ---- SINCRONIZACION DE RELOJ ----
+        //
+        // El nodo no tiene reloj: durmiendo cuenta el tiempo con su oscilador RC,
+        // que se desvia un 1-2% y acumula. Aqui si hay hora de red, asi que se la
+        // bajamos. No necesita protocolo nuevo - es una clave CFG mas.
+        //
+        // SOLO CUANDO NO HAY COMANDO PENDIENTE. La ventana de escucha del nodo da
+        // para UNA trama, asi que una orden del operador siempre tiene prioridad;
+        // la hora puede esperar a la siguiente ventana sin que pase nada.
+        //
+        // Y no en cada trama: un nodo en alarma transmite cada 3 minutos, y
+        // sincronizarlo tan seguido no mejora nada y gasta tiempo de aire, que en
+        // EU868 esta limitado por ciclo de trabajo.
+        static uint32_t lastTimeSyncMs[sizeof(NBIOT_NODE_NAMES) / sizeof(NBIOT_NODE_NAMES[0])] = {0};
+        const unsigned long epochS = modem.netEpochSeconds();
+        if (epochS != 0) {
+          int slot = -1;
+          for (size_t i = 0; i < sizeof(NBIOT_NODE_NAMES) / sizeof(NBIOT_NODE_NAMES[0]); i++) {
+            if (NBIOT_NODE_NAMES[i].addr == msg.senderAddr) { slot = (int)i; break; }
+          }
+          const uint32_t now = millis();
+          // El primer envio sale siempre: lastTimeSyncMs arranca en 0 y un nodo
+          // recien encendido es justo el que mas necesita la hora.
+          if (slot >= 0 && (lastTimeSyncMs[slot] == 0 ||
+                            now - lastTimeSyncMs[slot] >= NODE_TIME_SYNC_MIN_GAP_MS)) {
+            char timeCfg[32];
+            snprintf(timeCfg, sizeof(timeCfg), "CFG,TIME=%lu", epochS);
+            bool sent = radio.send(msg.senderAddr, timeCfg, (uint8_t)strlen(timeCfg));
+            Serial.printf("  -> reloj a %s: %s (%s)\n", nodeName, timeCfg,
+                          sent ? "enviado" : "FALLO");
+            if (sent) lastTimeSyncMs[slot] = now;
+          }
+        }
       }
     }
 

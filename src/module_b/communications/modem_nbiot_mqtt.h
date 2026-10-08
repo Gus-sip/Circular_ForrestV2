@@ -139,6 +139,21 @@ public:
   uint8_t ringCount() const { return _ringCount; }
   bool haveNetTime() const { return _haveNetTime; }
 
+  // Epoca UNIX en SEGUNDOS, para bajarsela a los nodos por CFG,TIME. Devuelve 0
+  // cuando la red no ha dado hora todavia, y el llamante tiene que tratar ese 0
+  // como "no se" y no mandar nada - un cero situaria al nodo en 1970.
+  //
+  // EN SEGUNDOS Y NO EN MILISEGUNDOS a proposito: cabe en 32 bits hasta 2106, asi
+  // que ni este extremo ni el nodo necesitan enteros de 64 bits ni `%lld`, que no
+  // es de fiar con la nano-newlib de este build - ya nos costo un fallo aqui
+  // mismo. Se pierde precision por debajo del segundo, irrelevante contra
+  // periodos de minutos.
+  unsigned long netEpochSeconds() const {
+    if (!_haveNetTime) return 0;
+    const int64_t ms = netNowMs();
+    return (ms > 0) ? (unsigned long)(ms / 1000) : 0;
+  }
+
   // ---------- Runtime config, settable from Module A ----------
   // Both clamp to the MQTT_BATCH_*_MIN/MAX bounds in Config.h and return the
   // value actually applied, so a clamped command is visible to the caller (and

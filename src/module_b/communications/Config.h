@@ -43,6 +43,18 @@
 // match SLEEP_CYCLE_SECONDS on Module C.
 #define NODE_TICK_SECONDS 10
 
+// Minimo entre dos sincronizaciones de reloj al MISMO nodo.
+//
+// La hora se baja en la ventana de escucha que el nodo abre tras cada trama de
+// telemetria, pero no conviene hacerlo en todas: en alarma un nodo transmite cada
+// 3 minutos y resincronizarlo tan seguido no mejora la precision - el oscilador no
+// deriva nada apreciable en 3 minutos - y gasta tiempo de aire, que en EU868 esta
+// limitado por ciclo de trabajo.
+//
+// 5 minutos deja que el estado normal (un envio cada 31 min) sincronice SIEMPRE,
+// que es donde de verdad importa porque es donde el nodo duerme.
+#define NODE_TIME_SYNC_MIN_GAP_MS 300000UL
+
 #define LORA_NODE_ADDR 1  // sensor node's AT+ADDRESS
 #define LORA_MY_ADDR 2    // this receiver's own AT+ADDRESS - must differ from the node's
 
