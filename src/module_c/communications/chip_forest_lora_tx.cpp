@@ -2238,34 +2238,13 @@ void setup() {
   // que es exactamente la pregunta abierta.
   i2cReportPullups("ANTES de encender rails");
 
-  // CORTE LARGO DEL RAIL DE 3V3 ANTES DE ENCENDERLO, en arranque en frio.
-  //
-  // Hipotesis que prueba: un esclavo de I2C que se quedo sujetando SCL. En I2C el
-  // reloj lo genera el maestro, pero un esclavo puede sujetarlo a masa para pedir
-  // tiempo (clock stretching). Si el maestro se reinicia mientras el esclavo
-  // entregaba datos, el esclavo se queda esperando pulsos que no llegan y sujeta
-  // SCL PARA SIEMPRE. Sobrevive a cualquier reset del ESP32 - solo lo suelta si
-  // pierde su propia alimentacion.
-  //
-  // Aqui pasa con facilidad: cada despertar es un reset del maestro.
-  //
-  // POR QUE NO BASTA CON LO QUE YA HACIA enableRails(). Esa funcion apaga y
-  // enciende, pero el parpadeo es de milisegundos y los condensadores de desacoplo
-  // del rail mantienen al sensor alimentado durante el. El esclavo no llega a
-  // perder tension y sigue colgado. Hace falta un corte lo bastante largo para
-  // descargarlos.
-  //
-  // Solo en arranque en frio: en los despertares normales cuesta tiempo despierto
-  // y el bus ya quedo limpio al arrancar.
-  if (isColdBoot()) {
-    pinMode(PIN_PCB_EN_A, OUTPUT);
-    digitalWrite(PIN_PCB_EN_A, (PIN_PCB_EN_A_ACTIVE == LOW) ? HIGH : LOW);  // 3V3 OFF
-    Serial.println("[i2c] cortando 3V3 1500ms para descolgar cualquier esclavo");
-    Serial.flush();
-    delay(1500);
-    i2cReportPullups("con el 3V3 CORTADO");
-  }
 
+  // NOTA: aqui hubo un corte de 1500 ms del rail de 3V3 para descolgar un posible
+  // esclavo de I2C. Se quito porque la medida lo desmintio: con el rail cortado,
+  // SCL seguia sujeto a masa. La causa real es un esclavo que NO esta en ese rail
+  // - el SEN0466 va cableado directo a corriente saltandose el transistor - asi
+  // que no hay nada que el firmware pueda apagar para reiniciarlo. Solo lo suelta
+  // desenchufar la placa entera.
   enableRails(g_safeMode);
   i2cReportPullups("DESPUES de encender rails");
 
