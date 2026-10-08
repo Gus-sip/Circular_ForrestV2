@@ -1627,7 +1627,63 @@ static void scanI2C(const char *when) {
 //
 // Devuelve si el bus quedo utilizable. Imprime siempre que haya tenido que actuar,
 // porque un bus que se atasca a menudo es un sintoma por si mismo.
+// SI EL RAIL DE 3V3 LLEGA DE VERDAD AL BUS, medido por el propio ESP32 y sin
+// polimetro.
+//
+// Las resistencias de pull-up del I2C se alimentan del rail de 3V3. Entonces:
+//
+//   * leidas SIN pull-up interno, si las lineas siguen ALTAS es que las externas
+//     tienen tension -> el rail llega al bus.
+//   * si caen a BAJO, las externas estan sin alimentar -> el rail NO llega, por
+//     mucho que la puerta del transistor este conduciendo.
+//
+// Esa distincion es justo la que no se puede hacer mirando el GPIO de la puerta:
+// "el transistor esta prendido" y "el rail da 3,3 V en el sensor" son cosas
+// distintas, y entre una y otra hay una pista, un conector y el propio transistor.
+//
+// CUIDADO AL LEERLO: un ALTO aqui no prueba que los sensores funcionen, solo que
+// hay tension en las pull-up. Un BAJO si es concluyente en el otro sentido.
+// Estado de una linea del bus, distinguiendo las TRES causas que se confunden
+// entre si cuando una linea lee BAJO:
+//
+//   LIBRE     sube sola y se queda arriba        -> hay pull-up con tension
+//   FLOTANTE  se puede subir, pero no se sostiene -> no hay pull-up (o sin tension)
+//   SUJETA    no sube ni forzandola               -> corto a masa, o un esclavo
+//                                                   colgado sujetandola
+//
+// La diferencia importa: "flotante" apunta al rail que alimenta las pull-up, y
+// "sujeta" apunta a un corto o a un chip colgado. Mirar solo el nivel no las
+// separa, y es lo que hacia la version anterior de esta funcion.
+static const char *i2cLineState(uint8_t pin) {
+  pinMode(pin, INPUT);  // sin pull-up interno: solo queda lo que haya fuera
+  delayMicroseconds(200);
+  if (digitalRead(pin) == HIGH) return "LIBRE";
+
+  // Forzarla alta un instante y soltarla. Si rebota a bajo de inmediato hay algo
+  // sujetandola; si aguanta aunque sea un momento, es capacidad flotando.
+  pinMode(pin, OUTPUT);
+  digitalWrite(pin, HIGH);
+  delayMicroseconds(50);
+  pinMode(pin, INPUT);
+  delayMicroseconds(5);
+  const int justoAlSoltar = digitalRead(pin);
+  delayMicroseconds(200);
+  const int despues = digitalRead(pin);
+
+  if (justoAlSoltar == LOW) return "SUJETA a masa";
+  if (despues == LOW) return "FLOTANTE (sin pull-up)";
+  return "LIBRE (lenta)";
+}
+
+static void i2cReportPullups(const char *cuando) {
+  const char *sda = i2cLineState(PIN_I2C_SDA);
+  const char *scl = i2cLineState(PIN_I2C_SCL);
+  Serial.printf("[i2c] bus (%s): SDA=%s  SCL=%s\n", cuando, sda, scl);
+  Serial.flush();
+}
+
 static bool i2cRecoverBus() {
+  i2cReportPullups("antes de Wire.begin");
   pinMode(PIN_I2C_SCL, OUTPUT_OPEN_DRAIN);
   pinMode(PIN_I2C_SDA, INPUT_PULLUP);
   digitalWrite(PIN_I2C_SCL, HIGH);
@@ -1831,6 +1887,31 @@ static bool g_burstDue = false;
 
 void setup() {
   Serial.begin(115200);
+
+  // LO PRIMERO DE TODO, antes de que este firmware haya tocado un solo pin.
+  //
+  // Separa software de hardware sin discusion posible: si SCL ya esta sujeto a
+  // masa AQUI, ningun codigo nuestro lo ha hecho - no ha corrido nada todavia.
+  // Si en cambio aparece libre aqui y sujeto mas adelante, lo sujeta algo que
+  // corre entre los dos puntos, y entonces se puede bisecar.
+  delay(300);  // que el puerto USB llegue a enumerar y se vea esta linea
+  i2cReportPullups("PRIMERA LINEA de setup");
+  {
+    // CORTO DURO o SOLO FALTA LA PULL-UP EXTERNA. El pull-up interno del ESP32
+    // son unos 45 kOhm: no basta para un bus I2C de verdad, pero si para
+    // levantar una linea que simplemente no tiene nada tirando de ella. Si
+    // consigue subirla no hay cortocircuito; si no, la linea esta a masa.
+    pinMode(PIN_I2C_SDA, INPUT_PULLUP);
+    pinMode(PIN_I2C_SCL, INPUT_PULLUP);
+    delay(2);
+    const int sda = digitalRead(PIN_I2C_SDA);
+    const int scl = digitalRead(PIN_I2C_SCL);
+    Serial.printf("[i2c] con pull-up INTERNO: SDA=%s SCL=%s -> %s\n",
+                  sda ? "ALTO" : "BAJO", scl ? "ALTO" : "BAJO",
+                  scl ? "SCL sin corto: solo le falta la pull-up externa"
+                      : "SCL A MASA de verdad: corto o pista a GND");
+    Serial.flush();
+  }
 
   // WAIT FOR A USB HOST ONLY ON A COLD BOOT - never on a timer wake.
   //
@@ -2152,7 +2233,12 @@ void setup() {
   // Threshold raised from 3: while the failure is being reproduced deliberately,
   // a 3-boot trigger hijacks every test run before the interesting output appears.
   g_safeMode = (nvsBoots >= 12);
+  // Medido ANTES y DESPUES de encender los rails. Si el bus esta igual en los dos
+  // momentos, el rail no esta llegando a las pull-up y encenderlo no cambia nada -
+  // que es exactamente la pregunta abierta.
+  i2cReportPullups("ANTES de encender rails");
   enableRails(g_safeMode);
+  i2cReportPullups("DESPUES de encender rails");
 
   // (The bisect stop that used to sit here is gone - it did its job. The answer
   // was that the fault is in what comes AFTER: activating the sensors all at once,
