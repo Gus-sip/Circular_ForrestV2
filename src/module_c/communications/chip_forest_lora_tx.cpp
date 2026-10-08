@@ -742,8 +742,8 @@ RTC_NOINIT_ATTR uint32_t g_txPeriodMsPersist;
 // ---------------------------------------------------------------------------
 //
 // EL PROBLEMA. El nodo no tiene reloj. Durmiendo, el tiempo lo cuenta el
-// oscilador RC interno del ESP32, que tiene entre ±1% y ±2% de error y ademas
-// deriva con la temperatura - que en un bosque cambia 20 °C entre el dia y la
+// oscilador RC interno del ESP32, que tiene entre un 1% y un 2% de error y ademas
+// deriva con la temperatura - que en un bosque cambia 20 grados entre el dia y la
 // noche. Sobre un periodo de 30 minutos eso son 18-36 segundos, y lo peor es que
 // SE ACUMULA: si cada sueno se pasa 18 s, al decimo envio llevas 3 minutos de
 // retraso y sigue creciendo. Una estrategia que dice "mide cada 5 minutos" no
@@ -909,6 +909,11 @@ static const SensorJob kJobs[JOB_COUNT] = {
 // cada despertar, el nodo volveria a medirlo todo cada vez.
 RTC_NOINIT_ATTR uint64_t g_nextDueMs[JOB_COUNT];
 
+// Para que estado se calculo el calendario que hay guardado. En RTC porque en
+// operacion normal cada despertar es un arranque nuevo: una variable normal
+// valdria siempre su valor inicial y re-fasearia en cada despertar.
+RTC_NOINIT_ATTR uint8_t g_schedPhasedForState;
+
 // Multiplicadores de Modulo A. NXT_LECTURA escala TODOS los periodos de sensor,
 // NXT_ENVIO solo el de transmision. Sustituyen a SENSOR_READ / BURST / LORA_TRANS,
 // que contaban ticks y ya no existen.
@@ -984,6 +989,54 @@ static uint64_t schedNextWakeMs(uint8_t state) {
   }
   (void)state;
   return best;
+}
+
+// Que debe ESTE despertar. No va en RTC: se recalcula en cada arranque a partir
+// del calendario, que es lo que si persiste.
+static bool g_jobDue[JOB_COUNT];
+
+static void schedEvaluate() {
+  const uint64_t now = schedNowMs();
+  for (uint8_t j = 0; j < JOB_COUNT; j++) {
+    // El margen de preparacion cuenta como vencido: si al BMV080 le faltan 3 s
+    // para vencer y necesita 8 de arranque, este es el despertar que le toca -
+    // volver a dormir 3 s y despertar otra vez no le daria tiempo.
+    g_jobDue[j] = (now + (uint64_t)kJobs[j].prepMs >= g_nextDueMs[j]);
+  }
+}
+
+static bool schedAnySensorDue() {
+  for (uint8_t j = 0; j < JOB_TX; j++) {  // JOB_TX va el ultimo y no es un sensor
+    if (g_jobDue[j]) return true;
+  }
+  return false;
+}
+
+// Un trabajo ya hecho vuelve a la rejilla: su proximo vencimiento es el siguiente
+// multiplo del reloj, NO "ahora mas el periodo". La diferencia importa - lo
+// segundo acumularia el tiempo que costo la lectura y el calendario se iria
+// desplazando hasta perder la alineacion con los otros nodos.
+static void schedMarkDone(uint8_t job, uint8_t state) {
+  g_nextDueMs[job] =
+      alignedNextDue(schedNowMs(), jobPeriodMs(job, state), jobOffsetMs(job, state));
+}
+
+// Cuanto dormir, en segundos, hasta el proximo despertar.
+static uint32_t schedSleepSeconds(uint8_t state) {
+  const uint64_t now = schedNowMs();
+  const uint64_t wake = schedNextWakeMs(state);
+  const uint64_t deltaReal = (wake > now) ? (wake - now) : 1000ULL;
+
+  // DE TIEMPO REAL A TIEMPO DEL NODO. El nodo duerme contando con su oscilador RC,
+  // y g_clockDrift dice cuantos milisegundos reales vale cada milisegundo que el
+  // cuenta. Para dormir X reales hay que pedirle X/deriva de los suyos. Esta
+  // division es la que convierte la correccion aprendida en precision de verdad:
+  // sin ella el factor se mediria y no se usaria para nada.
+  double nodeMs = (double)deltaReal / (double)g_clockDrift;
+
+  if (nodeMs < 1000.0) nodeMs = 1000.0;          // nunca un sueno de cero
+  if (nodeMs > 3600000.0) nodeMs = 3600000.0;    // tope de 1 h, defensivo
+  return (uint32_t)((nodeMs + 500.0) / 1000.0);  // al segundo mas cercano
 }
 
 // Milliseconds accumulated in pre-alarm, and why it is not just a millis() stamp.
@@ -1198,118 +1251,43 @@ static bool applyConfigCommand(const char *payload, uint8_t len, char *ackPayloa
       // base 3 salen 5 ticks (4.5 redondeado), y lo que importa saber es 5.
       } else if (strcmp(key, "NXT_LECTURA") == 0) {
         // "Cada sensor se lee cada N x su periodo minimo de lectura. N >= 1."
-        // Escala los DOS contadores de lectura a la vez, manteniendo la relacion
-        // entre centinelas y burst que esta disenada a proposito: los baratos
-        // vigilan seguido y los caros confirman de tanto en tanto.
+        //
+        // Con el planificador por tiempo esto es literal: N multiplica los MINUTOS
+        // de la tabla de cada sensor, en los tres estados a la vez. Antes escalaba
+        // dos contadores de ticks, que es lo mismo que queria decir el documento
+        // pero expresado en una unidad que no media tiempo.
         const float n = (float)atof(valueStr);
-        const long sr = lroundf((float)SENSOR_READ_EVERY_DEFAULT * n);
-        const long bu = lroundf((float)BURST_EVERY_DEFAULT * n);
-        if (n < 1.0f) {
-          Serial.printf("[downlink] NXT_LECTURA=%.2f fuera de rango (N >= 1) - ignorado\n",
-                        (double)n);
-          matched = false;
-        } else if (sr < COUNTER_EVERY_MIN || sr > COUNTER_EVERY_MAX ||
-                   bu < COUNTER_EVERY_MIN || bu > COUNTER_EVERY_MAX) {
-          Serial.printf("[downlink] NXT_LECTURA=%.2f da SENSOR_READ=%ld BURST=%ld, "
-                        "fuera de [%d..%d] - ignorado\n",
-                        (double)n, sr, bu, COUNTER_EVERY_MIN, COUNTER_EVERY_MAX);
-          matched = false;
-        } else if (readingsPerPacket((uint16_t)sr, g_loraTransEvery) > READINGS_PER_PACKET_MAX) {
-          // Subir el periodo de lectura mete mas lecturas en cada paquete, igual
-          // que bajarlo haria con SENSOR_READ a secas.
-          Serial.printf("[downlink] NXT_LECTURA=%.2f (SENSOR_READ=%ld) metria %u lecturas "
-                        "por paquete, maximo %d - ignorado\n",
-                        (double)n, sr, (unsigned)readingsPerPacket((uint16_t)sr, g_loraTransEvery),
-                        READINGS_PER_PACKET_MAX);
+        if (n < 1.0f || n > SCHED_MULT_MAX) {
+          Serial.printf("[downlink] NXT_LECTURA=%.2f fuera de [1..%.0f] - ignorado\n",
+                        (double)n, (double)SCHED_MULT_MAX);
           matched = false;
         } else {
-          g_sensorReadEvery = (uint16_t)sr;
-          g_burstEvery = (uint16_t)bu;
-          g_sensorReadCount = 0;
-          g_burstCount = g_burstEvery;  // que el primer burst no se haga esperar
-          snprintf(appliedKv, sizeof(appliedKv), "SENSOR_READ=%ld,BURST=%ld", sr, bu);
+          g_readMultiplier = n;
+          // El calendario viejo se calculo con el multiplicador anterior, asi que
+          // hay que rehacerlo o los periodos nuevos no empezarian hasta que cada
+          // trabajo venciera una vez mas con el viejo.
+          schedRephase(schedNowMs(), g_alarmState, "NXT_LECTURA");
+          Serial.printf("[cfg] NXT_LECTURA=%.2f -> T/H/P cada %lus en estado %u\n",
+                        (double)n, (unsigned long)(jobPeriodMs(JOB_BME_THP, g_alarmState) / 1000UL),
+                        (unsigned)g_alarmState);
+          snprintf(appliedKv, sizeof(appliedKv), "NXT_LECTURA=%.2f", (double)n);
         }
-
       } else if (strcmp(key, "NXT_ENVIO") == 0) {
-        // "Envia cada N x su periodo base de envio. N > 0; con N < 1 envia mas a
-        // menudo que el periodo base." Es independiente de NXT_LECTURA.
+        // "Los datos se mandan cada N x el periodo base de envio." Multiplica los
+        // minutos de la fila ENVIO de la tabla: 30 en normal, 15 en prealarma, 3 en
+        // alarma. N < 1 es legitimo aqui - sirve para pedir envios MAS seguidos.
         const float n = (float)atof(valueStr);
-        const long lt = lroundf((float)LORA_TRANS_EVERY_DEFAULT * n);
-        if (n <= 0.0f) {
-          Serial.printf("[downlink] NXT_ENVIO=%.2f fuera de rango (N > 0) - ignorado\n",
-                        (double)n);
-          matched = false;
-        } else if (lt < COUNTER_EVERY_MIN || lt > COUNTER_EVERY_MAX) {
-          Serial.printf("[downlink] NXT_ENVIO=%.2f da LORA_TRANS=%ld, fuera de [%d..%d] "
-                        "- ignorado\n", (double)n, lt, COUNTER_EVERY_MIN, COUNTER_EVERY_MAX);
-          matched = false;
-        } else if (readingsPerPacket(g_sensorReadEvery, (uint16_t)lt) > READINGS_PER_PACKET_MAX) {
-          Serial.printf("[downlink] NXT_ENVIO=%.2f (LORA_TRANS=%ld) metria %u lecturas por "
-                        "paquete, maximo %d con SENSOR_READ=%u - ignorado\n",
-                        (double)n, lt, (unsigned)readingsPerPacket(g_sensorReadEvery, (uint16_t)lt),
-                        READINGS_PER_PACKET_MAX, (unsigned)g_sensorReadEvery);
+        if (n < SCHED_MULT_MIN || n > SCHED_MULT_MAX) {
+          Serial.printf("[downlink] NXT_ENVIO=%.2f fuera de [%.1f..%.0f] - ignorado\n",
+                        (double)n, (double)SCHED_MULT_MIN, (double)SCHED_MULT_MAX);
           matched = false;
         } else {
-          g_loraTransEvery = (uint16_t)lt;
-          g_loraTransCount = 0;
-          snprintf(appliedKv, sizeof(appliedKv), "LORA_TRANS=%ld", lt);
-        }
-
-      } else if (strcmp(key, "SENSOR_READ") == 0) {
-        long n = atol(valueStr);
-        if (n < COUNTER_EVERY_MIN || n > COUNTER_EVERY_MAX) {
-          Serial.printf("[downlink] SENSOR_READ=%ld out of range [%d..%d] - ignored\n", n,
-                        COUNTER_EVERY_MIN, COUNTER_EVERY_MAX);
-          matched = false;
-        } else if (readingsPerPacket((uint16_t)n, g_loraTransEvery) > READINGS_PER_PACKET_MAX) {
-          // Lowering SENSOR_READ raises the readings per packet just as surely as
-          // raising LORA_TRANS does, so it has to pass the same check.
-          Serial.printf("[downlink] SENSOR_READ=%ld would put %u readings in one packet\n"
-                        "           (max %d with LORA_TRANS=%u) - ignored\n",
-                        n, (unsigned)readingsPerPacket((uint16_t)n, g_loraTransEvery),
-                        READINGS_PER_PACKET_MAX, (unsigned)g_loraTransEvery);
-          matched = false;
-        } else {
-          g_sensorReadEvery = (uint16_t)n;
-          // Reset the counter too: leaving it above a newly lowered threshold would
-          // fire immediately and then look like the setting was ignored.
-          g_sensorReadCount = 0;
-          snprintf(appliedKv, sizeof(appliedKv), "SENSOR_READ=%ld", n);
-        }
-      } else if (strcmp(key, "LORA_TRANS") == 0) {
-        long n = atol(valueStr);
-        if (n < COUNTER_EVERY_MIN || n > COUNTER_EVERY_MAX) {
-          Serial.printf("[downlink] LORA_TRANS=%ld out of range [%d..%d] - ignored\n", n,
-                        COUNTER_EVERY_MIN, COUNTER_EVERY_MAX);
-          matched = false;
-        } else if (readingsPerPacket(g_sensorReadEvery, (uint16_t)n) > READINGS_PER_PACKET_MAX) {
-          Serial.printf("[downlink] LORA_TRANS=%ld would put %u readings in one packet\n"
-                        "           (max %d; with SENSOR_READ=%u the limit is %u) - ignored\n",
-                        n, (unsigned)readingsPerPacket(g_sensorReadEvery, (uint16_t)n),
-                        READINGS_PER_PACKET_MAX, (unsigned)g_sensorReadEvery,
-                        (unsigned)(g_sensorReadEvery * READINGS_PER_PACKET_MAX));
-          matched = false;
-        } else {
-          g_loraTransEvery = (uint16_t)n;
-          g_loraTransCount = 0;
-          snprintf(appliedKv, sizeof(appliedKv), "LORA_TRANS=%ld", n);
-        }
-      } else if (strcmp(key, "BURST") == 0) {
-        // Ticks between runs of the EXPENSIVE sensor group (PM, CO2, gas, wind).
-        // This is the main power/latency dial in the field: 90 ticks = 15 min at
-        // the default 10s tick. Bounded by the same COUNTER_EVERY_* limits as the
-        // other schedules so a fat-fingered value cannot silence the node.
-        long n = strtol(valueStr, nullptr, 10);
-        if (n < COUNTER_EVERY_MIN || n > COUNTER_EVERY_MAX) {
-          Serial.printf("[downlink] BURST=%ld out of range %d..%d - ignored\n", n,
-                        COUNTER_EVERY_MIN, COUNTER_EVERY_MAX);
-          matched = false;
-        } else {
-          g_burstEvery = (uint16_t)n;
-          g_burstCount = 0;
-          Serial.printf("[downlink] burst group now every %ld ticks (%lds)\n", n,
-                        n * (long)SLEEP_CYCLE_SECONDS);
-          snprintf(appliedKv, sizeof(appliedKv), "BURST=%ld", n);
+          g_txMultiplier = n;
+          schedRephase(schedNowMs(), g_alarmState, "NXT_ENVIO");
+          Serial.printf("[cfg] NXT_ENVIO=%.2f -> envio cada %lus en estado %u\n",
+                        (double)n, (unsigned long)(jobPeriodMs(JOB_TX, g_alarmState) / 1000UL),
+                        (unsigned)g_alarmState);
+          snprintf(appliedKv, sizeof(appliedKv), "NXT_ENVIO=%.2f", (double)n);
         }
       } else if (strcmp(key, "ALARM") == 0) {
         // Force-clear from Module A. Setting it is deliberately NOT supported:
@@ -1863,6 +1841,7 @@ void setup() {
     g_readMultiplier = 1.0f;
     g_txMultiplier = 1.0f;
     for (uint8_t j = 0; j < JOB_COUNT; j++) g_nextDueMs[j] = 0;
+    g_schedPhasedForState = ALARM_NORMAL;
     // The reading cache lives in RTC_NOINIT too, so it holds garbage on a true
     // power-on and must be seeded here with everything else.
     g_temp = g_hum = g_pres = g_gas = 0.0f;
@@ -1989,9 +1968,25 @@ void setup() {
     return;  // unreachable
   }
 
-  g_readDue = (g_sensorReadCount >= g_sensorReadEvery);
-  g_txDue = (g_loraTransCount >= g_loraTransEvery);
-  g_burstDue = (g_burstCount >= g_burstEvery);
+  // ---- Que debe este despertar, segun el PLANIFICADOR POR TIEMPO ----
+  //
+  // En arranque en frio el calendario guardado no significa nada: o es basura de
+  // RTC_NOINIT sin inicializar, o es de antes de un corte de corriente y no hay
+  // forma de saber cuanto duro. Se re-fasea desde ahora.
+  //
+  // Y SE FUERZA UNA TRANSMISION. Con la tabla nueva el primer envio caeria hasta
+  // 31 minutos despues de encender el nodo: media hora de silencio desde que lo
+  // enchufas hasta que da senales de vida. Peor aun, la hora de red solo baja en
+  // la ventana de escucha POSTERIOR a una transmision, asi que sin esto el nodo
+  // estaria media hora sin reloj - y por tanto sin poder alinearse.
+  if (isColdBoot()) {
+    schedRephase(schedNowMs(), g_alarmState, "arranque en frio");
+    g_nextDueMs[JOB_TX] = 0;  // vence ya: hablar, conseguir la hora, alinearse
+  }
+  schedEvaluate();
+
+  g_readDue = schedAnySensorDue();
+  g_txDue = g_jobDue[JOB_TX];
 
   // ---- Idle tick: power nothing, go straight back to sleep ----
   // This decision used to live in loop(), which meant every wake first switched on
@@ -2011,8 +2006,12 @@ void setup() {
   // powered. g_burstDue was missed when the burst schedule was added, which would
   // have meant the expensive sensor group never ran on a tick that owed nothing
   // else.
-  if (!g_readDue && !g_txDue && !g_burstDue && !isColdBoot()) {
-    enterDeepSleep("nothing due - no rails powered");
+  if (!g_readDue && !g_txDue && !isColdBoot()) {
+    // Con el planificador por tiempo este caso casi no se da: el nodo despierta
+    // porque ALGO vence, no porque haya pasado un tick. Se conserva como red de
+    // seguridad - un despertar espurio no debe encender ningun rail - y ahora
+    // vuelve a dormir hasta el proximo vencimiento de verdad, no 10 s fijos.
+    enterDeepSleep("nada vence - sin encender rails", schedSleepSeconds(g_alarmState));
     return;  // unreachable: enterDeepSleep does not return
   }
 #else
@@ -2812,7 +2811,7 @@ static const char *alarmStateName(AlarmState st) {
 //
 // Raising is instant and lowering is slow, deliberately: the cost of being late to
 // a fire is not symmetric with the cost of staying alert a few reads too long.
-static void updateAlarmState() {
+static void updateAlarmStateInner() {
 #if FORCE_ALARM_STATE
   // Frozen for a power measurement - no escalation, no clearing, no reading of
   // the sensors at all. See FORCE_ALARM_STATE.
@@ -2880,6 +2879,46 @@ static void updateAlarmState() {
   g_prealarmMs = 0;
   Serial.printf("\n*** dropped to %s after %d clean reads ***\n",
                 alarmStateName((AlarmState)g_alarmState), ALARM_CLEAR_CONSECUTIVE);
+  Serial.flush();
+}
+
+// RE-FASEO AL CAMBIAR DE ESTADO.
+//
+// Cada estado tiene sus propios periodos - el T/H/P pasa de 5 min a 3 y a 1 - asi
+// que el calendario calculado para el estado anterior deja de significar lo que
+// decia en el instante del cambio.
+//
+// Es un ENVOLTORIO y no codigo al final de updateAlarmStateInner() porque esa
+// funcion sale por media docena de `return` distintos; aqui se recoge cualquiera
+// de ellos.
+//
+// El estado al que se faseo vive en RTC: en operacion normal cada despertar es un
+// arranque nuevo, asi que una variable `static` normal valdria 0xFF siempre y
+// re-fasearia en cada despertar, tirando el calendario entero cada vez.
+static void updateAlarmState() {
+  const uint8_t from = g_schedPhasedForState;
+  updateAlarmStateInner();
+  if (g_schedPhasedForState == g_alarmState) return;
+
+  const uint8_t to = g_alarmState;
+  g_schedPhasedForState = to;
+  schedRephase(schedNowMs(), to, "cambio de estado");
+
+  // SUBIR DE ESTADO: medir YA, decision del usuario. Entrar en prealarma significa
+  // que algo cruzo un umbral, y ese es el momento de mirar, no tres minutos
+  // despues. Vencimiento a cero = vence en el acto.
+  //
+  // BAJAR: no se fuerza nada. Volver a normal es precisamente cuando hay que
+  // RE-ALINEARSE al reloj de pared - que es lo que acaba de hacer schedRephase -
+  // para que el nodo vuelva a medir en los mismos instantes que sus hermanos.
+  if (to > from) {
+    for (uint8_t j = 0; j < JOB_TX; j++) g_nextDueMs[j] = 0;
+    Serial.printf("[sched] %s -> %s: lectura inmediata de todo\n",
+                  alarmStateName((AlarmState)from), alarmStateName((AlarmState)to));
+  } else {
+    Serial.printf("[sched] %s -> %s: re-alineado al reloj\n",
+                  alarmStateName((AlarmState)from), alarmStateName((AlarmState)to));
+  }
   Serial.flush();
 }
 
@@ -3471,6 +3510,107 @@ static void readFastSensorsOnce() {
   Serial.flush();
 }
 
+// ---------------------------------------------------------------------------
+//  EJECUCION DE LOS TRABAJOS QUE VENCEN
+// ---------------------------------------------------------------------------
+
+// Lectura rapida del BME690: T/H/P con el calefactor APAGADO.
+//
+// T/H/P sale SIEMPRE de aqui, tambien en los minutos que coinciden con el VOC,
+// aunque la lectura completa tambien los traiga. El calefactor a 320 C calienta el
+// propio chip y sesga su temperatura y su humedad; reaprovecharlos dejaria una de
+// cada cuatro muestras sesgada hacia arriba, y en un detector con el umbral en
+// 50 C un sesgo periodico es peor que pagar 200 ms de lectura aparte.
+static void readBmeFastOnly() {
+  if (!bmeReady || !g_bmeEnabled) return;
+  Reading env = bme690.readFast();
+  g_bmeSt = env.status;
+  if (env.ok()) {
+    g_bmeFresh = true;
+    g_temp = env.values[0];
+    g_hum = env.values[1];
+    g_pres = env.values[2];
+    // g_gas NO se toca a proposito: la rapida no mide gas y deja values[3] a cero
+    // (count es 3 justo para que no se confunda). Copiarlo borraria el ultimo VOC
+    // bueno y lo publicaria como una medida de cero.
+  }
+}
+
+// Que slot sirve a cada trabajo. El BME690 es el unico con DOS trabajos sobre un
+// mismo sensor, y por eso se despacha aparte: el slot completo enciende el
+// calefactor y es el VOC, la rapida es el T/H/P.
+static void readJob(uint8_t job) {
+  switch (job) {
+    case JOB_BME_THP: readBmeFastOnly(); break;
+    case JOB_BME_VOC: runSlot(SLOT_BME690); break;
+    case JOB_CM1106: runSlot(SLOT_CM1106); break;
+    case JOB_SEN0466: runSlot(SLOT_SEN0466); break;
+    case JOB_BMV080: runSlot(SLOT_BMV080); break;
+    case JOB_CALYPSO: runSlot(SLOT_CALYPSO); break;
+    default: break;
+  }
+}
+
+// Ejecuta los trabajos de sensor que vencen en este despertar.
+//
+// EN SERIE Y NUNCA A LA VEZ. Leerlos en paralelo reinicia la placa - 31 reinicios
+// contra 2 en la prueba que lo demostro - asi que el bucle es secuencial y cada
+// trabajo deja su hueco de reposo antes del siguiente. Eso es tambien lo que hace
+// imposible que varias medidas caigan en el mismo instante cuando coinciden: el
+// barrido las reparte, y por eso cada lectura se fecha con su hora real en vez de
+// fingir que todas ocurrieron a la vez.
+static bool runDueSensorJobs(uint8_t state) {
+  bool any = false;
+  const uint32_t t0 = millis();
+
+  for (uint8_t j = 0; j < JOB_TX; j++) {
+    if (!g_jobDue[j]) continue;
+
+    // Techo del despertar. Si un sensor se atasca, los que falten se quedan sin
+    // leer esta vuelta pero su vencimiento NO se mueve: volveran a vencer ya
+    // mismo, en lugar de perderse hasta el siguiente multiplo.
+    if (millis() - t0 >= SENSOR_READ_WINDOW_MS) {
+      Serial.printf("[sched] ventana agotada tras %lums - quedan trabajos sin leer\n",
+                    (unsigned long)(millis() - t0));
+      break;
+    }
+
+    const uint32_t slotT0 = millis();
+    readJob(j);
+    const uint32_t slotMs = millis() - slotT0;
+
+    quiesceAll();
+    // El calefactor es la unica carga lo bastante grande como para impedir que
+    // arranque el sensor siguiente, asi que se le da un ciclo de rail y no un
+    // simple hueco.
+    if (j == JOB_BME_VOC && bmeReady && g_bmeEnabled) {
+      recoverRailsAfterHeater();
+    } else {
+      delay(SLOT_GAP_MS);
+    }
+
+    Serial.printf("[t] %-15s activo=%lums\n", kJobs[j].name, (unsigned long)slotMs);
+    Serial.flush();
+    schedMarkDone(j, state);
+    any = true;
+  }
+
+  if (any) {
+    g_lastReadHealth = (uint8_t)(((g_bmeSt == ReadingStatus::Ok ? 1 : 0) << 4) |
+                                 ((g_bmvSt == ReadingStatus::Ok ? 1 : 0) << 3) |
+                                 ((g_co2St == ReadingStatus::Ok ? 1 : 0) << 2) |
+                                 ((g_coSt == ReadingStatus::Ok ? 1 : 0) << 1) |
+                                 ((g_windValid && g_calFresh) ? 1 : 0));
+    g_lastReadWake = g_wakeCount;
+    Serial.printf("[sched] barrido %lums  T%.1f H%.1f gas%.0f pm2.5=%.1f co2=%.0f "
+                  "co=%.2f viento %.0fdeg/%.2f\n",
+                  (unsigned long)(millis() - t0), g_temp, g_hum, g_gas, g_pm25,
+                  g_co2, g_co, g_windAngle, g_windSpeed);
+    Serial.flush();
+  }
+  return any;
+}
+
 void loop() {
   // A run that lasts this long counts as healthy, so the NVS counter is cleared and
   // the next boot starts from zero. Without this every reflash would eventually
@@ -3560,15 +3700,24 @@ void loop() {
     // up. Becomes live ~3.5 min in, inside the 10-minute confirmation window.
     sen0466MaintainWarmup();
 
-    readFastSensorsOnce();
+    // MISMO PLANIFICADOR QUE EN NORMAL, otros periodos. Antes esta rama leia TODOS
+    // los sensores en cada pasada, lo que ignoraba por completo la tabla por
+    // estado: en alarma el CO2 debe seguir yendo cada 30 min aunque el T/H/P vaya
+    // cada minuto - el CM1106 es el sensor menos fiable que hay y machacarlo no
+    // aporta nada.
+    //
+    // No se duerme: aqui el nodo esta despierto y loop() gira cada SAMPLE_GAP_MS,
+    // asi que el planificador se consulta en cada vuelta en vez de calcular un
+    // sueno.
+    schedEvaluate();
+    const bool algoLeido = runDueSensorJobs(g_alarmState);
     updateAlarmState();
-    storeCurrentReading();
+    if (algoLeido) storeCurrentReading();
 
-    static uint32_t lastAlarmTxMs = 0;
-    if (millis() - lastAlarmTxMs >= ALARM_TX_MIN_GAP_MS) {
-      lastAlarmTxMs = millis();
+    if (g_jobDue[JOB_TX]) {
       transmitStore();
       transmitStatus();
+      schedMarkDone(JOB_TX, g_alarmState);
     }
     delay(SAMPLE_GAP_MS);
     return;  // never falls through to the sleep path while raised
@@ -3599,7 +3748,6 @@ void loop() {
   // Decided in setup(), before anything was powered - see the idle-tick bail-out.
   bool readDue = g_readDue;
   bool txDue = g_txDue;
-  bool burstDue = g_burstDue;
 
   // ALL OF THIS TICK'S WORK RUNS EXACTLY ONCE, however many times loop() is
   // entered.
@@ -3620,40 +3768,31 @@ void loop() {
   if (!tickWorkDone) {
     tickWorkDone = true;
 
-    // Sentinels first - cheap, and the signals that move first in a fire, so the
-    // alarm check sees fresh temperature and CO even on a tick that owes nothing
-    // else.
-    readSentinels();
-
-    // The expensive group on its own slow schedule. Before the alarm check, so a
-    // burst tick decides with particulates and gas included rather than on
-    // sentinels alone.
-    if (burstDue) {
-      g_burstCount = 0;
-      readFastSensorsOnce();
-    }
+    // Solo lo que vence, cada sensor en su turno. Ya no hay "centinelas" ni
+    // "burst": esa division existia para repartir el coste entre ticks, y con
+    // periodos en minutos cada sensor lleva el suyo propio.
+    const bool algoLeido = runDueSensorJobs(g_alarmState);
 
     updateAlarmState();
 
-    // Store on a burst tick (a complete set) or a scheduled read tick. A
-    // sentinel-only tick does not store: it would fill the batch with rows whose
-    // PM and CO2 are just the previous burst's values repeated.
-    if (burstDue || readDue) {
-      g_sensorReadCount = 0;
-      storeCurrentReading();
-    }
+    // Se guarda una fila si se midio algo. A diferencia del esquema por ticks ya
+    // no hay lecturas "parciales que no merecen guardarse": una fila con solo
+    // T/H/P es legitima, porque el resto de sensores no VENCIA - no es que
+    // fallaran.
+    if (algoLeido) storeCurrentReading();
 
     if (txDue) {
-      g_loraTransCount = 0;
-      ledWorking();  // white for the transmit itself
+      ledWorking();  // blanco durante la transmision
       transmitStore();
       transmitStatus();
+      schedMarkDone(JOB_TX, g_alarmState);
     }
 
-    // A burst tick is the only one where the PM and CO2 statuses mean anything, so
-    // the full health check waits for it rather than judging on sentinels alone.
-    if (burstDue && sensorsDegraded()) {
-      Serial.println("[health] a sensor that was expected did not read - LED red");
+    // La salud solo es juzgable cuando han medido los sensores lentos; en un
+    // despertar que solo traia T/H/P, el CO2 "ausente" es lo esperado y no una
+    // averia.
+    if (g_jobDue[JOB_BMV080] && g_jobDue[JOB_CM1106] && sensorsDegraded()) {
+      Serial.println("[health] un sensor que se esperaba no leyo - LED rojo");
       Serial.flush();
       ledTrouble();
     }
@@ -3666,7 +3805,11 @@ void loop() {
     return;  // still inside the reflash window - do not sleep yet
   }
 
-  enterDeepSleep(readDue || txDue ? "tick work done" : "nothing due");
+  // Duerme hasta el PROXIMO VENCIMIENTO menos su preparacion, no una cantidad
+  // fija. Es el cambio que hace que "cada 5 minutos" signifique cinco minutos:
+  // antes se dormian 10 s ADEMAS del trabajo, y el periodo real salia 18,8 s.
+  enterDeepSleep(readDue || txDue ? "trabajo hecho" : "nada vencia",
+                 schedSleepSeconds(g_alarmState));
 
   // Only reachable when SLEEP_ENABLED is 0.
   delay(SAMPLE_GAP_MS);
