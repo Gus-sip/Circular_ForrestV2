@@ -1551,9 +1551,20 @@ static void probeBmeChipId(const char *when) {
       continue;
     }
     if (Wire.requestFrom((int)addr, 1) != 1) {
-      Serial.printf("[bme probe %s] 0x%02X accepted the register write but returned "
-                    "no data\n",
-                    when, addr);
+      // NO DIGAS QUE "ACEPTO LA ESCRITURA". Esto costo una hora de diagnostico el
+      // 2026-10-08: el mensaje anterior afirmaba que el sensor habia reconocido su
+      // direccion, lo que llevo a descartar que estuviera sin alimentar y a buscar
+      // un bus atascado que no existia.
+      //
+      // `endTransmission(false)` NO EJECUTA la transaccion: pide un repeated start,
+      // asi que ESP32 la deja encolada y devuelve 0 porque todavia no ha fallado
+      // nada - no porque nadie haya contestado. El unico dato fiable de que hay
+      // alguien ahi es `probe`, la escritura de longitud cero que SI se ejecuta.
+      Serial.printf("[bme probe %s] 0x%02X sin respuesta a la lectura "
+                    "(addr-probe=%u: %s)\n",
+                    when, addr, (unsigned)probe,
+                    probe == 0 ? "el chip SI acuso su direccion"
+                               : "NADIE acuso esa direccion - sensor ausente o sin alimentar");
       continue;
     }
     uint8_t id = (uint8_t)Wire.read();
@@ -1590,6 +1601,67 @@ static void scanI2C(const char *when) {
 // mid-ramp, and the real cause turned out to be steady-state sensor overlap. Plain
 // writes now, identical to the minimal rail sketch that holds these same rails for
 // 80+ seconds with zero resets.
+// RECUPERACION DEL BUS I2C ANTES DE USARLO.
+//
+// EL SINTOMA QUE LA MOTIVA, visto en C3 el 2026-10-08: los TRES sensores de I2C
+// dan NOT FOUND mientras los dos de UART responden perfectamente, y el log dice
+// que el chip "acepta la escritura de registro pero no devuelve datos", con error
+// 263 (timeout) en la lectura.
+//
+// Esa contradiccion solo tiene una explicacion: SDA PEGADO A NIVEL BAJO. El ACK de
+// I2C se senaliza poniendo SDA bajo, asi que si la linea ya esta baja el maestro
+// lee un ACK que nadie ha dado, y a partir de ahi toda lectura expira. Y afecta a
+// TODOS los dispositivos del bus a la vez, que es exactamente el patron observado:
+// no son tres averias independientes, es el bus.
+//
+// POR QUE SE QUEDA ASI. Un esclavo interrumpido a mitad de transferencia sigue
+// sujetando SDA mientras espera los pulsos de reloj que nunca llegaron. Aqui pasa
+// con facilidad: cada despertar es un reset del maestro, y si cae mientras un
+// sensor estaba transmitiendo, el sensor se queda colgado y el maestro arranca sin
+// saberlo. Un reset no lo arregla - solo un corte de alimentacion del esclavo, o
+// esto.
+//
+// LA CURA es la estandar: darle los pulsos que le faltan. Nueve ciclos de SCL
+// bastan para que termine el byte que tenia a medias y suelte la linea, y despues
+// una condicion de STOP deja el bus en reposo.
+//
+// Devuelve si el bus quedo utilizable. Imprime siempre que haya tenido que actuar,
+// porque un bus que se atasca a menudo es un sintoma por si mismo.
+static bool i2cRecoverBus() {
+  pinMode(PIN_I2C_SCL, OUTPUT_OPEN_DRAIN);
+  pinMode(PIN_I2C_SDA, INPUT_PULLUP);
+  digitalWrite(PIN_I2C_SCL, HIGH);
+  delayMicroseconds(10);
+
+  if (digitalRead(PIN_I2C_SDA) == HIGH) return true;  // bus en reposo, nada que hacer
+
+  Serial.println("[i2c] SDA PEGADO A NIVEL BAJO - recuperando el bus");
+  uint8_t pulsos = 0;
+  for (; pulsos < 9 && digitalRead(PIN_I2C_SDA) == LOW; pulsos++) {
+    digitalWrite(PIN_I2C_SCL, LOW);
+    delayMicroseconds(10);
+    digitalWrite(PIN_I2C_SCL, HIGH);
+    delayMicroseconds(10);
+  }
+
+  const bool libre = (digitalRead(PIN_I2C_SDA) == HIGH);
+  if (libre) {
+    // STOP: SDA sube mientras SCL esta alto. Sin esto algun esclavo puede quedarse
+    // creyendo que la transferencia sigue abierta.
+    pinMode(PIN_I2C_SDA, OUTPUT_OPEN_DRAIN);
+    digitalWrite(PIN_I2C_SDA, LOW);
+    delayMicroseconds(10);
+    digitalWrite(PIN_I2C_SCL, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(PIN_I2C_SDA, HIGH);
+    delayMicroseconds(10);
+  }
+  Serial.printf("[i2c] %u pulsos -> SDA %s\n", (unsigned)pulsos,
+                libre ? "LIBRE" : "SIGUE BAJO (fallo fisico, no un esclavo colgado)");
+  Serial.flush();
+  return libre;
+}
+
 static void enableRails(bool safeMode) {
   pinMode(PIN_PCB_EN_A, OUTPUT);
   pinMode(PIN_PCB_EN_B, OUTPUT);
@@ -2092,6 +2164,9 @@ void setup() {
   }
 
   power.enable3V3Sensors();
+  // Antes de Wire.begin: si un esclavo quedo colgado sujetando SDA de un reset
+  // anterior, el bus esta inservible y Wire no lo detecta - devuelve ACK falsos.
+  i2cRecoverBus();
   Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
 
   scanI2C("after rails, before sensor init");
