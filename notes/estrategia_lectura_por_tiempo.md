@@ -224,3 +224,26 @@ Las claves atadas a ticks que desaparecen: `SENSOR_READ`, `BURST`, `LORA_TRANS`.
 ## Abierto
 - **El T/H/P en los minutos que coinciden con VOC**: reaprovechar la lectura
   completa o tomar una rápida aparte (recomendado lo segundo, ver arriba).
+
+
+## Paso 4: HECHO y verificado en el aire (2026-10-09)
+
+Trama que manda el nodo, con -999 en lo que esa lectura no midio:
+
+    B,6,22.5,39.6,947.5,-999,-999.0,-999.0,-999.0,-999,-999.0,-999.0,-999,-999.0,0,958;
+
+JSON que Modulo B sube a ThingsBoard a partir de ella:
+
+    "values":{"temp":22.50,"rh":39.60,"pres":947.50,"windValid":false,...}
+
+**Las claves ausentes son la respuesta.** gas, pm1, pm25, pm10, co2, co y coTemp no
+viajan porque esa lectura no los midio. Cero centinelas llegaron a ThingsBoard.
+
+Y discrimina bien: la fila siguiente, que si tenia VOC fresco, incluye
+"gas":10959.00 y omite el resto.
+
+C1 y C2 siguen con firmware viejo, mandan todos los campos siempre, y pasan por el
+mismo Modulo B sin doble parser - simplemente nunca producen un -999.
+
+La edad de cada lectura va ahora en SEGUNDOS reales (958, 666, 42 en las tramas de
+arriba) en vez de en numero de despertares multiplicados por NODE_TICK_SECONDS=10.
