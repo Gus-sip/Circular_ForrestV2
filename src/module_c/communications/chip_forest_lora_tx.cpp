@@ -822,18 +822,8 @@ static uint64_t wallNowMs() {
   return g_epochMsAtSync + (uint64_t)((double)elapsed * (double)g_clockDrift);
 }
 
-// Tick counters and their end-user thresholds. Counters advance every tick and
-// reset on reaching their threshold; thresholds arrive by downlink from Module A.
-RTC_NOINIT_ATTR uint16_t g_sensorReadCount;
-RTC_NOINIT_ATTR uint16_t g_loraTransCount;
-// Which sensor the next read tick will service. Survives sleep in RTC memory -
-// if it reset every wake the node would read slot 0 forever and never touch the
-// others.
-RTC_NOINIT_ATTR uint16_t g_slotCursor;
-RTC_NOINIT_ATTR uint16_t g_burstCount;
-RTC_NOINIT_ATTR uint16_t g_burstEvery;
-RTC_NOINIT_ATTR uint16_t g_sensorReadEvery;
-RTC_NOINIT_ATTR uint16_t g_loraTransEvery;
+
+
 
 // One stored reading. Kept in RTC memory so the batch survives deep sleep between
 // the tick that recorded it and the tick that finally transmits it.
@@ -1883,7 +1873,6 @@ static bool isColdBoot();
 static bool g_readDue = false;
 static bool g_txDue = false;
 // The expensive sensor group is due this tick - see BURST_EVERY_DEFAULT.
-static bool g_burstDue = false;
 
 void setup() {
   Serial.begin(115200);
@@ -1985,9 +1974,6 @@ void setup() {
     g_wakeCount = 0;
     g_sleepFlag = 0;
     g_txPeriodMsPersist = LORA_TX_PERIOD_MS;
-    g_sensorReadCount = 0;
-    g_loraTransCount = 0;
-    g_slotCursor = 0;
     // El reloj arranca sin hora y sin deriva conocida. Es lo correcto tras una
     // perdida de corriente: la hora que hubiera guardada seria de antes del corte
     // y no hay forma de saber cuanto duro. El nodo planifica con su tiempo propio
@@ -2022,11 +2008,9 @@ void setup() {
     // Otherwise a freshly powered node spends its first BURST_EVERY_DEFAULT ticks
     // (15 minutes by default) transmitting gas/PM/CO2 as zeros, which is
     // indistinguishable from three dead sensors at the receiving end.
-    g_burstEvery = BURST_EVERY_DEFAULT;
     // A freshly seeded node starts awake. If the pack really is low, the check in
     // setup() puts it straight back into hibernation on this same boot.
     g_hibernating = false;
-    g_burstCount = g_burstEvery;
 
     // EL ESTADO DE ALARMA TAMBIEN HAY QUE SEMBRARLO.
     //
@@ -2047,8 +2031,6 @@ void setup() {
     g_alarmState = ALARM_NORMAL;
     g_prealarmMs = 0;
     g_alarmClearRun = 0;
-    g_sensorReadEvery = SENSOR_READ_EVERY_DEFAULT;
-    g_loraTransEvery = LORA_TRANS_EVERY_DEFAULT;
     g_storeCount = 0;
     g_storeDropped = 0;
     g_alarmState = ALARM_NORMAL;
@@ -2077,17 +2059,26 @@ void setup() {
   // this tick owes. Counting in setup() rather than loop() matters: loop() runs
   // many times per wake, so incrementing there would race through the thresholds
   // in milliseconds instead of once per 10s tick.
-  if (g_burstCount < 0xFFFF) g_burstCount++;
-  if (g_sensorReadCount < 0xFFFF) g_sensorReadCount++;
-  if (g_loraTransCount < 0xFFFF) g_loraTransCount++;
+
   // Reset reason FIRST - before any bail-out can skip it. This costs one line per
   // wake and is the difference between diagnosing a reset and guessing at it.
   Serial.printf("Last reset reason: %d = %s\n", (int)rr, rrName);
   Serial.printf("Node address: %d (Module B sees this as +RCV addr=%d)\n", LORA_MY_ADDR,
                 LORA_MY_ADDR);
-  Serial.printf("Tick: sensor_read %u/%u, lora_trans %u/%u\n",
-                (unsigned)g_sensorReadCount, (unsigned)g_sensorReadEvery,
-                (unsigned)g_loraTransCount, (unsigned)g_loraTransEvery);
+  // Estado del RELOJ, que es de lo que depende el calendario entero.
+  //
+  // Sustituye a la linea "Tick: sensor_read N/M, lora_trans N/M" del planificador
+  // viejo. Esa seguia imprimiendose con contadores que ya no decidian nada, y
+  // hacia creer que el nodo continuaba funcionando por ticks - justo el tipo de
+  // resto que manda un diagnostico por el camino equivocado.
+  if (g_clockSynced) {
+    Serial.printf("Reloj: %lu sincronizaciones, deriva %ld ppm | alarma %u\n",
+                  (unsigned long)g_clockSyncCount,
+                  (long)((g_clockDrift - 1.0f) * 1000000.0f), (unsigned)g_alarmState);
+  } else {
+    Serial.printf("Reloj: SIN sincronizar, planificando con tiempo propio | alarma %u\n",
+                  (unsigned)g_alarmState);
+  }
 
   // Green: woke up. Before the idle bail-out below, so every wake flashes -
   // including the two ticks in three that go straight back to sleep.
@@ -2980,6 +2971,61 @@ static AlarmState evaluateRules(const char **whyOut) {
   return worst;
 }
 
+// QUE REGLA MANTIENE LA ALARMA, y con que numeros.
+//
+// Sin esto el nodo se queda en alarma sin decir por que, que es exactamente lo
+// que paso en C3 el 2026-10-09: nueve minutos en ALARMA DE INCENDIO y ni una
+// linea en el log. Un detector que no sabe explicar su propia alarma no se puede
+// distinguir de uno averiado.
+//
+// Imprime el valor vivo contra el umbral que lo retiene, y NOMBRA las magnitudes
+// que se estan ignorando por falta de dato fresco - que es la otra mitad de la
+// historia: una regla sin dato no retiene nada, pero tampoco confirma nada.
+//
+// Limitado a una linea cada ALARM_WHY_GAP_MS. En alarma el nodo no duerme y
+// evalua en cada vuelta de loop(), asi que sin freno esto inundaria el puerto.
+#define ALARM_WHY_GAP_MS 30000UL
+
+// Definida mas abajo, junto al resto del nombrado de estados.
+static const char *alarmStateName(AlarmState st);
+
+static void reportWhyStillRaised(bool fireLevel) {
+  static uint32_t lastMs = 0;
+  const uint32_t now = millis();
+  if (lastMs != 0 && now - lastMs < ALARM_WHY_GAP_MS) return;
+  lastMs = now;
+
+  char retienen[160];
+  size_t rp = 0;
+  char sinDato[120];
+  size_t sp = 0;
+
+  for (size_t i = 0; i < ALARM_RULE_COUNT; i++) {
+    const AlarmRule &r = kAlarmRules[i];
+    if (!r.enabled) continue;
+
+    if (!ruleHasData(r.source)) {
+      if (sp < sizeof(sinDato) - 24) {
+        sp += snprintf(sinDato + sp, sizeof(sinDato) - sp, "%s%s", sp ? " " : "", r.name);
+      }
+      continue;
+    }
+    if (ruleCleared(r, *r.value, fireLevel, i)) continue;
+
+    const float off = g_thr[i][fireLevel ? THR_ALM_OFF : THR_PRE_OFF];
+    if (rp < sizeof(retienen) - 40) {
+      rp += snprintf(retienen + rp, sizeof(retienen) - rp, "%s%s=%.1f (sale %s %.1f)",
+                     rp ? ", " : "", r.name, (double)*r.value,
+                     r.higherIsWorse ? "bajo" : "sobre", (double)off);
+    }
+  }
+
+  Serial.printf("[alarm] %s SIGUE: %s\n", alarmStateName((AlarmState)g_alarmState),
+                rp ? retienen : "ninguna regla con dato la retiene");
+  if (sp) Serial.printf("[alarm] sin dato fresco, ignoradas: %s\n", sinDato);
+  Serial.flush();
+}
+
 // Are ALL enabled rules back below the OFF threshold for the level we are in?
 // Every rule must agree before a level clears - one still tripped holds it.
 static bool allRulesCleared(bool fireLevel) {
@@ -3051,6 +3097,7 @@ static void updateAlarmStateInner() {
   // Still tripped at the current level - reset the clean-read run.
   if (want >= g_alarmState) {
     g_alarmClearRun = 0;
+    reportWhyStillRaised(g_alarmState == ALARM_FIRE);
     return;
   }
 
@@ -3058,6 +3105,7 @@ static void updateAlarmStateInner() {
   const bool leavingFire = (g_alarmState == ALARM_FIRE);
   if (!allRulesCleared(leavingFire)) {
     g_alarmClearRun = 0;
+    reportWhyStillRaised(leavingFire);
     return;
   }
 
@@ -3545,48 +3593,6 @@ static void recoverRailsAfterHeater() {
   delay(BMV080_STARTUP_DELAY_MS);
 }
 
-// SENTINEL read - every tick, and deliberately cheap.
-//
-// BME690 with the heater OFF (a couple of hundred milliseconds instead of 10.8
-// seconds) plus CO. Nothing here switches a rail or fires a laser, so the whole
-// thing costs roughly what the wake itself costs.
-//
-// The CO sensor is read here only when it is enabled and initialised. It is
-// excluded from the sleeping cycle at present because of its 210s settle - once it
-// is powered continuously (which needs the 5V rail to stay up, a board change) it
-// becomes the fastest signal the node has.
-static void readSentinels() {
-  uint32_t t0 = millis();
-
-  if (bmeReady && g_bmeEnabled) {
-    Reading env = bme690.readFast();
-    g_bmeSt = env.status;
-    if (env.ok()) {
-      g_bmeFresh = true;
-      g_temp = env.values[0];
-      g_hum = env.values[1];
-      g_pres = env.values[2];
-      // gas deliberately NOT written - readFast() takes no gas measurement, and
-      // overwriting the cached value with 0 would look like a collapse to the
-      // alarm logic.
-    }
-  }
-
-  if (sen0466Ready && g_sen0466Enabled) {
-    Reading co = sen0466.read();
-    g_coSt = co.status;
-    if (co.ok()) {
-      g_coFresh = true;
-      g_co = co.values[0];
-      g_coTemp = co.values[1];
-    }
-  }
-
-  Serial.printf("[sentinel] bme=%s(T%.1f H%.1f) co=%s(%.2f)  (%lums)\n",
-                statusName(g_bmeSt), g_temp, g_hum, statusName(g_coSt), g_co,
-                (unsigned long)(millis() - t0));
-  Serial.flush();
-}
 
 // Brings the CO sensor up once the 5V rail has been continuously powered long
 // enough for it to be meaningful. Called on every pass of a state that does not
