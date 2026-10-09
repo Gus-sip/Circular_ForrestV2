@@ -3839,6 +3839,39 @@ static bool runDueSensorJobs(uint8_t state) {
   bool any = false;
   const uint32_t t0 = millis();
 
+  // LAS BANDERAS DE FRESCURA SE LIMPIAN AQUI, Y ESTE ES EL UNICO SITIO.
+  //
+  // clearFreshFlags() existia desde hacia tiempo y NO LA LLAMABA NADIE. En
+  // operacion normal no se notaba: cada despertar es un arranque nuevo y estas
+  // banderas son variables normales, no RTC, asi que nacen a false solas.
+  //
+  // Pero EN ALARMA EL NODO NO DUERME. Sin esta llamada, una bandera puesta a true
+  // al principio del episodio se quedaba asi durante todo el incendio, y a partir
+  // de ahi:
+  //
+  //   * ruleHasData() daba por buena una magnitud que llevaba media hora sin
+  //     leerse, asi que la alarma podia sostenerse - o confirmarse - sobre un
+  //     valor viejo;
+  //   * r.windValid publicaba valid=1 con un viento congelado, que es exactamente
+  //     el fallo que ya se diagnostico en C3 el 2026-10-07 y que el comentario de
+  //     storeCurrentReading describe como "el mismo patron que el co2=663 de C1".
+  //
+  // La proteccion estaba escrita y desconectada, que es la peor de las dos
+  // posibilidades: parece que el problema esta cubierto.
+  //
+  // SOLO SI DE VERDAD SE VA A LEER ALGO, y esto no es un detalle. En alarma el
+  // nodo no duerme y loop() entra aqui cada SAMPLE_GAP_MS, asi que la mayoria de
+  // pasadas no tienen ningun trabajo vencido. Limpiando en todas, ninguna regla
+  // tendria dato fresco, evaluateRules() devolveria NORMAL y allRulesCleared()
+  // diria que si - porque se salta las reglas sin dato - de modo que el contador
+  // de lecturas limpias subiria cada dos segundos y LA ALARMA SE BAJARIA SOLA EN
+  // DIEZ SEGUNDOS, en vez de exigir cinco lecturas reales por debajo del umbral.
+  //
+  // Arreglar la frescura y romper la confirmacion de la alarma en el mismo cambio
+  // habria sido un mal negocio.
+  if (!schedAnySensorDue()) return false;
+  clearFreshFlags();
+
   for (uint8_t j = 0; j < JOB_TX; j++) {
     if (!g_jobDue[j]) continue;
 
