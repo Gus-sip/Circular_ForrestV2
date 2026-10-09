@@ -850,14 +850,26 @@ static uint64_t wallNowMs() {
 
 // One stored reading. Kept in RTC memory so the batch survives deep sleep between
 // the tick that recorded it and the tick that finally transmits it.
+// NO MEDIDO EN ESTA LECTURA. Un sensor que no toca en este instante no publica un
+// numero: publica esto, y Modulo B omite el campo entero en vez de mandar el
+// centinela a ThingsBoard.
+//
+// -999 y no -1 porque la TEMPERATURA puede valer -1 grado de verdad. -999 esta
+// fuera del rango de todos los sensores de la placa (temp -40..85, hum 0..100,
+// pres 300..1100, co2 400..5000), asi que no hay valor legitimo que lo imite.
+#define SIN_MEDIR (-999.0f)
+
 struct StoredReading {
   float temp, hum, pres, gas;
   float pm1, pm25, pm10;
   float co2, co, coTemp;
   float windAngle, windSpeed;
   uint8_t windValid;
-  uint32_t tickAge;  // ticks before the transmit that this was taken - lets the
-                     // receiver reconstruct when, since the node has no clock
+  // CUANDO se tomo, en tiempo propio del nodo (segundos). Antes era la cuenta de
+  // despertares, que Modulo B multiplicaba por NODE_TICK_SECONDS=10 para fechar
+  // la lectura: con los ticks el error era 1,9x y con despertares de 5 minutos
+  // pasa a 30x. En segundos reales no hay nada que adivinar.
+  uint32_t takenS;
 };
 RTC_NOINIT_ATTR StoredReading g_store[READING_STORE_MAX];
 RTC_NOINIT_ATTR uint16_t g_storeCount;
@@ -1134,6 +1146,11 @@ RTC_NOINIT_ATTR bool g_windValid;
 // Set when a sensor returns a good reading; cleared for all sensors immediately
 // after each transmit. These - not a timer - decide when the next packet goes out.
 bool g_bmeFresh = false;
+// El BME690 sirve a DOS trabajos y g_bmeFresh no los distingue: la lectura rapida
+// da T/H/P con el calefactor apagado y NO toca el gas. Sin una bandera propia, una
+// fila de solo temperatura publicaria el ultimo VOC - de hace hasta 20 minutos -
+// como si acabara de medirlo.
+bool g_gasFresh = false;
 bool g_bmvFresh = false;
 bool g_co2Fresh = false;
 bool g_coFresh = false;
@@ -2504,7 +2521,7 @@ static uint8_t pendingSensors(char *out, size_t outCap) {
 }
 
 static void clearFreshFlags() {
-  g_bmeFresh = g_bmvFresh = g_co2Fresh = g_coFresh = g_calFresh = false;
+  g_bmeFresh = g_gasFresh = g_bmvFresh = g_co2Fresh = g_coFresh = g_calFresh = false;
 }
 
 // ---------------- Sequential sensor slots ----------------
@@ -2649,6 +2666,10 @@ static void runSlot(int slot) {
       g_bmeSt = env.status;
       if (env.ok()) {
         g_bmeFresh = true;
+        // ESTE es el unico sitio donde el gas se mide de verdad: la lectura
+        // completa, con el calefactor a 320 C. readBmeFastOnly() deja values[3] a
+        // cero y no toca g_gas ni esta bandera.
+        g_gasFresh = true;
         g_temp = env.values[0];
         g_hum = env.values[1];
         g_pres = env.values[2];
@@ -2779,9 +2800,24 @@ static void storeCurrentReading() {
     g_storeDropped++;
   }
   StoredReading &r = g_store[g_storeCount++];
-  r.temp = g_temp; r.hum = g_hum; r.pres = g_pres; r.gas = g_gas;
-  r.pm1 = g_pm1; r.pm25 = g_pm25; r.pm10 = g_pm10;
-  r.co2 = g_co2;
+
+  // CADA CAMPO LLEVA SU MEDIDA O EL CENTINELA, nunca el valor cacheado de hace
+  // media hora. Las banderas *Fresh las limpia runDueSensorJobs() al empezar cada
+  // barrido y solo las pone el sensor que de verdad leyo, asi que dicen
+  // exactamente "esta lectura midio esto".
+  //
+  // El gas va aparte del resto del BME690 a proposito: son DOS trabajos sobre el
+  // mismo chip, y la lectura rapida de T/H/P deja el gas sin tocar. Sin
+  // g_gasFresh, una fila de solo temperatura publicaria el ultimo VOC como si
+  // acabara de medirlo.
+  r.temp = g_bmeFresh ? g_temp : SIN_MEDIR;
+  r.hum = g_bmeFresh ? g_hum : SIN_MEDIR;
+  r.pres = g_bmeFresh ? g_pres : SIN_MEDIR;
+  r.gas = g_gasFresh ? g_gas : SIN_MEDIR;
+  r.pm1 = g_bmvFresh ? g_pm1 : SIN_MEDIR;
+  r.pm25 = g_bmvFresh ? g_pm25 : SIN_MEDIR;
+  r.pm10 = g_bmvFresh ? g_pm10 : SIN_MEDIR;
+  r.co2 = g_co2Fresh ? g_co2 : SIN_MEDIR;
 
   // A SENSOR THAT IS NOT READ MUST NOT PUBLISH A NUMBER.
   //
@@ -2794,10 +2830,15 @@ static void storeCurrentReading() {
   //
   // -1 is already the payload's sentinel for "not reported" - chargePct, capMv and
   // alarmState all use it - so Module B and the dashboard need no new vocabulary.
-  const bool coMeasured = sen0466Ready && g_sen0466Enabled;
-  r.co = coMeasured ? g_co : -1.0f;
-  r.coTemp = coMeasured ? g_coTemp : -1.0f;
-  r.windAngle = g_windAngle; r.windSpeed = g_windSpeed;
+  // El CO ya usaba un centinela, pero era -1 y ademas solo miraba si el sensor
+  // estaba habilitado, no si habia leido en ESTE barrido. Ahora las dos cosas.
+  const bool coMeasured = sen0466Ready && g_sen0466Enabled && g_coFresh;
+  r.co = coMeasured ? g_co : SIN_MEDIR;
+  r.coTemp = coMeasured ? g_coTemp : SIN_MEDIR;
+
+  const bool vientoMedido = g_calypsoEnabled && g_calFresh && g_windValid;
+  r.windAngle = vientoMedido ? g_windAngle : SIN_MEDIR;
+  r.windSpeed = vientoMedido ? g_windSpeed : SIN_MEDIR;
 
   // UN DATO VIEJO NO ES UN DATO VALIDO.
   //
@@ -2816,7 +2857,7 @@ static void storeCurrentReading() {
   // g_windValid), asi que el fuego nunca estuvo en juego - lo que mentia era la
   // telemetria que ve el operador.
   r.windValid = (g_windValid && g_calFresh) ? 1 : 0;
-  r.tickAge = g_wakeCount;  // absolute tick; converted to an age at transmit time
+  r.takenS = (uint32_t)(nodeNowMs() / 1000ULL);  // absolute tick; converted to an age at transmit time
   Serial.printf("[store] reading %u/%u kept (tick %lu)\n", (unsigned)g_storeCount,
                 (unsigned)READING_STORE_MAX, (unsigned long)g_wakeCount);
 }
@@ -3259,7 +3300,11 @@ static void transmitStore() {
       while (sent < g_storeCount) {
         const StoredReading &r = g_store[sent];
         char one[176];
-        uint32_t age = (g_wakeCount >= r.tickAge) ? (g_wakeCount - r.tickAge) : 0;
+        // EDAD EN SEGUNDOS REALES, no en despertares. El nodo ya sabe cuanto
+        // tiempo ha pasado de verdad - lo cuenta nodeNowMs() y lo corrige la
+        // deriva aprendida - asi que Modulo B no tiene que adivinar nada.
+        const uint32_t ahoraS = (uint32_t)(nodeNowMs() / 1000ULL);
+        uint32_t age = (ahoraS >= r.takenS) ? (ahoraS - r.takenS) : 0;
         int oneLen = snprintf(one, sizeof(one),
                               "%.1f,%.1f,%.1f,%.0f,%.1f,%.1f,%.1f,%.0f,%.1f,%.1f,%.0f,%.1f,%d,%lu;",
                               r.temp, r.hum, r.pres, r.gas, r.pm1, r.pm25, r.pm10, r.co2, r.co,

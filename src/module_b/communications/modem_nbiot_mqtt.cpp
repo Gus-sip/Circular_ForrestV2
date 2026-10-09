@@ -1873,17 +1873,55 @@ size_t ModemNBIoTMqtt::buildGatewayPayload(uint8_t *out, size_t cap, uint8_t max
       if (!firstReading) append(",");
       firstReading = false;
 
+      // UN CAMPO QUE EL NODO NO MIDIO NO VIAJA.
+      //
+      // El nodo manda -999 en los campos que esa lectura concreta no midio. El
+      // CM1106 va cada 30 min y el VOC del BME690 cada 20, asi que la mayoria de
+      // filas no llevan CO2 ni gas. Antes el nodo repetia el ultimo valor
+      // conocido, lo que hacia INDISTINGUIBLE "el CO2 no se movio" de "nadie miro
+      // el CO2" - el mismo fallo que el viento congelado y el co2=663 fantasma de
+      // C1, que costo dias de no entender nada.
+      //
+      // Y reenviar el -999 seria aun peor que repetir: la grafica lo pintaria como
+      // una medida de -999 ppm. Se OMITE la clave, que es lo que de verdad
+      // ocurrio, y ThingsBoard lo trata bien - no registra punto para esa serie en
+      // ese instante.
       char keys[500];  // +3 keys for chargePct/capMv/alarmState
-      snprintf(keys, sizeof(keys),
-               "{"
-               "\"temp\":%.2f,\"rh\":%.2f,\"pres\":%.2f,\"gas\":%.2f,"
-               "\"pm1\":%.2f,\"pm25\":%.2f,\"pm10\":%.2f,\"co2\":%.2f,"
-               "\"co\":%.2f,\"coTemp\":%.2f,\"windAngle\":%.2f,\"windSpeed\":%.2f,"
-               "\"windValid\":%s,\"rssi\":%d,\"snr\":%d,"
-               "\"chargePct\":%d,\"capMv\":%d,\"alarmState\":%d}",
-               snap.temp, snap.hum, snap.pres, snap.gas, snap.pm1, snap.pm25, snap.pm10, snap.co2, snap.co,
-               snap.coTemp, snap.windAngle, snap.windSpeed, snap.windValid ? "true" : "false", (int)snap.rssi,
-               (int)snap.snr, (int)snap.chargePct, (int)snap.capMv, (int)snap.alarmState);
+      int kn = 0;
+      keys[kn++] = '{';
+      keys[kn] = '\0';
+#define SIN_MEDIR_B(v) ((v) < -900.0f)
+#define CLAVE_F(nombre, valor)                                                        \
+  do {                                                                                \
+    if (!SIN_MEDIR_B(valor)) {                                                        \
+      kn += snprintf(keys + kn, sizeof(keys) - (size_t)kn, "%s\"" nombre "\":%.2f",    \
+                     (kn > 1) ? "," : "", (double)(valor));                            \
+    }                                                                                 \
+  } while (0)
+
+      CLAVE_F("temp", snap.temp);
+      CLAVE_F("rh", snap.hum);
+      CLAVE_F("pres", snap.pres);
+      CLAVE_F("gas", snap.gas);
+      CLAVE_F("pm1", snap.pm1);
+      CLAVE_F("pm25", snap.pm25);
+      CLAVE_F("pm10", snap.pm10);
+      CLAVE_F("co2", snap.co2);
+      CLAVE_F("co", snap.co);
+      CLAVE_F("coTemp", snap.coTemp);
+      CLAVE_F("windAngle", snap.windAngle);
+      CLAVE_F("windSpeed", snap.windSpeed);
+#undef CLAVE_F
+#undef SIN_MEDIR_B
+
+      // Estos van SIEMPRE: no son medidas de sensor sino el estado del enlace y de
+      // la placa, y ahi la ausencia si seria una perdida de informacion.
+      kn += snprintf(keys + kn, sizeof(keys) - (size_t)kn,
+                     "%s\"windValid\":%s,\"rssi\":%d,\"snr\":%d,"
+                     "\"chargePct\":%d,\"capMv\":%d,\"alarmState\":%d}",
+                     (kn > 1) ? "," : "", snap.windValid ? "true" : "false",
+                     (int)snap.rssi, (int)snap.snr, (int)snap.chargePct, (int)snap.capMv,
+                     (int)snap.alarmState);
 
       if (_haveNetTime) {
         int64_t ts = _netEpochMsAtSync + (int64_t)(int32_t)(snap.lastHeardMs - _netSyncLocalMs);

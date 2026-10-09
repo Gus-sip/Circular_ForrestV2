@@ -114,10 +114,29 @@ static void handleHistory() {
 
   for (uint16_t i = 0; i < g_historyCount; i++) {
     const SensorSnapshot &s = g_history[(g_historyHead + i) % LORA_HISTORY_CAPACITY];
-    char row[110];
-    snprintf(row, sizeof(row), "%lu,%u,%d,%d,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d\n",
-             (unsigned long)s.lastHeardMs, s.senderAddr, s.rssi, s.snr, s.temp, s.hum, s.pres, s.gas, s.pm1,
-             s.pm25, s.pm10, s.co2, s.co, s.coTemp, s.windAngle, s.windSpeed, s.windValid ? 1 : 0);
+
+    // UN CAMPO NO MEDIDO SALE VACIO, no como -999.
+    //
+    // El nodo manda -999 en los campos que esa lectura no midio - el CO2 va cada
+    // 30 min y el VOC cada 20 - y volcarlo tal cual al CSV seria peor que inutil:
+    // una columna con -999 entre valores reales se promedia, se grafica y
+    // arruina la serie sin avisar. La celda vacia es la convencion que Excel y
+    // pandas ya entienden como "aqui no hubo dato".
+    char f[12][12];
+    const float vals[12] = {s.temp, s.hum,  s.pres, s.gas,       s.pm1,       s.pm25,
+                            s.pm10, s.co2,  s.co,   s.coTemp,    s.windAngle, s.windSpeed};
+    for (int k = 0; k < 12; k++) {
+      if (vals[k] < -900.0f) {
+        f[k][0] = '\0';
+      } else {
+        snprintf(f[k], sizeof(f[k]), "%.2f", (double)vals[k]);
+      }
+    }
+
+    char row[180];
+    snprintf(row, sizeof(row), "%lu,%u,%d,%d,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%d\n",
+             (unsigned long)s.lastHeardMs, s.senderAddr, s.rssi, s.snr, f[0], f[1], f[2], f[3],
+             f[4], f[5], f[6], f[7], f[8], f[9], f[10], f[11], s.windValid ? 1 : 0);
     append(row);
   }
 
@@ -527,7 +546,18 @@ void loop() {
       // Backdate by the record's age so a batched reading is timestamped when it
       // was TAKEN, not when the packet happened to arrive. Single readings have
       // age 0 and are unaffected.
-      uint32_t ageMs = (uint32_t)ages[b] * (uint32_t)NODE_TICK_SECONDS * 1000UL;
+      // LA EDAD VIENE EN SEGUNDOS REALES, medidos por el propio nodo.
+      //
+      // Antes se multiplicaba por NODE_TICK_SECONDS = 10, asumiendo que el nodo
+      // contaba en ticks de 10 s. El tick real eran 18,8 s - un error del 88% que
+      // comprimia todo el historico casi a la mitad - y con el planificador por
+      // TIEMPO los despertares pasaron a ser de 5 MINUTOS, con lo que el error se
+      // fue a 30x. El rediseno empeoro el bug hasta hacerlo imposible de ignorar.
+      //
+      // Ahora el nodo manda cuantos SEGUNDOS hace que tomo cada lectura, contados
+      // con su propio reloj y corregidos por la deriva que aprende de Modulo B.
+      // Aqui no hay nada que adivinar.
+      uint32_t ageMs = (uint32_t)ages[b] * 1000UL;
       snap.lastHeardMs = millis() - ageMs;
       snap.senderAddr = msg.senderAddr;
       snap.rssi = msg.rssi;
