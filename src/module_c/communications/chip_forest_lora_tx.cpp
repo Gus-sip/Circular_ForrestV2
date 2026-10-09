@@ -589,9 +589,30 @@ static bool railsArePowered() { return g_railsUp; }
 #define READINGS_PER_PACKET_MAX 3
 #define BATCH_READING_WORST_BYTES 70
 
-// One more than the packet maximum, purely as headroom so a mid-cycle change to
-// the counters cannot overrun the array before the next transmit drains it.
-#define READING_STORE_MAX (READINGS_PER_PACKET_MAX + 1)
+// CUANTAS LECTURAS CABEN ESPERANDO AL PROXIMO ENVIO.
+//
+// Valia READINGS_PER_PACKET_MAX + 1 = 4, dimensionado para el planificador por
+// ticks, donde la relacion entre leer y transmitir se validaba para que un lote
+// cupiera siempre en UN paquete.
+//
+// Con los periodos en tiempo real esa cuenta ya no sale, y el 2026-10-09 se vio
+// perdiendo datos en el nodo: el log decia "[store] reading 4/4 kept" y aun
+// faltaban dos lecturas para el envio.
+//
+//   estado      lectura mas rapida   envio    lecturas acumuladas
+//   NORMAL          5 min            30 min          6     <- no caben en 4
+//   PREALARMA       3 min            15 min          5     <- tampoco
+//   ALARMA          1 min             3 min          3
+//
+// Ocho cubre el peor caso con margen. NO hay que confundirlo con el limite del
+// paquete: transmitStore() ya parte el lote en varios paquetes cuando no cabe en
+// los 240 bytes del RYLR998, asi que almacenar mas no obliga a enviar mas en uno.
+//
+// El margen importa porque los periodos son modificables en caliente desde Modulo
+// A: NXT_LECTURA y NXT_ENVIO pueden empeorar la relacion sin que nadie recompile.
+// g_storeDropped cuenta lo que se pierda si aun asi se desborda, y el envio lo
+// reporta - esa es la red de seguridad, no este numero.
+#define READING_STORE_MAX 8
 
 // Readings a given counter pair would accumulate between transmits.
 static uint16_t readingsPerPacket(uint16_t sensorReadEvery, uint16_t loraTransEvery) {
@@ -723,10 +744,12 @@ RYLR998 radio(Serial0, LORA_RX_PIN, LORA_TX_PIN);  // UART0 is free - UART1/UART
 // deriva, asi que una deriva basura da un sueno arbitrario, y el planificador
 // nunca llego a re-fasear - en el log no aparecia ni una linea [sched].
 //
+// 0xC0FFEE09: READING_STORE_MAX de 4 a 8, y fuera los contadores de tick. Las dos
+//             cosas mueven las direcciones de todo lo que viene despues.
 // 0xC0FFEE08: planificador por tiempo (g_nextDueMs, multiplicadores,
 //             g_schedPhasedForState) y reloj (g_nodeBaseMs, g_clockDrift, ...)
 // 0xC0FFEE07: g_thr[][] sembrado desde kAlarmRules
-#define BOOTCOUNT_MAGIC 0xC0FFEE08UL
+#define BOOTCOUNT_MAGIC 0xC0FFEE09UL
 RTC_NOINIT_ATTR uint32_t g_bootMagic;
 RTC_NOINIT_ATTR uint32_t g_bootCount;
 
@@ -2257,12 +2280,23 @@ void setup() {
   scanI2C("after rails, before sensor init");
   probeBmeChipId("right after scan");
 
-  Serial.printf("Waiting %dms for BMV080 startup...\n", BMV080_STARTUP_DELAY_MS);
-  delay(BMV080_STARTUP_DELAY_MS);
+  // SOLO SI EL BMV080 VA A LEERSE. Son cinco segundos, y pagarlos en un
+  // despertar que solo viene a por la temperatura retrasa esa temperatura cinco
+  // segundos sobre el instante en el que tenia que existir.
+  if (g_jobDue[JOB_BMV080]) {
+    Serial.printf("Waiting %dms for BMV080 startup...\n", BMV080_STARTUP_DELAY_MS);
+    delay(BMV080_STARTUP_DELAY_MS);
+  }
 
   probeBmeChipId("after BMV080 wait, before begin");
-  step("bme690.begin");
-  bmeReady = bme690.begin();
+  // El BME690 sirve a DOS trabajos sobre el mismo chip - T/H/P con el calefactor
+  // apagado y VOC con el encendido - asi que arranca si vence cualquiera.
+  if (g_jobDue[JOB_BME_THP] || g_jobDue[JOB_BME_VOC]) {
+    step("bme690.begin");
+    bmeReady = bme690.begin();
+  } else {
+    bmeReady = false;
+  }
   // begin() tries the configured address then the alternate, so print which one it
   // settled on - "OK" alone cannot tell 0x76 from 0x77.
   if (bmeReady) {
@@ -2287,8 +2321,10 @@ void setup() {
   sen0466Ready = false;
   Serial.println("SEN0466: SKIPPED (210s settle - excluded from the sleeping cycle)");
 #else
-  step("sen0466.begin");
-  sen0466Ready = sen0466.begin();
+  if (g_jobDue[JOB_SEN0466]) {
+    step("sen0466.begin");
+    sen0466Ready = sen0466.begin();
+  }
   Serial.println(sen0466Ready ? "SEN0466: OK" : "SEN0466: NOT FOUND");
 #endif
 
@@ -2299,12 +2335,20 @@ void setup() {
   //   reset moves to bmv080.begin()  -> cumulative load, both together exceed the supply
   //   reset disappears entirely      -> an inrush/settling timing bug in the sequencing
   // Revert this once the answer is in; it is a probe, not a fix.
-  step("cm1106.begin (SWAPPED: now before bmv080)");
-  cm1106.begin();
-  step("cm1106.begin returned");
+  // El CM1106 hace un ciclo de alimentacion y espera su calentamiento en begin(),
+  // asi que tambien cuesta segundos que no hay que pagar si no vence.
+  if (g_jobDue[JOB_CM1106]) {
+    step("cm1106.begin (SWAPPED: now before bmv080)");
+    cm1106.begin();
+    step("cm1106.begin returned");
+  }
 
-  step("bmv080.begin (SWAPPED: now after cm1106)");
-  bmvReady = bmv080.begin();
+  if (g_jobDue[JOB_BMV080]) {
+    step("bmv080.begin (SWAPPED: now after cm1106)");
+    bmvReady = bmv080.begin();
+  } else {
+    bmvReady = false;
+  }
   if (bmvReady) {
     Serial.println("BMV080: OK");
   } else {
@@ -3741,6 +3785,37 @@ static void readBmeFastOnly() {
 // mismo sensor, y por eso se despacha aparte: el slot completo enciende el
 // calefactor y es el VOC, la rapida es el T/H/P.
 static void readJob(uint8_t job) {
+  // ARRANQUE PEREZOSO. setup() solo inicializa los sensores que vencian en ESE
+  // despertar, asi que uno que venza mas tarde - al escalar a alarma, donde todos
+  // vencen de golpe y el nodo ya no vuelve a pasar por setup() - llegaria aqui sin
+  // arrancar. Sin esto, un episodio de incendio se mediria con los dos o tres
+  // sensores que tocaban por calendario en vez de con los cinco.
+  switch (job) {
+    case JOB_BME_THP:
+    case JOB_BME_VOC:
+      if (!bmeReady && g_bmeEnabled) {
+        Serial.println("[sched] BME690 no estaba arrancado - arrancando ahora");
+        bmeReady = bme690.begin();
+      }
+      break;
+    case JOB_SEN0466:
+      if (!sen0466Ready && g_sen0466Enabled) {
+        Serial.println("[sched] SEN0466 no estaba arrancado - arrancando ahora");
+        sen0466Ready = sen0466.begin();
+      }
+      break;
+    case JOB_BMV080:
+      if (!bmvReady && g_bmvEnabled) {
+        Serial.println("[sched] BMV080 no estaba arrancado - arrancando ahora");
+        // Su espera de arranque tambien se salto en setup(), asi que se paga aqui.
+        delay(BMV080_STARTUP_DELAY_MS);
+        bmvReady = bmv080.begin();
+      }
+      break;
+    default:
+      break;
+  }
+
   switch (job) {
     case JOB_BME_THP: readBmeFastOnly(); break;
     case JOB_BME_VOC: runSlot(SLOT_BME690); break;
