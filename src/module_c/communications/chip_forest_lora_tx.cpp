@@ -744,12 +744,19 @@ RYLR998 radio(Serial0, LORA_RX_PIN, LORA_TX_PIN);  // UART0 is free - UART1/UART
 // deriva, asi que una deriva basura da un sueno arbitrario, y el planificador
 // nunca llego a re-fasear - en el log no aparecia ni una linea [sched].
 //
+// 0xC0FFEE0A: StoredReading.tickAge pasa a takenS. MISMO TAMANO, OTRO SIGNIFICADO:
+//             antes era una cuenta de despertares y ahora son segundos del reloj
+//             propio del nodo. Como el tamano no cambia, la RTC sobrevivia al
+//             reflasheo y el almacen arrastraba lecturas viejas que se leian con
+//             el significado nuevo - visto en vivo: edades de 26906 s para
+//             lecturas de hace un minuto. Hay que subirlo tambien cuando cambia lo
+//             que un campo SIGNIFICA, no solo cuando cambia la disposicion.
 // 0xC0FFEE09: READING_STORE_MAX de 4 a 8, y fuera los contadores de tick. Las dos
 //             cosas mueven las direcciones de todo lo que viene despues.
 // 0xC0FFEE08: planificador por tiempo (g_nextDueMs, multiplicadores,
 //             g_schedPhasedForState) y reloj (g_nodeBaseMs, g_clockDrift, ...)
 // 0xC0FFEE07: g_thr[][] sembrado desde kAlarmRules
-#define BOOTCOUNT_MAGIC 0xC0FFEE09UL
+#define BOOTCOUNT_MAGIC 0xC0FFEE0AUL
 RTC_NOINIT_ATTR uint32_t g_bootMagic;
 RTC_NOINIT_ATTR uint32_t g_bootCount;
 
