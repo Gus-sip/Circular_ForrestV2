@@ -37,6 +37,14 @@ public:
   // sentence yet" (>0).
   uint16_t lastReadBytes() const { return _lastReadBytes; }
 
+  // La ultima trama MWV que paso el checksum, TAL CUAL llego.
+  //
+  // Hace falta porque el sensor puede emitir tramas perfectamente validas cuyo
+  // contenido sea cero: eso no se distingue de un fallo de parseo mirando solo el
+  // valor. Con la trama cruda delante se ve de inmediato si el cero lo dijo el
+  // sensor o lo invento este driver leyendo el campo equivocado.
+  const char *lastFrame() const { return _lastFrame; }
+
 private:
   static constexpr uint8_t kLineMax = 120;
 
@@ -46,6 +54,7 @@ private:
   char _line[kLineMax + 1] = {0};
   uint8_t _lineLen = 0;
   uint16_t _lastReadBytes = 0;
+  char _lastFrame[kLineMax + 1] = {0};
 
   static bool checksumOk(const char *sentence, uint8_t len, int starIdx);
 };

@@ -707,6 +707,24 @@ static const gpio_num_t kHeldGates[] = {(gpio_num_t)PIN_PCB_EN_A, (gpio_num_t)PI
 // returns almost immediately.
 #define CALYPSO_READ_WINDOW_MS 1500
 
+// CUANTO TARDA EL CALYPSO EN ESTAR MIDIENDO desde que recibe alimentacion.
+//
+// Es un anemometro ultrasonico y cuelga del rail de 5V CONMUTADO: pierde la
+// corriente en cada sueno y arranca de cero en cada despertar. Antes de emitir
+// una medida real ejecuta un autotest de varios segundos.
+//
+// 20 s es el valor que usa calypso_probe.cpp, elegido con margen cuando se
+// descubrio que el sensor parecia muerto solo porque se le preguntaba pronto. NO
+// esta medido con precision: la traza [calypso] que ahora imprime cada lectura
+// dice cuanto llevaba encendido el rail cuando llego la primera trama valida, y
+// con unas cuantas se puede ajustar este numero a lo que de verdad necesita.
+//
+// Esto NO se espera dentro del slot: se le suma a la PREPARACION del trabajo, de
+// modo que el nodo despierta antes y para cuando llega el minuto pedido el sensor
+// ya esta emitiendo. Esperar dentro del slot moveria la medida fuera de su
+// instante, que es justo lo que la estrategia quiere evitar.
+#define CALYPSO_BOOT_MS 20000UL
+
 PowerManager power;
 
 Bme690Sensor bme690(BME690_I2C_ADDR);
@@ -947,7 +965,7 @@ static const SensorJob kJobs[JOB_COUNT] = {
     {"CM1106_CO2",    {  30,   30,   30},       4000UL,                   0},
     {"SEN0466_CO",    {  30,   10,    5},        500UL,                   0},
     {"BMV080_PM",     {  30,   10,    5},       8000UL,                   0},
-    {"Calypso_viento",{   5,    5,    5},       1500UL,                   0},
+    {"Calypso_viento",{   5,    5,    5}, CALYPSO_BOOT_MS + CALYPSO_READ_WINDOW_MS, 0},
     {"ENVIO",         {  30,   15,    3},        500UL, TX_OFFSET_NORMAL_MS},
 };
 
@@ -2769,8 +2787,30 @@ static void runSlot(int slot) {
 
     case SLOT_CALYPSO: {
       if (!g_calypsoEnabled) break;
-      // Streams NMEA unprompted - drop the stale buffer, then poll briefly for a
-      // fresh checksum-valid $--MWV.
+
+      // HAY QUE ESPERAR A QUE EL SENSOR ARRANQUE, no solo a que llegue una trama.
+      //
+      // El Calypso es un anemometro ULTRASONICO y cuelga del rail de 5V
+      // CONMUTADO, asi que pierde la alimentacion en cada sueno y vuelve a
+      // arrancar de cero en cada despertar. Antes de emitir nada ejecuta un
+      // autotest de varios segundos, y lo primero que emite puede ser una trama
+      // valida con CEROS - medida sin medir todavia.
+      //
+      // Eso es exactamente lo que estabamos publicando. Medido el 2026-10-09 en
+      // una captura limpia de 75 min: cinco de siete lecturas agotaron la ventana
+      // sin recibir nada, y las dos que si recibieron dieron 0,00 m/s con validez
+      // 1 - mientras habia viento real. El sensor no estaba roto: le preguntabamos
+      // 1,5 s despues de encenderlo.
+      //
+      // El comentario de calypso_probe.cpp ya lo habia anticipado palabra por
+      // palabra: "la espera previa de 1,5 s mas 4 s de escucha habria cerrado la
+      // ventana antes de que el sensor dijera su primera palabra - produciendo
+      // exactamente el resultado de cero bytes que vimos, sin que nada este mal".
+      //
+      // LA SOLUCION NO ES ESPERAR AQUI, sino despertar antes: el planificador le
+      // da ahora CALYPSO_BOOT_MS de preparacion, asi que para cuando se ejecuta
+      // este slot el sensor lleva ya ese tiempo alimentado. Esperar aqui moveria
+      // la medida fuera del minuto pedido, que es justo lo que no se quiere.
       calypso.flushInput();
       Reading wind;
       uint32_t t0 = millis();
@@ -2780,6 +2820,23 @@ static void runSlot(int slot) {
         delay(10);
       } while (millis() - t0 < CALYPSO_READ_WINDOW_MS);
       g_calSt = wind.status;
+
+      // CUANTO LLEVABA ENCENDIDO. Sirve para ajustar CALYPSO_BOOT_MS con un dato
+      // en vez de con el 20 s a ojo que usa la sonda: si las tramas validas
+      // aparecen siempre pasados N segundos, ese N es el tiempo de arranque real.
+      Serial.printf("[calypso] rail lleva %lums encendido, escuche %lums -> %s",
+                    (unsigned long)millis(), (unsigned long)(millis() - t0),
+                    wind.ok() ? "TRAMA VALIDA" : "sin trama");
+      if (wind.ok()) {
+        Serial.printf(" ang=%.1f vel=%.2f valid=%d", (double)wind.values[0],
+                      (double)wind.values[1], (int)(wind.values[2] > 0.5f));
+        // LA TRAMA CRUDA. Es lo unico que distingue "el sensor dice cero" de
+        // "este driver lee el campo equivocado".
+        Serial.printf("\n[calypso] trama: %s", calypso.lastFrame());
+      }
+      Serial.println();
+      Serial.flush();
+
       if (wind.ok()) {
         g_calFresh = true;
         calypsoEverSeen = true;  // only now does it join the readiness gate
