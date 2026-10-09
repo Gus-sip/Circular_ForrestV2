@@ -152,8 +152,33 @@ void loop() {
   Serial.println("--- BME690 por chip ID ---");
   preguntarBme(0x76);
   preguntarBme(0x77);
+  // EL PIN "ENABLE" DEL BMV080, PROBADO EN LOS TRES ESTADOS.
+  //
+  // Por que importa: el firmware de produccion pone GPIO15 a LOW y el SDK falla al
+  // escribir; esta prueba aislada NO tocaba ese pin y las escrituras crudas si
+  // pasaban. Si la diferencia esta ahi, GPIO15 no es un enable activo-bajo sino un
+  // reset o un selector de modo, y ponerlo bajo deja el chip presente pero mudo.
+  //
+  // Se prueba el ciclo entero en cada vuelta, con el bus reiniciado entre estados,
+  // para que se pueda comparar las tres filas de un vistazo.
   Serial.println("--- BMV080 crudo, sin SDK ---");
-  for (uint8_t a : {0x57, 0x56, 0x55, 0x54}) probarBmv(a);
+  struct {
+    const char *que;
+    int modo;  // 0 = al aire, 1 = LOW, 2 = HIGH
+  } estados[] = {{"GPIO15 AL AIRE  ", 0}, {"GPIO15 a LOW    ", 1}, {"GPIO15 a HIGH   ", 2}};
+
+  for (auto &e : estados) {
+    if (e.modo == 0) {
+      pinMode(PIN_BMV080_EN, INPUT);
+    } else {
+      pinMode(PIN_BMV080_EN, OUTPUT);
+      digitalWrite(PIN_BMV080_EN, e.modo == 1 ? LOW : HIGH);
+    }
+    delay(150);  // que el chip reaccione al cambio antes de interrogarlo
+    Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
+    Serial.printf("  %s:\n", e.que);
+    for (uint8_t a : {0x57, 0x56, 0x55, 0x54}) probarBmv(a);
+  }
   Serial.printf("--- lineas: SDA=%s  SCL=%s ---\n", estadoLinea(PIN_I2C_SDA),
                 estadoLinea(PIN_I2C_SCL));
   // estadoLinea() deja los pines como GPIO sueltos, asi que hay que devolverlos
