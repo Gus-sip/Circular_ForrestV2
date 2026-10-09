@@ -2811,6 +2811,36 @@ static void runSlot(int slot) {
       // da ahora CALYPSO_BOOT_MS de preparacion, asi que para cuando se ejecuta
       // este slot el sensor lleva ya ese tiempo alimentado. Esperar aqui moveria
       // la medida fuera del minuto pedido, que es justo lo que no se quiere.
+      // ESPERAR A QUE EL SENSOR ESTE ARRANCADO ANTES DE ESCUCHAR.
+      //
+      // Despertar pronto no basta: el planificador despierta 21,5 s antes del
+      // minuto, pero luego ejecuta este slot de inmediato - a los ~6 s de
+      // arrancar - y el sensor todavia no emite. Medido el 2026-10-09 en 30
+      // lecturas:
+      //
+      //     ~6,0 s encendido   ->  sin trama  (28 veces)
+      //     ~12,4 s encendido  ->  sin trama  (2 veces)
+      //      22,7 s encendido  ->  TRAMA
+      //      29,2 s encendido  ->  TRAMA
+      //
+      // La frontera esta entre 12,4 y 22,7 s, y por eso CALYPSO_BOOT_MS son 20.
+      //
+      // millis() sirve como reloj del rail porque este sensor cuelga del 5V
+      // conmutado y ese rail sube en setup(), un par de segundos despues del
+      // arranque: usar millis() sobreestima un poco el tiempo encendido, que es
+      // el lado seguro.
+      //
+      // Y esta espera es la que hace que la medida caiga EN SU MINUTO: el nodo
+      // desperto 21,5 s antes a proposito, asi que esperar hasta
+      // CALYPSO_BOOT_MS consume justo esa antelacion.
+      if (millis() < CALYPSO_BOOT_MS) {
+        const uint32_t falta = CALYPSO_BOOT_MS - millis();
+        Serial.printf("[calypso] esperando %lums a que arranque el sensor\n",
+                      (unsigned long)falta);
+        Serial.flush();
+        delay(falta);
+      }
+
       calypso.flushInput();
       Reading wind;
       uint32_t t0 = millis();
