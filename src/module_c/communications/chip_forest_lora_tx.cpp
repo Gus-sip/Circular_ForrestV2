@@ -1085,8 +1085,30 @@ static bool schedAnySensorDue() {
 // segundo acumularia el tiempo que costo la lectura y el calendario se iria
 // desplazando hasta perder la alineacion con los otros nodos.
 static void schedMarkDone(uint8_t job, uint8_t state) {
-  g_nextDueMs[job] =
-      alignedNextDue(schedNowMs(), jobPeriodMs(job, state), jobOffsetMs(job, state));
+  // AVANZAR DESDE EL VENCIMIENTO, NO DESDE "AHORA", y la diferencia no es sutil.
+  //
+  // Un trabajo se marca vencido cuando `ahora + preparacion >= vencimiento`, asi
+  // que se EJECUTA ANTES de su instante: el Calypso, con 21,5 s de preparacion,
+  // corre 21,5 s antes. Si al terminar se calcula el siguiente vencimiento desde
+  // "ahora", el siguiente multiplo que sale es EL MISMO VENCIMIENTO que acaba de
+  // atenderse - y el trabajo se vuelve a disparar en el acto.
+  //
+  // Medido el 2026-10-10 en pre-alarma, donde el nodo no duerme y loop() gira
+  // cada 2 s, asi que el bucle se ve sin filtro:
+  //
+  //     Calypso     intervalos 4,1  4,6  10,7 s   (deberian ser 300)
+  //     BME690 VOC  intervalo  10,8 s             (deberian ser 600)
+  //     BME690 T/H/P  179,6  180,6 s              correcto: su preparacion es 1,2 s
+  //
+  // El T/H/P se salvaba porque su preparacion es tan corta que casi nunca adelanta
+  // la ejecucion al otro lado de un multiplo. En estado NORMAL el fallo salia como
+  // suenos de 1 segundo, que se habian dado por anecdoticos.
+  //
+  // Tomando como base el vencimiento que se acaba de atender, el siguiente cae un
+  // periodo mas alla, que es lo que significa "cada N minutos".
+  const uint64_t ahora = schedNowMs();
+  const uint64_t base = (g_nextDueMs[job] > ahora) ? g_nextDueMs[job] : ahora;
+  g_nextDueMs[job] = alignedNextDue(base, jobPeriodMs(job, state), jobOffsetMs(job, state));
 }
 
 // Cuanto dormir, en segundos, hasta el proximo despertar.
