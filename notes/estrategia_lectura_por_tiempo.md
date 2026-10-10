@@ -247,3 +247,37 @@ mismo Modulo B sin doble parser - simplemente nunca producen un -999.
 
 La edad de cada lectura va ahora en SEGUNDOS reales (958, 666, 42 en las tramas de
 arriba) en vez de en numero de despertares multiplicados por NODE_TICK_SECONDS=10.
+
+
+## Intervalos MEDIDOS en los tres estados (2026-10-10)
+
+Con el nodo en cada estado por bandera FORCE_ALARM_STATE, descartando el
+transitorio de arranque:
+
+| Trabajo | NORMAL | PREALARMA | ALARMA |
+|---|---|---|---|
+| BME690 T/H/P | 300,3 s (0,1%) | 179,8 s (-0,1%) | 59,7 s (-0,5%) |
+| BME690 VOC | - | 600,0 s (0,0%) | 300,2 s (0,1%) |
+| BMV080 partículas | - | 599,9 s (0,0%) | 300,2 s (0,1%) |
+| SEN0466 CO | - | 599,5 s (-0,1%) | 300,2 s (0,1%) |
+| Calypso viento | - | 300,1 s (0,0%) | 300,3 s |
+| Envío LoRa | - | 900,5 s (0,1%) | - |
+
+**Todo dentro del 0,5%, y casi todo dentro del 0,1%.** El planificador por ticks
+se desviaba un 88%.
+
+### HAY UN TRANSITORIO DE ~7 MINUTOS TRAS CADA REFLASHEO
+
+Importa para cualquier medición. Dos cosas lo causan, encadenadas:
+
+1. El arranque en frío fuerza TODOS los trabajos a vencer a la vez, así que la
+   primera ronda cae fuera de la rejilla del reloj.
+2. La primera sincronización con Módulo B llega unos 35 s después y **re-fasea el
+   calendario entero**, porque la base de tiempo salta del tiempo propio del nodo
+   a la época real.
+
+Hasta que eso se asienta los intervalos no significan nada: medidos sin descartar
+el transitorio, los trabajos de 300 s parecían ir un 20-27% adelantados. Con el
+transitorio fuera salen a 300,2 s.
+
+**Al medir, descartar los primeros 7 minutos tras grabar el firmware.**
