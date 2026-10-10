@@ -205,6 +205,9 @@
 // An ALARM-level reading still escalates IMMEDIATELY and does not wait for this.
 // Waiting ten minutes on a 60 C reading would be absurd: the window exists to
 // confirm a doubtful signal, not to delay an obvious one.
+// Overridable desde platformio.ini para los builds de medicion: con los 10
+// minutos de produccion solo caben TRES lecturas de T/H/P antes de que el estado
+// se confirme y pase a alarma, que no bastan para medir intervalos.
 #define PREALARM_CONFIRM_MS 600000UL  // 10 minutes
 
 // ---------------------------------------------------------------------------
@@ -2107,6 +2110,23 @@ void setup() {
     g_lastReadWake = 0;
     Serial.println("Boot counter initialised (true power-on, or RTC domain lost)");
   }
+
+#if FORCE_ALARM_STATE
+  // RE-APLICAR LA BANDERA DESPUES DE LA SIEMBRA, y este es el unico sitio valido.
+  //
+  // El bloque de arriba pone g_alarmState = ALARM_NORMAL, asi que forzar el estado
+  // antes - donde esta el cartel - no sirve de nada en cuanto el magic no coincide:
+  // la siembra lo pisa. Y el magic no coincide precisamente cuando mas se usa esta
+  // bandera, que es al cambiar de build de medicion a otro.
+  //
+  // Visto el 2026-10-10: el arranque imprimia "ALARM STATE FORCED TO PRE-ALARM" y
+  // acto seguido "alarma 0". El cartel decia una cosa y el nodo hacia otra, que es
+  // la peor forma posible de fallar.
+  g_alarmState = (FORCE_ALARM_STATE >= 2) ? ALARM_FIRE : ALARM_PREALARM;
+  g_alarmClearRun = 0;
+  g_prealarmMs = 0;
+  g_schedPhasedForState = g_alarmState;  // o el envoltorio re-fasearia en la 1a vuelta
+#endif
   if (g_wokeFromTimer) {
     g_wakeCount++;
     Serial.printf("Deep-sleep wake #%lu (cause=%d)\n", (unsigned long)g_wakeCount,
