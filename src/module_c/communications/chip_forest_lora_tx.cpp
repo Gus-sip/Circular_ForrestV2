@@ -988,6 +988,13 @@ RTC_NOINIT_ATTR uint8_t g_schedPhasedForState;
 RTC_NOINIT_ATTR float g_readMultiplier;
 RTC_NOINIT_ATTR float g_txMultiplier;
 
+// Ventana para agrupar trabajos que vencen casi a la vez en un solo barrido.
+//
+// Dos segundos: lo justo para que dos trabajos del MISMO periodo - que vencen en
+// el mismo instante salvo redondeo - caigan juntos, sin arrastrar a uno que
+// venza de verdad mas tarde y adelantar su medida fuera de su minuto.
+#define SCHED_COALESCE_MS 2000ULL
+
 #define SCHED_MULT_MIN 0.1f
 #define SCHED_MULT_MAX 10.0f
 
@@ -1065,11 +1072,43 @@ static bool g_jobDue[JOB_COUNT];
 
 static void schedEvaluate() {
   const uint64_t now = schedNowMs();
+
   for (uint8_t j = 0; j < JOB_COUNT; j++) {
     // El margen de preparacion cuenta como vencido: si al BMV080 le faltan 3 s
     // para vencer y necesita 8 de arranque, este es el despertar que le toca -
     // volver a dormir 3 s y despertar otra vez no le daria tiempo.
     g_jobDue[j] = (now + (uint64_t)kJobs[j].prepMs >= g_nextDueMs[j]);
+  }
+
+  // AGRUPAR LOS TRABAJOS QUE VENCEN EN EL MISMO INSTANTE, aunque sus
+  // preparaciones sean distintas.
+  //
+  // Sin esto, dos trabajos del MISMO periodo se separan en despertares distintos
+  // solo porque uno necesita mas antelacion. El T/H/P y el Calypso van los dos a
+  // 5 minutos y vencen a la vez, pero el Calypso pide 21,5 s de preparacion y el
+  // T/H/P 1,2: el nodo despierta para el Calypso, lo atiende, y el T/H/P todavia
+  // no vence - asi que duerme un segundo, despierta otra vez y lo atiende aparte.
+  //
+  // Medido el 2026-10-11 en una captura de 2 h: 49 despertares donde deberian ser
+  // la mitad, y lo que importa de verdad - cada despertar guarda SU PROPIA FILA,
+  // asi que en 30 minutos se almacenaban 12 lecturas en vez de 6. El almacen son
+  // 8, y el log lo confirmaba: los tres envios llevaban 8, 8 y 8. Se estaban
+  // TIRANDO lecturas por duplicar filas, no por medir demasiado.
+  //
+  // Se agrupa por VENCIMIENTO, no por tiempo de despertar: si un trabajo vence
+  // dentro de la ventana del barrido que ya se va a hacer, entra en el. Mas alla
+  // de esa ventana no, o se adelantarian medidas que tienen que caer en su
+  // minuto.
+  uint64_t primerVenc = UINT64_MAX;
+  for (uint8_t j = 0; j < JOB_COUNT; j++) {
+    if (g_jobDue[j] && g_nextDueMs[j] < primerVenc) primerVenc = g_nextDueMs[j];
+  }
+  if (primerVenc != UINT64_MAX) {
+    for (uint8_t j = 0; j < JOB_COUNT; j++) {
+      if (!g_jobDue[j] && g_nextDueMs[j] <= primerVenc + SCHED_COALESCE_MS) {
+        g_jobDue[j] = true;
+      }
+    }
   }
 }
 
