@@ -450,7 +450,13 @@ static void ledReading() {
 // this mode - they advance once per boot, and without sleep there are no reboots,
 // so they would sit at 1/3 forever and nothing would ever be sent.
 #define NOSLEEP_TX_GAP_MS 15000UL
-#define SLEEP_CYCLE_SECONDS 10UL        // one tick; work is scheduled in ticks, not seconds
+// SUELO DEL SUENO, y nada mas. Ya no es "un tick": el trabajo se programa por
+// TIEMPO - cada sensor con su periodo en minutos - y la duracion de cada sueno la
+// calcula schedSleepSeconds() segun lo que falte hasta el proximo vencimiento.
+//
+// Sobrevive solo como valor por defecto del argumento de enterDeepSleep(), para
+// las llamadas defensivas que no tienen un vencimiento que consultar.
+#define SLEEP_CYCLE_SECONDS 10UL
 // Were the sensor rails brought up on this wake?
 //
 // Tracked with a flag rather than read back off the pins: these are outputs, and
@@ -2319,7 +2325,8 @@ void setup() {
 #if SLEEP_ENABLED
   // EVERY schedule must be listed here. Omitting one does not merely skip a tick -
   // that work never happens at all, because the bail-out sleeps before any rail is
-  // powered. g_burstDue was missed when the burst schedule was added, which would
+  // powered. En el planificador por ticks se olvido una de las banderas al anadir
+  // el burst, que habria significado que
   // have meant the expensive sensor group never ran on a tick that owed nothing
   // else.
   if (!g_readDue && !g_txDue && !isColdBoot()) {

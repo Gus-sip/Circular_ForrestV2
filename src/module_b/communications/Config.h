@@ -38,10 +38,14 @@
 // this is that, plus headroom.
 #define BATCH_RX_MAX 6
 
-// One Module C sleep tick, in seconds. Batch records carry their age in ticks, so
-// this converts that age back into real time for the reading's timestamp. Must
-// match SLEEP_CYCLE_SECONDS on Module C.
-#define NODE_TICK_SECONDS 10
+// NODE_TICK_SECONDS se quito el 2026-10-12. Valia 10 y servia para fechar cada
+// lectura de un lote: se multiplicaba la "edad" que mandaba el nodo por esos 10 s.
+//
+// Era doblemente falso. El tick real del planificador viejo eran 18,8 s, no 10,
+// asi que el historico salia comprimido casi a la mitad; y con el planificador por
+// TIEMPO los despertares pasaron a ser de minutos, con lo que el error se fue a
+// 30x. Ahora el nodo manda los SEGUNDOS reales transcurridos desde cada lectura,
+// contados con su propio reloj, y aqui solo hay que multiplicar por 1000.
 
 // Minimo entre dos sincronizaciones de reloj al MISMO nodo.
 //
