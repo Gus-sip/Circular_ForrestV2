@@ -2284,6 +2284,7 @@ void setup() {
   // RTC_NOINIT y pueden corromperse sin que el magic se entere.
   validateThresholds();
 
+
   // ---- Que debe este despertar, segun el PLANIFICADOR POR TIEMPO ----
   //
   // En arranque en frio el calendario guardado no significa nada: o es basura de
@@ -2481,6 +2482,12 @@ void setup() {
   if (g_jobDue[JOB_BMV080]) {
     step("bmv080.begin (SWAPPED: now after cm1106)");
     bmvReady = bmv080.begin();
+    // En que pasada abrio, para saber si los reintentos estan salvando arranques
+    // o si el sensor abria igual a la primera.
+    if (bmvReady) {
+      Serial.printf("BMV080: abrio en la pasada %u de %u\n",
+                    (unsigned)bmv080.openPasses(), 3u);
+    }
   } else {
     bmvReady = false;
   }
@@ -3180,6 +3187,21 @@ static void validateThresholds() {
       }
     }
   }
+  // SE IMPRIMEN SIEMPRE, no solo cuando hay corrupcion.
+  //
+  // Antes solo se veian con la alarma levantada - o sea, cuando ya era tarde. El
+  // 2026-10-12 el nodo paso horas en alarma de incendio por un umbral corrupto que
+  // nadie podia ver en el log. Una linea por arranque es barata comparada con eso.
+  Serial.print("Umbrales:");
+  for (size_t i = 0; i < ALARM_RULE_COUNT; i++) {
+    if (!kAlarmRules[i].enabled) continue;
+    Serial.printf(" %s %.0f/%.0f|%.0f/%.0f", kAlarmRules[i].name,
+                  (double)g_thr[i][THR_PRE_OFF], (double)g_thr[i][THR_PRE_ON],
+                  (double)g_thr[i][THR_ALM_OFF], (double)g_thr[i][THR_ALM_ON]);
+  }
+  Serial.println();
+  Serial.flush();
+
   if (!malos) return;
 
   Serial.printf("\n*** %u UMBRAL(ES) CORRUPTO(S) EN RTC - resembrando desde la tabla ***\n",

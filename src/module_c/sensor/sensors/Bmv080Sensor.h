@@ -52,8 +52,20 @@ public:
   // SDK status from the last attempt to start the laser.
   int lastStartStatus() const { return _lastStartStatus; }
 
+  // En que pasada abrio. Sirve para saber si los reintentos hacen falta de verdad
+  // o si el sensor abre siempre a la primera. 0 = no abrio.
+  uint8_t openPasses() const { return _openPasses; }
+
 private:
+  // Cuantas veces se recorre el rango de direcciones antes de rendirse, y la pausa
+  // entre pasadas. El fallo de apertura es INTERMITENTE - la misma placa abre en un
+  // arranque y no en el siguiente - asi que repetir el recorrido entero es lo que
+  // mas sube la probabilidad de exito por unidad de esfuerzo.
+  static const uint8_t kOpenPasses = 3;
+  static const uint16_t kOpenRetryMs = 100;
+
   uint8_t _addr;
+  uint8_t _openPasses = 0;
   TwoWire &_wire;
   sfTkArdI2C _bus;
   bmv080_handle_t _handle = nullptr;

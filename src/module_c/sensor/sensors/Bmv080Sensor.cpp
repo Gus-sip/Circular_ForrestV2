@@ -51,23 +51,38 @@ bool Bmv080Sensor::begin() {
   static const uint8_t kStrapAddrs[4] = {0x57, 0x56, 0x55, 0x54};
 
   bmv080_status_code_t rc = E_BMV080_ERROR_HW_WRITE;
-  for (uint8_t attempt = 0; attempt < 5; attempt++) {
-    // Attempt 0 uses whatever was configured; later attempts walk the strap range
-    // and skip the one already tried.
-    uint8_t tryAddr = (attempt == 0) ? _addr : kStrapAddrs[attempt - 1];
-    if (attempt > 0 && tryAddr == _addr) continue;
 
-    _bus.init(_wire, tryAddr);
-    _bus.setByteOrder(SFTK_MSBFIRST);
-
-    rc = bmv080_open(&_handle, (bmv080_sercom_handle_t)&_bus, (bmv080_callback_read_t)readCB,
-                     (bmv080_callback_write_t)writeCB, (bmv080_callback_delay_t)delayCB);
-    if (rc == E_BMV080_OK) {
-      _addr = tryAddr;  // remember it, so read() and any retry use the live address
-      break;
+  // TRES PASADAS POR EL RANGO, no una. El fallo es intermitente - la misma placa
+  // abre en un arranque y no en el siguiente - asi que repetir es lo que mas
+  // sube la probabilidad de exito por unidad de esfuerzo.
+  for (uint8_t pasada = 0; pasada < kOpenPasses && rc != E_BMV080_OK; pasada++) {
+    if (pasada > 0) {
+      // Una pausa entre pasadas. El ciclo del pin de habilitacion seria mejor -
+      // devolveria el chip a un estado conocido - pero ese pin lo conduce el
+      // firmware principal, no este driver, y meterlo aqui le daria al driver una
+      // dependencia de pins.h que no tiene.
+      delay(kOpenRetryMs);
     }
-    // bmv080_open leaves no handle behind on failure, so nothing to close here.
-    _handle = nullptr;
+
+    for (uint8_t attempt = 0; attempt < 5; attempt++) {
+      // Attempt 0 uses whatever was configured; later attempts walk the strap range
+      // and skip the one already tried.
+      uint8_t tryAddr = (attempt == 0) ? _addr : kStrapAddrs[attempt - 1];
+      if (attempt > 0 && tryAddr == _addr) continue;
+
+      _bus.init(_wire, tryAddr);
+      _bus.setByteOrder(SFTK_MSBFIRST);
+
+      rc = bmv080_open(&_handle, (bmv080_sercom_handle_t)&_bus, (bmv080_callback_read_t)readCB,
+                       (bmv080_callback_write_t)writeCB, (bmv080_callback_delay_t)delayCB);
+      if (rc == E_BMV080_OK) {
+        _addr = tryAddr;  // remember it, so read() and any retry use the live address
+        _openPasses = (uint8_t)(pasada + 1);
+        break;
+      }
+      // bmv080_open leaves no handle behind on failure, so nothing to close here.
+      _handle = nullptr;
+    }
   }
   _lastOpenStatus = (int)rc;
   if (rc != E_BMV080_OK) {
