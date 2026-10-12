@@ -858,8 +858,27 @@ RTC_NOINIT_ATTR float g_clockDrift;
 // Fuera de estos limites el factor no se cree: un RC puede desviarse un 2%, no un
 // 20%. Un valor absurdo viene de una hora de red mala o de un desbordamiento, y
 // aplicarlo dejaria al nodo midiendo a un ritmo arbitrario sin forma de volver.
-#define CLOCK_DRIFT_MIN 0.90f
-#define CLOCK_DRIFT_MAX 1.10f
+// UN OSCILADOR RC SE DESVIA UN 1-2%, NO UN 10%.
+//
+// La guarda valia [0.90, 1.10] y era demasiado ancha para lo que pretende filtrar.
+// El 2026-10-12 el factor salto de 803 ppm a 99.882 - un 9,99%, justo por debajo
+// del tope - y paso el filtro. Como el sueno se divide por el, TODOS los periodos
+// se acortaron un 9%: 273 s donde tocaban 300, 1090 donde 1200, 1630 donde 1800.
+// El error identico en los seis trabajos fue lo que delato que no era el
+// planificador sino la base de tiempo.
+//
+// Y ese 10% NO ERA DERIVA. El tiempo del nodo se acumula en enterDeepSleep(), asi
+// que CUALQUIER arranque que no termine durmiendo - un reflasheo, un reinicio, la
+// ventana de arranque en frio - pierde su tiempo despierto de la cuenta. El nodo
+// se queda atras respecto al reloj real y el aprendizaje lo atribuye al oscilador,
+// que no tiene la culpa. Con una guarda ancha eso se convierte en una correccion
+// que empeora las cosas en vez de arreglarlas.
+//
+// [0.97, 1.03] cubre con holgura lo que un RC puede hacer de verdad, incluida la
+// variacion con la temperatura. Fuera de ahi la causa es otra y corregir es peor
+// que no corregir.
+#define CLOCK_DRIFT_MIN 0.97f
+#define CLOCK_DRIFT_MAX 1.03f
 
 // Por debajo de esto no se aprende deriva: medir un error del 1% sobre un
 // intervalo corto es medir ruido. Una sincronizacion por envio en estado normal
@@ -2493,10 +2512,21 @@ void setup() {
   }
   if (bmvReady) {
     Serial.println("BMV080: OK");
-  } else {
-    // Say WHICH stage failed. "NOT FOUND" alone cannot distinguish a sensor that
-    // is absent from one that is present but would not open - and those point at
-    // the bus and the supply respectively.
+  } else if (g_jobDue[JOB_BMV080]) {
+    // SOLO SI DE VERDAD SE INTENTO ABRIRLO.
+    //
+    // Con el arranque selectivo, un despertar en el que al BMV080 no le toca medir
+    // no llama a begin() - y hasta el 2026-10-12 este mensaje salia igual, con el
+    // estado del SDK a 0, que es E_BMV080_OK: el valor inicial de una variable que
+    // nadie habia tocado.
+    //
+    // El efecto era un log que decia "NOT FOUND" 26 veces en dos horas mientras el
+    // sensor abria las 5 veces que se le pidio. Se paso un buen rato diagnosticando
+    // una fiabilidad del 16% que en realidad era del 100%.
+    //
+    // Y se sigue diciendo QUE etapa fallo: "NOT FOUND" a secas no distingue un
+    // sensor ausente de uno presente que no abre, y esas dos cosas apuntan al bus y
+    // a la alimentacion respectivamente.
     Serial.printf("BMV080: NOT FOUND - open failed at every strap address "
                   "(0x57/0x56/0x55/0x54), last SDK status %d\n",
                   bmv080.lastOpenStatus());
@@ -3177,6 +3207,17 @@ RTC_NOINIT_ATTR float g_thr[ALARM_RULE_COUNT][4];
 static void seedThresholds();
 
 static void validateThresholds() {
+  // LA DERIVA TAMBIEN SE VALIDA, y por la misma razon que los umbrales: vive en
+  // RTC y un valor malo se queda ahi. Estrechar la guarda del aprendizaje impide
+  // que vuelva a entrar uno absurdo, pero no limpia el que ya esta guardado - y
+  // ese divide todos los suenos.
+  if (isnan(g_clockDrift) || g_clockDrift < CLOCK_DRIFT_MIN || g_clockDrift > CLOCK_DRIFT_MAX) {
+    Serial.printf("*** DERIVA FUERA DE RANGO (%ld ppm) - se vuelve a 0 ***\n",
+                  (long)((g_clockDrift - 1.0f) * 1000000.0f));
+    g_clockDrift = 1.0f;
+    Serial.flush();
+  }
+
   uint8_t malos = 0;
   for (size_t i = 0; i < ALARM_RULE_COUNT; i++) {
     for (uint8_t k = 0; k < 4; k++) {
