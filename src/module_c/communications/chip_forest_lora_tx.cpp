@@ -250,6 +250,7 @@
 // Defined further down, beside kAlarmRules which they depend on. Declared here
 // because the CFG parser and the boot-seed block both run long before that.
 static void seedThresholds();
+static void validateThresholds();
 static bool setThresholdByName(const char *key, float value);
 static float *thresholdSlot(const char *key);
 
@@ -2279,6 +2280,10 @@ void setup() {
     return;  // unreachable
   }
 
+  // Los umbrales, en CADA arranque y no solo cuando cambia el magic: viven en
+  // RTC_NOINIT y pueden corromperse sin que el magic se entere.
+  validateThresholds();
+
   // ---- Que debe este despertar, segun el PLANIFICADOR POR TIEMPO ----
   //
   // En arranque en frio el calendario guardado no significa nada: o es basura de
@@ -3132,6 +3137,73 @@ RTC_NOINIT_ATTR float g_thr[ALARM_RULE_COUNT][4];
 
 // Copies the compiled defaults over the live values. Called only when the boot
 // magic changes - see the BOOTCOUNT_MAGIC block.
+// Rango en el que un umbral de esta placa puede estar. Deliberadamente ancho: no
+// es para detectar un valor mal elegido - eso es decision del operador - sino para
+// detectar BASURA. Las magnitudes van de porcentajes de humedad a ohmios de gas,
+// asi que el limite superior tiene que dar cabida a 18000.
+#define THR_MIN_CREIBLE (-100.0f)
+#define THR_MAX_CREIBLE (100000.0f)
+
+// Comprueba los umbrales vivos y resiembra los que no sean creibles.
+//
+// g_thr vive en RTC_NOINIT: memoria que sobrevive al sueno y al reset porque NO se
+// inicializa. Eso la hace util y fragil a la vez - un brownout, una perdida de
+// alimentacion a medias o un cambio en la disposicion de las variables la dejan
+// con lo que hubiera en esas direcciones.
+//
+// El 2026-10-12 g_thr[0] - los cuatro umbrales de la temperatura - aparecio asi:
+//
+//     pre 0.0/0.0   alarma 4.7e19 / -5.8e31
+//
+// Con preOn = 0 la regla dispara con cualquier temperatura positiva; con
+// almOn = -5.8e31 dispara siempre. El nodo quedo en ALARMA DE INCENDIO sin poder
+// salir, y ningun reset lo arreglaba porque el valor corrupto sobrevivia con el
+// resto de la memoria RTC.
+//
+// Peor aun: la histeresis quedaba INVERTIDA. El umbral de salida era 4,7e19, asi
+// que la misma regla estaba disparada segun el de entrada y limpia segun el de
+// salida. Las dos mitades del codigo veian cosas distintas y ninguna se
+// contradecia a si misma.
+//
+// Que un numero estropeado en RAM enclave un detector de incendios para siempre no
+// es aceptable, asi que se comprueba en cada arranque.
+static void seedThresholds();
+
+static void validateThresholds() {
+  uint8_t malos = 0;
+  for (size_t i = 0; i < ALARM_RULE_COUNT; i++) {
+    for (uint8_t k = 0; k < 4; k++) {
+      const float v = g_thr[i][k];
+      // isnan() cubre el NaN, que no falla ninguna comparacion de rango.
+      if (isnan(v) || v < THR_MIN_CREIBLE || v > THR_MAX_CREIBLE) {
+        malos++;
+      }
+    }
+  }
+  if (!malos) return;
+
+  Serial.printf("\n*** %u UMBRAL(ES) CORRUPTO(S) EN RTC - resembrando desde la tabla ***\n",
+                (unsigned)malos);
+  for (size_t i = 0; i < ALARM_RULE_COUNT; i++) {
+    Serial.printf("    %-9s  pre %.1f/%.1f  alarma %.1f/%.1f\n", kAlarmRules[i].name,
+                  (double)g_thr[i][THR_PRE_OFF], (double)g_thr[i][THR_PRE_ON],
+                  (double)g_thr[i][THR_ALM_OFF], (double)g_thr[i][THR_ALM_ON]);
+  }
+  seedThresholds();
+
+  // Y bajar la alarma: si estaba levantada, pudo levantarla el umbral corrupto, y
+  // dejarla puesta con los umbrales ya buenos seria arrastrar una falsa alarma sin
+  // motivo. Si la causa era real, el primer barrido la vuelve a levantar en
+  // segundos - que es justo lo que debe pasar.
+  if (g_alarmState != ALARM_NORMAL) {
+    Serial.println("*** la alarma estaba levantada con umbrales corruptos - se baja ***");
+    g_alarmState = ALARM_NORMAL;
+    g_alarmClearRun = 0;
+    g_prealarmMs = 0;
+  }
+  Serial.flush();
+}
+
 static void seedThresholds() {
   for (size_t i = 0; i < ALARM_RULE_COUNT; i++) {
     g_thr[i][THR_PRE_OFF] = kAlarmRules[i].preOff;
@@ -3256,7 +3328,7 @@ static AlarmState evaluateRules(const char **whyOut) {
 // Definida mas abajo, junto al resto del nombrado de estados.
 static const char *alarmStateName(AlarmState st);
 
-static void reportWhyStillRaised(bool fireLevel) {
+static void reportWhyStillRaised(bool fireLevel, const char *rama, int want) {
   static uint32_t lastMs = 0;
   const uint32_t now = millis();
   if (lastMs != 0 && now - lastMs < ALARM_WHY_GAP_MS) return;
@@ -3287,9 +3359,28 @@ static void reportWhyStillRaised(bool fireLevel) {
     }
   }
 
-  Serial.printf("[alarm] %s SIGUE: %s\n", alarmStateName((AlarmState)g_alarmState),
+  Serial.printf("[alarm] %s SIGUE por la rama '%s' (evaluateRules dice %s): %s\n",
+                alarmStateName((AlarmState)g_alarmState), rama,
+                alarmStateName((AlarmState)want),
                 rp ? retienen : "ninguna regla con dato la retiene");
   if (sp) Serial.printf("[alarm] sin dato fresco, ignoradas: %s\n", sinDato);
+
+  // LOS UMBRALES VIVOS, no los de la tabla compilada.
+  //
+  // g_thr esta en RTC y solo se siembra desde kAlarmRules cuando cambia el
+  // BOOTCOUNT_MAGIC. Si el nodo arranca con un magic que ya coincidia, conserva
+  // los que hubiera - que pueden venir de un build de medicion anterior, o de un
+  // comando CFG de Modulo A. Imprimirlos es la unica forma de distinguir "la
+  // logica falla" de "los umbrales no son los que creo".
+  for (size_t i = 0; i < ALARM_RULE_COUNT; i++) {
+    const AlarmRule &r = kAlarmRules[i];
+    if (!r.enabled || !ruleHasData(r.source)) continue;
+    Serial.printf("[alarm]   %-9s = %8.2f   pre %.1f/%.1f   alarma %.1f/%.1f  (%s)\n",
+                  r.name, (double)*r.value,
+                  (double)g_thr[i][THR_PRE_OFF], (double)g_thr[i][THR_PRE_ON],
+                  (double)g_thr[i][THR_ALM_OFF], (double)g_thr[i][THR_ALM_ON],
+                  r.higherIsWorse ? "sube=peor" : "baja=peor");
+  }
   Serial.flush();
 }
 
@@ -3364,7 +3455,7 @@ static void updateAlarmStateInner() {
   // Still tripped at the current level - reset the clean-read run.
   if (want >= g_alarmState) {
     g_alarmClearRun = 0;
-    reportWhyStillRaised(g_alarmState == ALARM_FIRE);
+    reportWhyStillRaised(g_alarmState == ALARM_FIRE, "una regla sigue disparada", (int)want);
     return;
   }
 
@@ -3372,7 +3463,7 @@ static void updateAlarmStateInner() {
   const bool leavingFire = (g_alarmState == ALARM_FIRE);
   if (!allRulesCleared(leavingFire)) {
     g_alarmClearRun = 0;
-    reportWhyStillRaised(leavingFire);
+    reportWhyStillRaised(leavingFire, "no todas han bajado del umbral de salida", (int)want);
     return;
   }
 
