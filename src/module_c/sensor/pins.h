@@ -120,6 +120,15 @@
 #define PIN_LORA_EN_ACTIVE LOW
 #define PIN_LORA_EN_SETTLE_MS 200
 
+// ---------- SEN0466 CO sensor power gate (GPIO16) ----------
+// Fourth gate, added to the board 2026-10-14. Until then the SEN0466 was wired
+// straight to the supply, bypassing every rail switch, which is why no rail could
+// ever release its hung I2C bus. With the gate fitted and GPIO16 left undriven the
+// sensor has NO power and drops off the bus entirely ("SEN0466: NOT FOUND", no ACK
+// at 0x74) - that is the symptom of forgetting this pin, not a dead sensor.
+#define PIN_SEN0466_EN 16
+#define PIN_SEN0466_EN_ACTIVE LOW
+
 // ---------- Status LED (GPIO21) ----------
 // Addressable WS2812 on the module, driven with neopixelWrite(). Confirmed 21 by
 // sweeping every safe GPIO - it is NOT the esp32s3 variant's PIN_NEOPIXEL 48, and

@@ -199,16 +199,22 @@
 //
 // Pre-alarm is a question, not a verdict. The node holds it for this long and then
 // decides: anything still over its threshold when the window expires escalates to
-// full ALARM, because a condition that lasts ten minutes is not sensor noise.
+// full ALARM, because a condition that lasts an hour is not sensor noise.
 // Everything back under clears to NORMAL before then, via the usual clean-read run.
 //
 // An ALARM-level reading still escalates IMMEDIATELY and does not wait for this.
-// Waiting ten minutes on a 60 C reading would be absurd: the window exists to
-// confirm a doubtful signal, not to delay an obvious one.
-// Overridable desde platformio.ini para los builds de medicion: con los 10
-// minutos de produccion solo caben TRES lecturas de T/H/P antes de que el estado
-// se confirme y pase a alarma, que no bastan para medir intervalos.
-#define PREALARM_CONFIRM_MS 600000UL  // 10 minutes
+// Waiting an hour on a 60 C reading would be absurd: the window exists to confirm
+// a doubtful signal, not to delay an obvious one.
+//
+// 60 MINUTES, raised from 10 on 2026-10-14 (decision of the user). The cost is
+// power: pre-alarm never sleeps, so a node can now stay awake six times longer on
+// a signal that never reaches the alarm threshold.
+//
+// Overridable desde platformio.ini (-DPREALARM_CONFIRM_MS=...) para los builds de
+// medicion, que necesitan otra duracion para poder medir intervalos.
+#ifndef PREALARM_CONFIRM_MS
+#define PREALARM_CONFIRM_MS 3600000UL  // 60 minutes
+#endif
 
 // ---------------------------------------------------------------------------
 // MEASUREMENT BUILD ONLY - REMOVE BEFORE DEPLOYMENT
@@ -222,7 +228,7 @@
 //
 // When forced, updateAlarmState() returns immediately: the state can neither
 // clear nor escalate, so a pinned PRE-ALARM stays pre-alarm instead of being
-// promoted by the 10-minute confirmation window.
+// promoted by the 60-minute confirmation window.
 //
 // WHY THIS IS DANGEROUS TO LEAVE IN. A node built with 1 or 2 is DEAF TO ITS OWN
 // SENSORS - it reports a fire that is not there and, worse, could never report one
@@ -670,7 +676,7 @@ static uint16_t readingsPerPacket(uint16_t sensorReadEvery, uint16_t loraTransEv
 // In PRE-ALARM and ALARM the node does not sleep at all. The rails stay up
 // continuously, so the warm-up can run once and then the sensor reads for as long
 // as the state lasts. It becomes available about 3.5 minutes in - comfortably
-// inside the 10-minute pre-alarm confirmation window, which is exactly the moment
+// inside the 60-minute pre-alarm confirmation window, which is exactly the moment
 // somebody wants to know whether there is carbon monoxide.
 //
 // What this does NOT do is let CO *trigger* anything: it cannot contribute to
@@ -697,7 +703,15 @@ static uint16_t readingsPerPacket(uint16_t sensorReadEvery, uint16_t loraTransEv
 // powered for the whole sleep and wasting exactly what sleeping was meant to
 // save. These are all GPIO<=21, so they are RTC-capable and can be held.
 static const gpio_num_t kHeldGates[] = {(gpio_num_t)PIN_PCB_EN_A, (gpio_num_t)PIN_PCB_EN_B,
-                                        (gpio_num_t)PIN_LORA_EN};
+                                        (gpio_num_t)PIN_LORA_EN, (gpio_num_t)PIN_SEN0466_EN};
+
+// SEN0466 gate (GPIO16) policy. BENCH SETTING: on from boot and held on through
+// deep sleep, so the sensor stays warm and its presence on the bus can be checked
+// straight away. It needs ~210 s of warm-up after power-on before a reading means
+// anything, and a NORMAL wake lasts ~20 s - switching it with the other rails
+// would mean it is never warm outside pre-alarm. The cost is its draw (~15 mA
+// measured) for the whole sleep. Deciding this for deployment is still open.
+#define SEN0466_GATE_ALWAYS_ON 1
 
 // ---------- CM1106 freeze recovery ----------
 // This unit keeps answering with valid frames whose counter byte increments while
@@ -1198,7 +1212,7 @@ static uint32_t schedSleepSeconds(uint8_t state) {
 //
 // g_alarmState is RTC_NOINIT and survives a reset, so a node that browns out
 // mid-pre-alarm comes back still in pre-alarm - but millis() restarts at zero. A
-// stored start-time would therefore hand it a fresh ten minutes on every reset,
+// stored start-time would therefore hand it a fresh window on every reset,
 // and a node resetting under the 35mA continuous load that pre-alarm imposes could
 // postpone a real fire alarm indefinitely without anything looking wrong.
 //
@@ -2396,6 +2410,14 @@ void setup() {
   }
   gpio_deep_sleep_hold_dis();
 
+  // CO sensor power, first of everything: it is the slowest part on the board to
+  // become usable, so every second it is powered earlier is a second of warm-up.
+  // Also in safe mode - it is not the load safe mode exists to shed.
+  pinMode(PIN_SEN0466_EN, OUTPUT);
+  digitalWrite(PIN_SEN0466_EN, SEN0466_GATE_ALWAYS_ON ? PIN_SEN0466_EN_ACTIVE : !PIN_SEN0466_EN_ACTIVE);
+  Serial.printf("SEN0466 EN: GPIO%d -> %s\n", PIN_SEN0466_EN,
+                digitalRead(PIN_SEN0466_EN) == LOW ? "LOW" : "HIGH");
+
   // Rails one at a time, with USB given time to enumerate first - see enableRails().
   // Safe mode after three boots without a good run leaves them off entirely, so a
   // board that cannot hold its supply still gives back a usable serial port.
@@ -2411,9 +2433,10 @@ void setup() {
   // NOTA: aqui hubo un corte de 1500 ms del rail de 3V3 para descolgar un posible
   // esclavo de I2C. Se quito porque la medida lo desmintio: con el rail cortado,
   // SCL seguia sujeto a masa. La causa real es un esclavo que NO esta en ese rail
-  // - el SEN0466 va cableado directo a corriente saltandose el transistor - asi
-  // que no hay nada que el firmware pueda apagar para reiniciarlo. Solo lo suelta
-  // desenchufar la placa entera.
+  // - el SEN0466 iba cableado directo a corriente saltandose el transistor - asi
+  // que no habia nada que el firmware pudiera apagar para reiniciarlo. Desde el
+  // 2026-10-14 tiene su propia puerta en GPIO16 (PIN_SEN0466_EN): cortarla es
+  // ahora la forma de descolgarlo sin desenchufar la placa.
   enableRails(g_safeMode);
   i2cReportPullups("DESPUES de encender rails");
 
@@ -3485,7 +3508,7 @@ static void updateAlarmStateInner() {
   // THE CONFIRMATION WINDOW EXPIRING IS ITSELF AN ESCALATION.
   //
   // Checked before the normal comparison, because "still tripped at pre-alarm
-  // level after ten minutes" does not raise `want` on its own - the reading has
+  // level after the whole window" does not raise `want` on its own - the reading has
   // not got any worse, it has simply not gone away, and that is the whole point.
   // Without this the node would sit in pre-alarm indefinitely on a real fire that
   // never quite reached the alarm threshold.
@@ -4387,7 +4410,7 @@ void loop() {
     lastAccumMs = nowMs;
 
     // Not sleeping, so the 5V rail stays up and the CO sensor can finally warm
-    // up. Becomes live ~3.5 min in, inside the 10-minute confirmation window.
+    // up. Becomes live ~3.5 min in, inside the 60-minute confirmation window.
     sen0466MaintainWarmup();
 
     // MISMO PLANIFICADOR QUE EN NORMAL, otros periodos. Antes esta rama leia TODOS
