@@ -2,31 +2,31 @@
 
 #include <Wire.h>
 
-// Raw read of the chip-ID register, bypassing the Bosch driver entirely.
+// Lectura cruda del registro de identificacion del chip, saltandose por completo
+// el driver de Bosch.
 //
-// Needed because the library's begin() collapses several very different failures
-// into one `false`: the I2C ACK probe, bme69x_init()'s soft reset, its chip-ID
-// check, the variant read and the calibration load. Node C2 showed `ACK at 0x76`
-// in the bus scan and `BME690: NOT FOUND` from begin() on the SAME boot, which
-// means the device answers its address but something after that is failing - and
-// without the raw value there is no way to tell a wrong part from a corrupt read.
+// Hace falta porque el begin() de la libreria resume varios fallos muy distintos
+// en un solo `false`: la prueba de ACK en I2C, el reinicio por software de
+// bme69x_init(), la comprobacion del ID, la lectura de variante y la carga de la
+// calibracion. El nodo C2 mostro `ACK at 0x76` en el escaneo del bus y
+// `BME690: NOT FOUND` en begin() en EL MISMO arranque: el aparato contesta a su
+// direccion pero algo posterior falla, y sin el valor crudo no hay forma de
+// distinguir una pieza equivocada de una lectura corrupta.
 //
-// The expected value is 0x61 (shared by BME680/688/690). Reports on the forums
-// show this register coming back as 0x00 or 0xF1 on buses that otherwise ACK,
-// which is bus corruption rather than a mismatched part - a one-byte address probe
-// is short and survives, while a register read is a longer transaction and does
-// not.
-// Two access patterns, because they fail for different reasons and a device that
-// refuses one may answer the other:
+// El valor esperado es 0x61 (comun a BME680/688/690). En los foros hay casos de
+// este registro devolviendo 0x00 o 0xF1 en buses que si dan ACK: es corrupcion del
+// bus, no una pieza distinta. La prueba de direccion es un solo byte y sobrevive;
+// la lectura de un registro es una transaccion mas larga y no.
 //
-//   mode 0  write register, REPEATED START, read   - what the Bosch driver does
-//   mode 1  write register, STOP, then a fresh read transaction
+// Dos formas de acceso, porque fallan por motivos distintos y un aparato que
+// rechaza una puede contestar a la otra:
 //
-// Some I2C devices and some bus conditions tolerate only one. Reporting which (if
-// either) works turns "does not respond" into something actionable: if mode 1
-// succeeds where mode 0 fails, the part is alive and the repeated start is the
-// problem; if both fail while the bare address still ACKs, the device is powered
-// enough to pull the line but not to run.
+//   modo 0  escribir registro, INICIO REPETIDO, leer   - lo que hace el driver de Bosch
+//   modo 1  escribir registro, STOP, y una lectura nueva aparte
+//
+// Si el modo 1 funciona donde falla el 0, la pieza esta viva y el problema es el
+// inicio repetido; si fallan los dos pero la direccion sigue dando ACK, el aparato
+// tiene corriente para tirar de la linea pero no para funcionar.
 static bool readChipIdMode(uint8_t addr, uint8_t &out, int mode) {
   Wire.beginTransmission(addr);
   Wire.write(0xD0);  // BME69X_REG_CHIP_ID
@@ -37,6 +37,7 @@ static bool readChipIdMode(uint8_t addr, uint8_t &out, int mode) {
   return true;
 }
 
+// Prueba los dos modos por orden y dice cual contesto (-1 si ninguno).
 static bool readChipId(uint8_t addr, uint8_t &out, int &modeUsed) {
   for (int mode = 0; mode < 2; mode++) {
     if (readChipIdMode(addr, out, mode)) {
@@ -49,34 +50,34 @@ static bool readChipId(uint8_t addr, uint8_t &out, int &modeUsed) {
   return false;
 }
 
-// The first forced measurement after begin() ALWAYS fails on this part.
+// LA PRIMERA MEDIDA FORZADA DESPUES DE begin() SIEMPRE FALLA EN ESTA PIEZA.
 //
-// Measured on node C2: read 1 -> Timeout, read 2 -> OK (gas 41451), read 3 -> OK,
-// on every single boot. The library's getData() triggers a forced measurement,
-// waits the calculated duration, then treats any non-OK status from
-// bme69x_get_data() as failure - and Bosch warnings such as NO_NEW_DATA are
-// POSITIVE status codes, so a first-measurement warning is indistinguishable from
-// a hard error there. The gas heater also needs one run before its reading is
-// stable, which is why the first measurement is the one that warns.
+// Medido en el nodo C2: lectura 1 -> Timeout, lectura 2 -> OK (gas 41451),
+// lectura 3 -> OK, en todos los arranques. getData() de la libreria dispara una
+// medida, espera la duracion calculada y trata cualquier estado distinto de OK de
+// bme69x_get_data() como fallo - y los avisos de Bosch como NO_NEW_DATA son
+// codigos POSITIVOS, asi que un aviso en la primera medida no se distingue de un
+// error. El calefactor de gas tambien necesita una pasada antes de estabilizarse,
+// y por eso es la primera medida la que avisa.
 //
-// This cost one reading in a hundred while the node sampled continuously, so it
-// went unnoticed. Under the sleep cycle it is fatal: every wake is a fresh begin()
-// followed by exactly ONE read, so the only read taken is the one that always
-// fails, and the BME690 would never contribute a single value to a packet.
-//
-// Hence a discarded priming measurement here, and one retry in read().
+// Mientras el nodo leia sin parar, esto costaba una lectura de cada cien y paso
+// desapercibido. Con el ciclo de sueno es fatal: cada despertar es un begin()
+// nuevo seguido de UNA sola lectura, asi que la unica lectura que se hace es la que
+// siempre falla, y el BME690 no aportaria nunca un valor. Por eso read() y
+// readFast() reintentan una vez.
 
+// Arranca el sensor, probando las dos direcciones y hasta tres veces.
 bool Bme690Sensor::begin() {
   _chipId = 0;
   _chipIdValid = false;
 
-  // Retry the whole bring-up rather than failing on one bad attempt.
+  // Se repite el arranque entero en vez de rendirse al primer intento malo.
   //
-  // bme69x_init() issues a SOFT RESET and then immediately reads the chip ID. A
-  // part that has only just had its rail switched on - which is every wake under
-  // the sleep cycle - can still be settling when that read lands, and the driver
-  // reports the same `false` as a genuinely absent sensor. Three tries with a gap
-  // costs ~150ms on the failing path and nothing at all on the healthy one.
+  // bme69x_init() hace un REINICIO POR SOFTWARE y lee el ID justo despues. Una pieza
+  // a la que se le acaba de encender el rail - que es cada despertar con el ciclo de
+  // sueno - puede estar todavia estabilizandose cuando llega esa lectura, y el
+  // driver devuelve el mismo `false` que para un sensor ausente de verdad. Tres
+  // intentos con pausa cuestan ~150 ms si falla y nada en absoluto si va bien.
   for (int attempt = 0; attempt < 3; attempt++) {
     if (_sensor.begin(_addr)) {
       primeAndMark();
@@ -93,53 +94,52 @@ bool Bme690Sensor::begin() {
     delay(50);
   }
 
-  // Failed. Capture the raw chip ID so the caller can say WHY rather than just
-  // "NOT FOUND" - 0x61 means the part is fine and the driver is at fault, 0x00 or
-  // garbage means the bus is corrupting reads, and no response at all means it
-  // really is absent.
+  // Ha fallado. Se lee el ID crudo para que quien llama pueda decir POR QUE y no
+  // solo "NOT FOUND": 0x61 = la pieza esta bien y falla el driver; 0x00 o basura =
+  // el bus corrompe las lecturas; ninguna respuesta = no esta de verdad.
   _chipIdValid = readChipId(_addr, _chipId, _chipIdMode);
   return false;
 }
 
+// Marca el sensor como arrancado. A PROPOSITO NO HACE NINGUNA MEDIDA.
+//
+// Antes lanzaba aqui una medida de cebado que se descartaba, lo que significaba
+// encender el calefactor a 320 C dentro de setup(), justo antes de bmv080.begin().
+// El efecto se midio: con el cebado aqui el BME690 arrancaba y el BMV080 daba
+// NoAck y el CM1106 Timeout; sin el, arrancaban el BMV080 y el CM1106 y el BME690
+// no. Los sensores se turnaban.
+//
+// setup() arranca todos los sensores seguidos, asi que era el unico sitio donde no
+// se aplicaba la regla de "un sensor cada vez" (los turnos gobiernan solo las
+// LECTURAS). Un calefactor encendido ahi es justo la carga simultanea que los
+// turnos existen para evitar.
+//
+// Ademas el cebado no hace falta: read() ya reintenta, lo que cubre el "la primera
+// medida siempre falla", y lo hace dentro del turno del propio BME690, donde el
+// calefactor tiene la alimentacion para el solo.
 void Bme690Sensor::primeAndMark() {
-  // NO MEASUREMENT HERE - deliberately.
-  //
-  // This used to fire a discarded priming measurement, which meant running the gas
-  // heater at 320C inside setup(), immediately before bmv080.begin(). The result
-  // was measurable: with priming here the BME690 came up and the BMV080 went
-  // NoAck and the CM1106 Timeout; without it the BMV080 and CM1106 came up and the
-  // BME690 did not. The sensors were taking turns.
-  //
-  // setup() initialises every sensor back-to-back, so it is the one place the
-  // sequential-slot rule was never applied - the slots govern READS only. A heater
-  // firing there is exactly the concurrent load the slots exist to prevent.
-  //
-  // The priming is not needed here anyway: read() already retries twice, which
-  // covers the "first forced measurement after begin() always fails" behaviour,
-  // and it does so inside the BME690's own slot where the heater has the power
-  // budget to itself.
   _primed = true;
-  _chipId = 0x61;  // it initialised, so the ID matched by definition
+  _chipId = 0x61;  // si arranco, el ID coincidia por definicion
   _chipIdValid = true;
   _chipIdMode = 0;
 }
 
-// The gas heater is the whole cost of a BME690 reading. Toggling it is a config
-// write over I2C, so the state is cached and only written on an actual change -
-// the sentinel path calls this every 10 seconds.
-//
-// 320C / 150ms are the library's own defaults, restored when re-enabling so the
-// gas figures stay comparable with those taken before the heater was ever toggled.
-// Sleep = heater off. The heater is the whole cost of this sensor; the rest of
-// the die draws microamps. Called on the way into hibernation BEFORE the 3V3 rail
-// is cut, so the part is quiesced rather than having power yanked mid-measurement.
-//
-// Cutting the rail dominates this by a wide margin - an unpowered sensor draws
-// nothing at all - so the value here is orderly shutdown, not the saving.
+// Dormir = calefactor apagado. El calefactor es todo el consumo de este sensor; el
+// resto del chip consume microamperios. Se llama antes de cortar el rail de 3V3,
+// para dejar la pieza en reposo en vez de quitarle la corriente a media medida.
+// Cortar el rail ahorra mucho mas (un sensor sin alimentacion no consume nada), asi
+// que lo que aporta esto es un apagado ordenado, no el ahorro.
 void Bme690Sensor::sleep() {
   setHeater(false);
 }
 
+// El calefactor es todo el coste de una lectura del BME690. Cambiarlo es una
+// escritura de configuracion por I2C, asi que se recuerda el estado y solo se
+// escribe cuando cambia de verdad.
+//
+// 320 C / 150 ms son los valores por defecto de la propia libreria, y se restauran
+// al reactivarlo para que las cifras de gas sigan siendo comparables con las
+// tomadas antes de que se tocara nunca el calefactor.
 bool Bme690Sensor::setHeater(bool on) {
   if (_heaterOn == on) return true;
   if (!_sensor.setHeater(on, 320, 150)) return false;
@@ -147,7 +147,7 @@ bool Bme690Sensor::setHeater(bool on) {
   return true;
 }
 
-// Temperature, humidity and pressure with the heater OFF - see the header.
+// Temperatura, humedad y presion con el calefactor APAGADO - ver la cabecera.
 Reading Bme690Sensor::readFast() {
   Reading r;
 
@@ -163,7 +163,7 @@ Reading Bme690Sensor::readFast() {
       r.values[0] = t;
       r.values[1] = h;
       r.values[2] = pr;
-      r.values[3] = 0.0f;  // no gas reading was taken - do not pass off as real
+      r.values[3] = 0.0f;  // no se midio gas: no hacerlo pasar por real
       r.count = 3;
       return r;
     }
@@ -174,16 +174,16 @@ Reading Bme690Sensor::readFast() {
   return r;
 }
 
+// Lectura completa, con el calefactor encendido (readFast() puede haberlo apagado).
 Reading Bme690Sensor::read() {
-  // The full read needs the heater; readFast() may have switched it off.
   setHeater(true);
 
   Reading r;
   float temperature, humidity, pressure, gas;
 
-  // One retry. The priming read in begin() handles the cold case; this covers a
-  // measurement that warns mid-run, which would otherwise discard a whole wake's
-  // environmental data. Two failures in a row is a real fault worth reporting.
+  // Un reintento. Cubre la primera medida que siempre falla y una medida que avise
+  // a mitad, que de otro modo tiraria los datos ambientales de todo un despertar.
+  // Dos fallos seguidos son una averia real y se informan.
   for (int attempt = 0; attempt < 2; attempt++) {
     if (_sensor.getData(temperature, humidity, pressure, gas)) {
       r.status = ReadingStatus::Ok;

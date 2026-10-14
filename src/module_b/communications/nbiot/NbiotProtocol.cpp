@@ -8,10 +8,10 @@ namespace NbiotProtocol {
 
 namespace {
 
-// Returns a pointer just past the Nth comma (0-indexed count) found starting
-// at p, or nullptr if there aren't that many. Doesn't mutate the string -
-// strtol() naturally stops at the next non-numeric character, so callers
-// never need a NUL-terminated sub-string to read a numeric field out of one.
+// Devuelve un puntero justo despues de la coma numero `count` contando desde p, o
+// nullptr si no hay tantas. No modifica el texto: strtol() se para sola en el
+// siguiente caracter no numerico, asi que nunca hace falta una subcadena terminada
+// en '\0' para leer un campo numerico.
 const char *skipCommas(const char *p, int count) {
   for (int i = 0; i < count; i++) {
     p = strchr(p, ',');
@@ -44,11 +44,11 @@ bool parseCereg(const char *line, CeregState &out) {
   if (strncmp(line, "+CEREG:", 7) != 0) return false;
   const char *p = line + 7;
   while (*p == ' ') p++;
-  // Only the "AT+CEREG?" query-reply shape "+CEREG: <n>,<stat>[,tac,ci,act]"
-  // is handled - ModemNBIoT always polls rather than enabling unsolicited
-  // +CEREG URCs, so that's the only shape it ever needs to read. (The
-  // unsolicited URC shape is ambiguous without that context: with +CEREG=2
-  // its first field IS <stat>, not <n> - ambiguity queries don't have.)
+  // Solo se trata la forma de respuesta a la consulta "AT+CEREG?":
+  // "+CEREG: <n>,<stat>[,tac,ci,act]". El modem siempre pregunta en vez de activar
+  // los avisos espontaneos +CEREG, asi que es la unica forma que necesita leer. (La
+  // forma espontanea es ambigua sin ese contexto: con +CEREG=2 su primer campo ES
+  // <stat>, no <n> - una ambiguedad que las consultas no tienen.)
   const char *statField = skipCommas(p, 1);
   if (!statField) return false;
   long stat = strtol(statField, nullptr, 10);
@@ -62,7 +62,7 @@ bool parseCsq(const char *line, int &rssiDbm) {
   const char *p = line + 5;
   while (*p == ' ') p++;
   long raw = strtol(p, nullptr, 10);
-  if (raw < 0 || raw > 31) return false;  // 99 (and anything else out of range) = not known
+  if (raw < 0 || raw > 31) return false;  // 99 (y cualquier otro fuera de rango) = desconocido
   rssiDbm = (int)(-113 + raw * 2);
   return true;
 }
@@ -106,8 +106,8 @@ bool parseCclk(const char *line, int64_t &epochMs) {
       ss > 60)
     return false;
 
-  // days_from_civil (Howard Hinnant) - days since 1970-01-01, proleptic
-  // Gregorian, no library/timezone dependency.
+  // days_from_civil (Howard Hinnant): dias desde el 1970-01-01, calendario
+  // gregoriano, sin depender de ninguna libreria de fechas ni de zonas horarias.
   long y = 2000 + yy;
   unsigned m = (unsigned)mon;
   unsigned d = (unsigned)day;
@@ -120,26 +120,25 @@ bool parseCclk(const char *line, int64_t &epochMs) {
 
   long long secs = days * 86400LL + hh * 3600LL + mm * 60LL + ss;
 
-  // THE TIME FIELD FROM THIS MODULE IS ALREADY UTC - do not subtract the offset.
+  // LA HORA QUE DA ESTE MODULO YA ESTA EN UTC: no restar la zona horaria.
   //
-  // 3GPP says +CCLK? returns LOCAL time with the timezone offset alongside, so the
-  // obvious reading is "subtract the offset to get UTC". This BC660K-GL does not
-  // behave that way: it reports UTC in the time field while still advertising the
-  // local offset. Subtracting double-corrects and puts every timestamp exactly one
-  // offset into the past.
+  // La norma 3GPP dice que +CCLK? devuelve la hora LOCAL con la zona al lado, asi que
+  // lo obvio seria "restar la zona para tener UTC". Este BC660K-GL no se comporta
+  // asi: da UTC en el campo de la hora aunque siga anunciando la zona local. Restarla
+  // corrige dos veces y pone todas las marcas de tiempo una zona entera en el pasado.
   //
-  // Measured on hardware 2026-09-14:
-  //   modem  +CCLK: 26/09/14,08:46:08+08   (+08 quarter-hours = +2h, Spain CEST)
-  //   PC UTC        2026-09-14 08:45:54
-  //   old parse ->  2026-09-14 06:46:08    = 2.00 hours EARLY
+  // Medido en el hardware el 2026-09-14:
+  //   modem          +CCLK: 26/09/14,08:46:08+08   (+08 cuartos de hora = +2 h, horario de verano)
+  //   UTC del PC     2026-09-14 08:45:54
+  //   antes salia -> 2026-09-14 06:46:08    = 2,00 horas ANTES
   //
-  // The time field matches UTC to within the 14s of round-trip, so it is UTC.
+  // El campo de la hora coincide con UTC con los 14 s de ida y vuelta, asi que es UTC.
   //
-  // tzQuarters is still parsed - it must be consumed to validate the line, and it
-  // is worth keeping for diagnosis - but it is deliberately NOT applied. If a
-  // different module is ever used, verify this against a known clock before
-  // reinstating the subtraction; the failure is silent and looks like a server-side
-  // display problem rather than a parsing bug.
+  // tzQuarters se sigue leyendo - hay que consumirlo para validar la linea y sirve
+  // para diagnosticar - pero a proposito NO se aplica. Si alguna vez se usa otro
+  // modulo, comprobarlo contra un reloj conocido antes de volver a restar; el fallo
+  // es silencioso y parece un problema de visualizacion del servidor, no de este
+  // codigo.
   (void)tzQuarters;
 
   epochMs = (int64_t)secs * 1000LL;
@@ -198,8 +197,8 @@ bool parseQmtconn(const char *line, int &clientIdx, int &result, int &retCode) {
   const char *retCodeField = skipCommas(p, 2);
   clientIdx = (int)strtol(p, nullptr, 10);
   result = (int)strtol(resultField, nullptr, 10);
-  // retCode only accompanies result==0 (a response was actually received) -
-  // absent otherwise, so don't fail the whole parse over a missing field.
+  // retCode solo acompana a result==0 (llego una respuesta de verdad); en otro caso
+  // falta, asi que no se rechaza la linea entera por un campo ausente.
   retCode = retCodeField ? (int)strtol(retCodeField, nullptr, 10) : -1;
   return true;
 }
@@ -256,7 +255,7 @@ bool parseQmtrecv(const char *line, MqttMessage &out) {
   if (end == p || *end != ',') return false;
   p = end + 1;
 
-  // topic: the first quoted run
+  // topic: el primer tramo entre comillas
   if (*p != '"') return false;
   const char *topicStart = p + 1;
   const char *topicEnd = strchr(topicStart, '"');
@@ -264,10 +263,10 @@ bool parseQmtrecv(const char *line, MqttMessage &out) {
   size_t topicLen = (size_t)(topicEnd - topicStart);
   if (topicLen >= kMqttTopicLen) topicLen = kMqttTopicLen - 1;
 
-  // payload: from the quote that opens after the topic, to the LAST quote on
-  // the line. Skipping whatever sits between (an optional length field) means
-  // both URC shapes work, and taking the last quote means embedded commas in
-  // the JSON can't truncate it.
+  // contenido: desde la comilla que se abre tras el topic hasta la ULTIMA comilla de
+  // la linea. Saltarse lo que haya en medio (un campo de longitud opcional) hace que
+  // funcionen las dos formas del aviso, y tomar la ultima comilla impide que las
+  // comas del JSON lo corten.
   const char *afterTopic = topicEnd + 1;
   const char *payStart = strchr(afterTopic, '"');
   if (!payStart) return false;
@@ -288,7 +287,7 @@ bool parseQmtrecv(const char *line, MqttMessage &out) {
 
 namespace {
 
-// Returns a pointer just past the ':' that follows "<key>", or nullptr.
+// Devuelve un puntero justo despues del ':' que sigue a "<clave>", o nullptr.
 const char *jsonSeekValue(const char *json, const char *key) {
   char quoted[40];
   size_t n = strlen(key);
@@ -344,7 +343,7 @@ bool jsonString(const char *json, const char *key, char *out, size_t cap) {
 bool jsonInt(const char *json, const char *key, long &out) {
   const char *p = jsonSeekValue(json, key);
   if (!p) return false;
-  if (*p == '"') p++;  // tolerate a quoted number
+  if (*p == '"') p++;  // aceptar tambien un numero entre comillas
   char *end = nullptr;
   long v = strtol(p, &end, 10);
   if (end == p) return false;
@@ -382,9 +381,9 @@ bool jsonObject(const char *json, const char *key, char *out, size_t cap) {
 
 bool jsonNextPair(const char *&cursor, char *key, size_t keyCap, char *value, size_t valueCap) {
   const char *p = cursor;
-  // advance to the next quoted key
+  // avanzar hasta la siguiente clave entre comillas
   while (*p && *p != '"') {
-    if (*p == '}') return false;  // end of this object
+    if (*p == '}') return false;  // fin de este objeto
     p++;
   }
   if (*p != '"') return false;
@@ -423,6 +422,8 @@ bool jsonNextPair(const char *&cursor, char *key, size_t keyCap, char *value, si
   return true;
 }
 
+// ---- HISTORICO: via UDP (ya no la usa la via MQTT; solo la prueba unitaria) ----
+
 bool parseDownlink(const char *text, DownlinkAck &out) {
   out = DownlinkAck{};
   if (strncmp(text, "ACK,", 4) != 0) return false;
@@ -435,13 +436,13 @@ bool parseDownlink(const char *text, DownlinkAck &out) {
   out.valid = true;
 
   p = end;
-  if (*p != ',') return true;  // bare "ACK,<seq>" - valid, no CFG attached
+  if (*p != ',') return true;  // "ACK,<seq>" a secas: valido, sin CFG
   p++;
-  if (strncmp(p, "CFG,", 4) != 0) return true;  // unrecognized suffix - ACK itself still stands
+  if (strncmp(p, "CFG,", 4) != 0) return true;  // sufijo desconocido: el ACK en si sigue valiendo
   p += 4;
 
   long version = strtol(p, &end, 10);
-  if (end == p || version < 0) return true;  // malformed CFG header - ignore just the CFG part
+  if (end == p || version < 0) return true;  // cabecera CFG mal formada: se ignora solo la parte CFG
   out.cfgVersion = (uint8_t)version;
   out.hasCfg = true;
   p = end;
@@ -461,8 +462,8 @@ bool parseDownlink(const char *text, DownlinkAck &out) {
       memcpy(slot.value, eq + 1, valLen);
       slot.value[valLen] = '\0';
     }
-    // A malformed/oversized token just doesn't get stored - the rest of the
-    // line is still worth parsing, so fall through to advance p either way.
+    // Un elemento mal formado o demasiado largo simplemente no se guarda; el resto de
+    // la linea merece la pena leerlo, asi que se avanza p en cualquier caso.
     p = nextComma ? nextComma : eq + 1 + valLen;
   }
   return true;

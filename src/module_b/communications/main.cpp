@@ -1,23 +1,32 @@
 /*
- * CHIP FOREST LoRa ground-station receiver.
+ * =============================================================================
+ * CHIP FOREST - MODULO B (PASARELA) - FIRMWARE DE PRODUCCION
+ * =============================================================================
  *
- * Standalone firmware, no sensors attached to this board - it only receives
- * telemetry over a RYLR998 LoRa module and serves it as a small live dashboard
- * over a self-hosted WiFi AP. No sensor data is transmitted from this end.
+ * Que hace esta placa:
+ *   Recibe por radio LoRa las tramas de los nodos sensores (Modulo C), las
+ *   interpreta, les pone hora real y las sube a ThingsBoard por la red movil NB-IoT
+ *   usando MQTT. En sentido contrario, recibe ordenes de ThingsBoard (Modulo A) y se
+ *   las entrega a cada nodo en su ventana de escucha, ademas de darles la hora de red.
+ *   No tiene sensores propios.
  *
- * Wiring (ESP32-S3-Zero, see include/Config.h):
- *   Module VDD  -> 3V3
- *   Module GND  -> GND
- *   Module TXD  -> GPIO4 (ESP RX)
- *   Module RXD  -> GPIO5 (ESP TX)
- *   Module NRST -> floating
+ *   Modulo C  --LoRa 868 MHz-->  Modulo B  --NB-IoT / MQTT-->  ThingsBoard
+ *             <--CFG,...-------            <--RPC-------------
  *
- * Architecture: radio/RYLR998 (LoRa transport) and telemetry/TelemetryParser
- * (payload -> SensorSnapshot) know nothing about the web server; this file is
- * the only place all three meet. loop() interleaves web-client servicing and
- * radio polling - neither blocks the other, so serving a page can never cause
- * a missed packet, and waiting on the radio (which poll() never does) can
- * never stall the server.
+ * Ademas ofrece, para el banco, una pantalla OLED con el estado y un pequeno panel
+ * web por su propio punto de acceso WiFi (con descarga del historico en CSV).
+ *
+ * Cableado de la radio (ver Config.h):
+ *   VDD del modulo -> 3V3          GND del modulo  -> GND
+ *   TXD del modulo -> GPIO4 (RX)   RXD del modulo  -> GPIO5 (TX)
+ *   NRST del modulo -> al aire
+ *
+ * Arquitectura: radio/RYLR998 (transporte LoRa), telemetry/TelemetryParser (texto
+ * -> SensorSnapshot) y modem_nbiot_mqtt (subida a ThingsBoard) no saben nada unos de
+ * otros ni del servidor web; este archivo es el unico sitio donde se juntan. loop()
+ * va alternando el servidor web, la radio y el modem, y ninguno bloquea a los demas:
+ * servir una pagina nunca hace perder un paquete, y esperar a la radio (que poll()
+ * nunca hace) nunca para el servidor.
  */
 
 #include <Arduino.h>
@@ -33,33 +42,37 @@
 #include "telemetry/TelemetryParser.h"
 #include "web/DashboardPage.h"
 
-// -1 = no separate reset pin - this module's RESET ties to the ESP32's own
-// reset, same convention as every other SSD1306 breakout on this project.
+// -1 = sin pin de reset propio: el RESET de este modulo va unido al del propio
+// ESP32, como en todas las placas SSD1306 de este proyecto.
 Adafruit_SSD1306 oled(OLED_WIDTH, OLED_HEIGHT, &Wire, -1);
 
 RYLR998 radio(Serial1, LORA_RX_PIN, LORA_TX_PIN, LORA_BAUD);
-// UART2 - deliberately not Serial1, which the LoRa radio above already owns.
-// See the NB-IoT wiring comment in Config.h. Pins here are the
-// hardware-confirmed GP44/GP43 (native UART0), not the stale GP8/GP7 an
-// earlier assumption used - see Config.h's NB-IoT section.
+// UART2 - a proposito no Serial1, que ya es de la radio LoRa de arriba. Ver el
+// cableado del NB-IoT en Config.h: los pines son GP44/GP43 (UART0 nativo),
+// confirmados en el hardware, no los GP8/GP7 que se supusieron al principio.
 ModemNBIoTMqtt modem(Serial2, NBIOT_RX_PIN, NBIOT_TX_PIN, NBIOT_EN_PIN, NBIOT_CHANNEL_PIN, NBIOT_PWRKEY_PIN);
 WebServer server(80);
 
+// La ultima lectura recibida (la que muestra el panel web y la OLED).
 SensorSnapshot g_latest;
 
-// Ring buffer of every successfully-parsed reading received over LoRa, in
-// RAM only (lost on reboot/power loss) - see Config.h's LORA_HISTORY_CAPACITY.
-// Independent of modem's own uplink ring (that one exists to batch for
-// NB-IoT and gets drained on publish; this one is purely a local record for
-// /history and is never drained, just wraps oldest-first once full).
+// Anillo con cada lectura LoRa interpretada con exito, solo en RAM (se pierde al
+// reiniciar o al quedarse sin corriente) - ver LORA_HISTORY_CAPACITY en Config.h.
+// Independiente del anillo propio del modem: aquel existe para agrupar las subidas
+// por NB-IoT y se vacia al publicar; este es solo un registro local para /history,
+// nunca se vacia y, cuando se llena, sobrescribe empezando por la mas antigua.
 SensorSnapshot g_history[LORA_HISTORY_CAPACITY];
 uint16_t g_historyHead = 0;
 uint16_t g_historyCount = 0;
 
+// ---- Panel web ----
+
+// Pagina principal: el HTML de web/DashboardPage.h.
 static void handleRoot() {
   server.send_P(200, "text/html", DASHBOARD_HTML);
 }
 
+// /data: la ultima lectura y el estado del modem, en JSON, para el panel.
 static void handleData() {
   uint32_t now = millis();
   bool stale = g_latest.hasData && (now - g_latest.lastHeardMs > DATA_STALE_MS);
@@ -90,12 +103,11 @@ static void handleData() {
   server.send(200, "application/json", json);
 }
 
-// Serves every buffered reading as a downloadable CSV - millisSinceBoot lets
-// you compute wall-clock time if you know when the board booted, and stays
-// monotonic across the whole buffer even though there's no RTC on this
-// board. Oldest reading first. Built into a static buffer (not the Arduino
-// String heap) sized for LORA_HISTORY_CAPACITY rows at this row width, with
-// room to spare - see the size check below if either grows.
+// /history: todas las lecturas guardadas como CSV descargable, de la mas antigua a
+// la mas reciente. millisSinceBoot permite calcular la hora real si se sabe cuando
+// arranco la placa, y es monotono en todo el historico aunque esta placa no tenga
+// reloj. Se construye en un buffer estatico (no en el monton de String de Arduino)
+// dimensionado para LORA_HISTORY_CAPACITY filas de este ancho, con margen.
 static char g_historyCsvBuf[LORA_HISTORY_CAPACITY * 110 + 256];
 
 static void handleHistory() {
@@ -144,13 +156,15 @@ static void handleHistory() {
   server.send(200, "text/csv", g_historyCsvBuf);
 }
 
-// Draws a 4-bar phone-style signal indicator (bars grow left->right, filled
-// up to the current level) at top-left corner (x, y), bottom-aligned within
-// an 8px-tall row. Thresholds are the common cellular-bar convention, mapped
-// onto parseCsq()'s -113..-51 dBm range (see NbiotProtocol.cpp); rssiDbm==0
-// means "no AT+CSQ reading yet" (a real reading is never 0), drawn as all
-// bars empty rather than misleadingly showing signal that hasn't been
-// measured.
+// ---- Pantalla OLED ----
+
+// Dibuja un indicador de cobertura de 4 barras, estilo movil (crecen de izquierda a
+// derecha y se rellenan hasta el nivel actual), con la esquina en (x, y), alineado
+// abajo dentro de una fila de 8 px de alto. Los umbrales son la convencion habitual
+// de barras de movil, sobre el rango -113..-51 dBm de parseCsq() (ver
+// NbiotProtocol.cpp). rssiDbm==0 significa "aun no hay lectura de AT+CSQ" (una
+// lectura real nunca es 0) y se dibuja con todas las barras vacias, en vez de
+// mostrar una cobertura que no se ha medido.
 static void drawSignalBars(int x, int y, int rssiDbm) {
   int level;
   if (rssiDbm == 0) {
@@ -167,7 +181,7 @@ static void drawSignalBars(int x, int y, int rssiDbm) {
 
   const int barW = 3, gap = 1, maxH = 8;
   for (int i = 0; i < 4; i++) {
-    int h = (i + 1) * 2;  // 2, 4, 6, 8 px tall
+    int h = (i + 1) * 2;  // 2, 4, 6, 8 px de alto
     int bx = x + i * (barW + gap);
     int by = y + (maxH - h);
     if (i < level) {
@@ -178,12 +192,12 @@ static void drawSignalBars(int x, int y, int rssiDbm) {
   }
 }
 
-// Refreshes the OLED with a compact live-activity view - answers "what is
-// this board doing right now" at a glance without needing the web dashboard:
-// LoRa RX recency/link quality, and the NB-IoT/MQTT state machine's current
-// state (stateName() literally reads "PUBLISHING" while a batch is actively
-// being sent over NB-IoT, "ATTACHING"/"MQTT_CONNECT" while connecting, "IDLE"
-// while just waiting on the next batch - see modem_nbiot_mqtt.h's State enum).
+// Refresca la OLED con una vista compacta de la actividad, para saber de un vistazo
+// que esta haciendo la placa sin necesitar el panel web: lo reciente de la recepcion
+// LoRa y su calidad, y el estado actual de la maquina de estados NB-IoT/MQTT
+// (stateName() pone literalmente "PUBLISHING" mientras se esta mandando un lote,
+// "ATTACHING"/"MQTT_CONNECT" mientras conecta, "IDLE" mientras espera al siguiente
+// lote - ver el enum State de modem_nbiot_mqtt.h).
 static void updateOledStatus() {
   uint32_t now = millis();
 
@@ -196,8 +210,8 @@ static void updateOledStatus() {
 
   if (g_latest.hasData) {
     uint32_t ageS = (now - g_latest.lastHeardMs) / 1000;
-    // "RX!" window is short (a fresh packet is momentary, not a stream) -
-    // just long enough that a 500ms-refreshed screen visibly catches it.
+    // La marca "RX!" dura poco (un paquete nuevo es un instante, no un flujo): lo
+    // justo para que una pantalla que se refresca cada 500 ms lo llegue a mostrar.
     oled.printf("LoRa: %s hace %lus\n", ageS < 3 ? "RX!" : "inactivo", (unsigned long)ageS);
     oled.printf(" rssi %d snr %d\n", g_latest.rssi, g_latest.snr);
   } else {
@@ -210,11 +224,14 @@ static void updateOledStatus() {
   oled.printf("Env %lu Err %lu Prd %lu\n", (unsigned long)modem.packetsSent(),
               (unsigned long)modem.packetsFailed(), (unsigned long)modem.packetsDropped());
 
-  drawSignalBars(112, 0, modem.rssiDbm());  // top-right corner, same row as "Modulo B"
+  drawSignalBars(112, 0, modem.rssiDbm());  // esquina superior derecha, en la fila de "Modulo B"
 
   oled.display();
 }
 
+// =============================================================================
+// setup(): WiFi + panel web, OLED, radio LoRa y arranque (no bloqueante) del modem
+// =============================================================================
 void setup() {
   Serial.begin(115200);
   uint32_t waitStart = millis();
@@ -224,6 +241,7 @@ void setup() {
   Serial.println();
   Serial.println("=== CHIP FOREST LoRa ground-station receiver ===");
 
+  // Punto de acceso WiFi propio, para el panel web local.
   WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASSWORD);
   IPAddress apIP = WiFi.softAPIP();
   Serial.printf("WiFi AP: SSID=\"%s\"  password=\"%s\"\n", WIFI_AP_SSID, WIFI_AP_PASSWORD);
@@ -245,9 +263,10 @@ void setup() {
   }
 
   pinMode(LORA_EN_PIN, OUTPUT);
-  digitalWrite(LORA_EN_PIN, LOW);  // power on LoRa rail (Q4 gate) - confirmed LOW=on by pin scan
+  digitalWrite(LORA_EN_PIN, LOW);  // encender el rail de LoRa (puerta Q4) - LOW = encendido, confirmado probando pines
   delay(300);
 
+  // Los parametros del enlace TIENEN que coincidir con los de los nodos.
   Serial.println("Configuring RYLR998 (link parameters must match the sensor node):");
   bool ok = radio.begin(LORA_MY_ADDR, LORA_NETWORK_ID, LORA_BAND_HZ,
                          {LORA_PARAM_SF, LORA_PARAM_BW, LORA_PARAM_CR, LORA_PARAM_PREAMBLE}, &Serial);
@@ -255,16 +274,19 @@ void setup() {
                      : "Radio init FAILED - check wiring/baud before assuming a parameter is wrong.");
   Serial.println();
 
+  // El modem arranca aqui pero trabaja poco a poco en cada vuelta de loop() (tick()).
   Serial.println("Starting NB-IoT/MQTT uplink to ThingsBoard - non-blocking, see modem_nbiot_mqtt.h:");
   modem.begin();
   Serial.println();
 }
 
-// Last charge state heard from each node, by LoRa address.
+// ---- Ultimo estado conocido de cada nodo ----
+
+// Ultimo estado de carga de cada nodo, por direccion LoRa.
 //
-// Kept separate from the telemetry ring because STAT and telemetry arrive as
-// different packets at different times - a node transmits its readings and its
-// health independently, and either may be the one that gets through.
+// Se guarda aparte del anillo de telemetria porque STAT y telemetria llegan en
+// paquetes distintos en momentos distintos: un nodo transmite sus lecturas y su
+// salud por separado, y cualquiera de los dos puede ser el que llegue.
 struct NodeCharge {
   uint16_t addr;
   int16_t pct;
@@ -289,9 +311,9 @@ static void nodeChargeRemember(uint16_t addr, int pct, int mv) {
   }
 }
 
-// Last fire state heard from each node, by LoRa address. Same shape as the charge
-// store and for the same reason: STAT and telemetry are separate packets that
-// arrive at different times, and either may be the one that gets through.
+// Ultimo estado de incendio de cada nodo, por direccion LoRa. Misma forma que el de
+// carga y por el mismo motivo: STAT y telemetria son paquetes distintos que llegan
+// en momentos distintos, y cualquiera puede ser el que llegue.
 struct NodeAlarm {
   uint16_t addr;
   int8_t state;
@@ -313,6 +335,7 @@ static void nodeAlarmRemember(uint16_t addr, int state) {
   }
 }
 
+// Copia en una lectura el ultimo estado de incendio conocido de su nodo.
 static void nodeAlarmAttach(SensorSnapshot &snap) {
   for (uint8_t i = 0; i < g_nodeAlarmCount; i++) {
     if (g_nodeAlarm[i].addr == snap.senderAddr) {
@@ -322,6 +345,7 @@ static void nodeAlarmAttach(SensorSnapshot &snap) {
   }
 }
 
+// Copia en una lectura el ultimo estado de carga conocido de su nodo.
 static void nodeChargeAttach(SensorSnapshot &snap) {
   for (uint8_t i = 0; i < g_nodeChargeCount; i++) {
     if (g_nodeCharge[i].addr == snap.senderAddr) {
@@ -332,50 +356,54 @@ static void nodeChargeAttach(SensorSnapshot &snap) {
   }
 }
 
+// =============================================================================
+// loop(): servidor web, recepcion LoRa, maquina de estados del modem y OLED
+// =============================================================================
 void loop() {
   server.handleClient();
 
+  // ---- Cada trama LoRa que haya llegado ----
   LoRaMessage msg;
   while (radio.poll(msg)) {
     Serial.printf("+RCV addr=%u len=%u rssi=%d snr=%d data=\"%.*s\"\n", msg.senderAddr, msg.length,
                   msg.rssi, msg.snr, msg.length, msg.payload);
 
-    // FIRST, before any parsing: if Module A queued a command for this node,
-    // fire it now. This uplink is the node's only listening moment - it opens
-    // a ~2s window right after transmitting and then goes deaf until its next
-    // send period. Anything we do before this send eats into that window.
+    // LO PRIMERO, antes de interpretar nada: si Modulo A tiene una orden en cola para
+    // este nodo, mandarla ya. Esta subida es el unico momento en que el nodo escucha:
+    // abre una ventana de ~2 s justo despues de transmitir y luego queda sordo hasta su
+    // siguiente envio. Todo lo que se haga antes de este envio se come esa ventana.
     char nodeName[24];
     nbiotResolveNodeName(msg.senderAddr, nodeName, sizeof(nodeName));
-    // ONLY A TELEMETRY FRAME OPENS A WINDOW. STAT AND ACK DO NOT.
+    // SOLO UNA TRAMA DE TELEMETRIA ABRE VENTANA. STAT Y ACK NO.
     //
-    // Module C's order is: transmit telemetry -> hold the ~2s listen window ->
-    // transmit STAT. The window is BETWEEN those two frames. So by the time a
-    // STAT frame arrives here the node has already closed it and is
-    // transmitting; a downlink fired on STAT is lost for certain. Same for an
-    // ACK frame, which the node sends from inside the window and then leaves it.
+    // El orden de Modulo C es: transmitir telemetria -> mantener ~2 s la ventana de
+    // escucha -> transmitir STAT. La ventana esta ENTRE esas dos tramas. Asi que
+    // cuando llega aqui un STAT, el nodo ya la ha cerrado y esta transmitiendo: una
+    // orden mandada al recibir el STAT se pierde seguro. Lo mismo con un ACK, que el
+    // nodo manda desde dentro de la ventana y despues sale de ella.
     //
-    // Firing on every received frame therefore wasted an attempt whenever a
-    // command happened to be queued between a node's telemetry and its STAT.
-    // Seen on requestId 0, 2026-10-06:
+    // Disparar con cada trama recibida desperdiciaba un intento cada vez que habia una
+    // orden en cola entre la telemetria de un nodo y su STAT. Visto con la peticion 0,
+    // 2026-10-06:
     //
     //   +RCV addr=4 data="STAT,4922,8,0,10100,63,3120,86,0"
     //     -> downlink to NodoC-3: CFG,temp_pre_off=47,... (sent)
-    //   (no ACK; recovered 68s later by the retry)
+    //   (sin ACK; recuperado 68 s despues por el reintento)
     //
-    // and on requestId 10 yesterday, fired on the node's own ACK frame.
+    // y con la peticion 10 el dia anterior, disparada con el propio ACK del nodo.
     //
-    // A telemetry frame is anything that is not one of the node's reply or
-    // status payloads. Identified by prefix because that is what distinguishes
-    // them on the wire - a reading row starts with a number or 'B,' for a batch.
+    // Una trama de telemetria es cualquier cosa que no sea una de las respuestas o
+    // estados del nodo. Se reconoce por el prefijo, que es lo que las distingue en el
+    // aire: una lectura empieza por un numero, o por 'B,' si es un lote.
     const bool opensWindow =
         !(msg.length >= 5 && strncmp(msg.payload, "STAT,", 5) == 0) &&
         !(msg.length >= 4 && strncmp(msg.payload, "ACK,", 4) == 0) &&
         !(msg.length >= 5 && strncmp(msg.payload, "NACK,", 5) == 0);
 
     if (opensWindow) {
-      // Ask by DEVICE, not "is anything pending": with a queue, the head may be
-      // for a different node that has not woken up, and that must not stop this
-      // one being served in the window it just opened.
+      // Preguntar POR DISPOSITIVO, no "hay algo pendiente": con una cola, la primera
+      // orden puede ser para otro nodo que no se ha despertado, y eso no debe impedir
+      // atender a este en la ventana que acaba de abrir.
       const char *cfg = modem.nodeCommandCfgFor(nodeName);
       if (cfg) {
         bool sent = radio.send(msg.senderAddr, cfg, (uint8_t)strlen(cfg));
@@ -418,64 +446,65 @@ void loop() {
       }
     }
 
-    // A node's reply to a config push, not telemetry - route it to the modem
-    // so it can answer the original RPC, and don't try to parse it as a
-    // reading (it would just be dropped as "wrong field count").
+    // La respuesta de un nodo a una orden, no telemetria: se pasa al modem para que
+    // conteste al RPC original, y no se intenta interpretar como lectura (se tiraria
+    // por "numero de campos incorrecto").
     if (msg.length >= 4 && strncmp(msg.payload, "ACK,", 4) == 0) {
       modem.onNodeCommandAck(nodeName, msg.payload);
       continue;
     }
 
-    // The node understood the command and applied nothing. Checked BEFORE the
-    // telemetry parser for the same reason as ACK - it is a reply, not a reading,
-    // and would otherwise be dropped as "wrong field count" with no trace.
+    // El nodo entendio la orden pero no aplico nada. Se mira ANTES del interprete de
+    // telemetria por el mismo motivo que el ACK: es una respuesta, no una lectura, y
+    // si no se tiraria por "numero de campos incorrecto" sin dejar rastro.
     if (msg.length >= 5 && strncmp(msg.payload, "NACK,", 5) == 0) {
       modem.onNodeCommandNack(nodeName, msg.payload + 5);
       continue;
     }
 
-    // STAT - the node's own health packet, not telemetry.
+    // STAT - el paquete de salud del propio nodo, no telemetria.
     //
-    //   STAT,<wake>,<resetReason>,<boots>,<bme><bmv><co2><co><wind>,<ageTicks>,<mV>,<pct>
+    //   STAT,<despertar>,<motivoReinicio>,<arranques>,<bme><bmv><co2><co><viento>,<antiguedad>,<mV>,<pct>,<alarma>
     //
-    // It is a separate packet precisely so it cannot break the 13-field telemetry
-    // parser, but the charge state in it is worth having in ThingsBoard - a node
-    // that is about to run out of energy should say so where someone will see it.
-    // So the values are remembered per node here and attached to that node's next
-    // telemetry publish.
+    // Es un paquete aparte precisamente para no romper el interprete de telemetria de
+    // 13 campos, pero el estado de carga que lleva merece estar en ThingsBoard: un nodo
+    // a punto de quedarse sin energia deberia decirlo donde alguien lo vea. Asi que los
+    // valores se recuerdan por nodo y se adjuntan a la siguiente publicacion de
+    // telemetria de ese nodo.
     if (msg.length >= 5 && strncmp(msg.payload, "STAT,", 5) == 0) {
       char buf[96];
       size_t n = msg.length < sizeof(buf) - 1 ? msg.length : sizeof(buf) - 1;
       memcpy(buf, msg.payload, n);
       buf[n] = 0;
 
-      // Fields 7 and 8 (0-based 6 and 7) are the sense reading and the percentage.
+      // Los campos 6, 7 y 8 (contando desde 0) son los mV, el porcentaje y la alarma.
       int field = 0;
       int mv = -1, pct = -1, alarm = -1;
       char *tok = strtok(buf, ",");
       while (tok) {
         if (field == 6) mv = atoi(tok);
         if (field == 7) pct = atoi(tok);
-        if (field == 8) alarm = atoi(tok);  // 0 normal, 1 pre-alarm, 2 alarm
+        if (field == 8) alarm = atoi(tok);  // 0 normal, 1 pre-alarma, 2 alarma
         field++;
         tok = strtok(nullptr, ",");
       }
 
-      // FIRE STATE - the reason this whole path exists.
+      // ESTADO DE INCENDIO - la razon de ser de todo este camino.
       //
-      // Remembered per node and attached to that node's next telemetry publish,
-      // and when raised it also short-circuits the batch window so it goes out now
-      // rather than up to a minute later. Batching is right for telemetry and
-      // wrong for a fire.
+      // Se recuerda por nodo y se adjunta a la siguiente publicacion de telemetria de
+      // ese nodo, y si esta levantado ademas se salta la espera del lote para que salga
+      // YA en vez de hasta un minuto despues. Agrupar en lotes esta bien para la
+      // telemetria y mal para un incendio.
       //
-      // Field 8 is absent on older node firmware, which leaves alarm at -1 and is
-      // reported as unknown rather than as NORMAL. A dashboard confidently showing
-      // NORMAL for a node that never said is worse than one showing nothing.
+      // El campo 8 no existe en firmware antiguo de nodo, lo que deja alarm a -1 y se
+      // informa como desconocido, no como NORMAL. Un panel que muestra NORMAL con
+      // seguridad para un nodo que nunca lo dijo es peor que uno que no muestra nada.
       if (alarm >= 0) {
         nodeAlarmRemember(msg.senderAddr, alarm);
-        // Readings for this node are already queued carrying the previous state -
-        // the node sends telemetry before its STAT. Restamp them, or the flush
-        // below publishes the very value it exists to correct.
+        // Las lecturas de este nodo ya estan en cola con el estado anterior - el nodo
+        // manda la telemetria antes que su STAT. Hay que reetiquetarlas, o la
+        // publicacion inmediata de abajo subiria justo el valor que existe para
+        // corregir.
         modem.applyAlarmToQueued(msg.senderAddr, (int8_t)alarm);
         if (alarm > 0) {
           char who[32];
@@ -487,21 +516,19 @@ void loop() {
         }
       }
 
-      // THREE outcomes here, not two. A node that sends no charge fields at all
-      // and a node that sends them as "unknown" are different problems, and
-      // collapsing them sends someone hunting a firmware version that is fine.
+      // TRES casos aqui, no dos. Un nodo que no manda los campos de carga y uno que
+      // los manda como "desconocido" son problemas distintos, y juntarlos manda a
+      // alguien a buscar una version de firmware que esta bien.
       //
-      // pct == -1 is the NORMAL state today: it means SUPERCAP_CALIBRATED is 0 on
-      // the node because the GPIO14 divider ratio has never been measured. Every
-      // node reports that. It is not old firmware.
+      // pct == -1 puede ser lo NORMAL: significa que el nodo no tiene el divisor
+      // calibrado o no lo lleva montado. No es firmware antiguo.
       if (field <= 7) {
-        // Genuinely short packet - the mV/percentage fields do not exist.
+        // Paquete corto de verdad: los campos de mV/porcentaje no existen.
         Serial.printf("  STAT has only %d fields - node predates the charge report\n", field);
       } else {
-        // The fields are present. Remember them EVEN WHEN pct is -1: the raw
-        // millivolts are what the calibration will be derived from, so throwing
-        // them away because the percentage is unknown discards the one number
-        // that would let us work the percentage out.
+        // Los campos estan. Se recuerdan AUNQUE pct sea -1: los milivoltios en crudo
+        // son de donde saldra la calibracion, asi que tirarlos porque el porcentaje
+        // es desconocido descartaria justo el numero que permitiria calcularlo.
         nodeChargeRemember(msg.senderAddr, pct, mv);
         if (pct >= 0) {
           Serial.printf("  node health: charge %d%% (%d mV at the sense pin)\n", pct, mv);
@@ -513,11 +540,11 @@ void loop() {
       continue;
     }
 
-    // A node sends either a single reading or a BATCH of them. Both shapes end up
-    // here; keep them apart, because squeezing a batch through the single-reading
-    // parser is what corrupted the data reaching ThingsBoard - the "B" and the
-    // count were read as temperature and humidity, every field shifted by two, and
-    // the batch's second reading was discarded outright.
+    // Un nodo manda o una lectura suelta o un LOTE de ellas. Las dos formas acaban
+    // aqui; hay que mantenerlas separadas, porque meter un lote por el interprete de
+    // lecturas sueltas es lo que corrompia los datos que llegaban a ThingsBoard: la
+    // "B" y el numero se leian como temperatura y humedad, todos los campos se
+    // desplazaban dos posiciones y la segunda lectura del lote se tiraba entera.
     SensorSnapshot batch[BATCH_RX_MAX];
     uint16_t ages[BATCH_RX_MAX] = {};
     uint8_t count = 0;
@@ -531,7 +558,7 @@ void loop() {
         Serial.printf("  batch of %u reading(s)\n", (unsigned)count);
       }
     } else if (TelemetryParser::parse(msg.payload, msg.length, batch[0])) {
-      ages[0] = 0;  // a single reading is current by definition
+      ages[0] = 0;  // una lectura suelta es actual por definicion
       count = 1;
     }
 
@@ -543,9 +570,9 @@ void loop() {
     for (uint8_t b = 0; b < count; b++) {
       SensorSnapshot &snap = batch[b];
       snap.hasData = true;
-      // Backdate by the record's age so a batched reading is timestamped when it
-      // was TAKEN, not when the packet happened to arrive. Single readings have
-      // age 0 and are unaffected.
+      // Se retrasa la marca de tiempo segun la antiguedad del registro, para que una
+      // lectura de un lote quede fechada cuando se TOMO, no cuando llego el paquete.
+      // Las lecturas sueltas tienen antiguedad 0 y no cambian.
       // LA EDAD VIENE EN SEGUNDOS REALES, medidos por el propio nodo.
       //
       // Antes se multiplicaba por NODE_TICK_SECONDS = 10, asumiendo que el nodo
@@ -562,11 +589,12 @@ void loop() {
       snap.senderAddr = msg.senderAddr;
       snap.rssi = msg.rssi;
       snap.snr = msg.snr;
-      nodeChargeAttach(snap);  // most recent STAT from this node, if any
+      nodeChargeAttach(snap);  // el ultimo STAT de este nodo, si lo hay
       nodeAlarmAttach(snap);
       g_latest = snap;
-      modem.enqueue(snap);
+      modem.enqueue(snap);  // a la cola de subida a ThingsBoard
 
+      // Y al historico local del panel web.
       uint16_t idx = (uint16_t)((g_historyHead + g_historyCount) % LORA_HISTORY_CAPACITY);
       g_history[idx] = snap;
       if (g_historyCount < LORA_HISTORY_CAPACITY) {
@@ -577,8 +605,10 @@ void loop() {
     }
   }
 
+  // ---- El modem: una pequena parte de su trabajo en cada vuelta, sin bloquear ----
   modem.tick();
 
+  // ---- La OLED, cada 500 ms ----
   static uint32_t lastOledMs = 0;
   if (millis() - lastOledMs >= 500) {
     lastOledMs = millis();

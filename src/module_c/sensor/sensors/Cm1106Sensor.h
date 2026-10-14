@@ -3,19 +3,27 @@
 #include "ISensor.h"
 #include <Arduino.h>
 
-// UART, request/response protocol with a checksum (sum of all 8 response bytes,
-// including the checksum byte itself, is 0 mod 256). EN held high for a warm-up
-// period before the first read is attempted. Confirmed running fine at 3.3V on this
-// board (an earlier unrelated project's CM1106 unit needed 5V - doesn't apply here).
+// =============================================================================
+// CM1106 (Cubic) - SENSOR DE CO2
+// =============================================================================
 //
-// COMSEL (UART vs I2C mode select) is unstrapped on this board revision, but this
-// part has consistently returned checksum-valid UART frames, so it's evidently
-// defaulting into UART mode reliably on this specific unit.
+// UART, protocolo pregunta-respuesta con checksum: la suma de los 8 bytes de la
+// respuesta, incluido el propio byte de checksum, es 0 modulo 256. El pin EN se
+// pone a nivel alto y se espera un tiempo de calentamiento antes del primer intento
+// de lectura. Cuelga del rail de 5 V conmutado.
 //
-// values[]: [0]=CO2 ppm.
+// MIDE SOLO AL ENCENDERSE: despues repite ese valor el resto del tiempo. Para
+// obtener un valor NUEVO hay que hacerle un ciclo de alimentacion con EN
+// (powerCycle()). No es un apano de un fallo: es como funciona la pieza.
+//
+// COMSEL (seleccion UART/I2C) no esta fijado en esta revision de placa, pero la
+// pieza ha devuelto siempre tramas UART con checksum valido, asi que en esta
+// unidad arranca en modo UART de forma fiable.
+//
+// values[]: [0] = CO2 en ppm.
 class Cm1106Sensor : public ISensor {
 public:
-  // Some breakouts don't expose an EN pin at all; pass kNoEnPin (and warmupMs=0) for those.
+  // Algunas placas no sacan el pin EN; para esas, pasar kNoEnPin (y warmupMs = 0).
   static constexpr uint8_t kNoEnPin = 0xFF;
 
   Cm1106Sensor(HardwareSerial &serial, uint8_t rxPin, uint8_t txPin, uint8_t enPin, uint32_t warmupMs,
@@ -27,28 +35,29 @@ public:
   void sleep() override;
   const char *name() const override { return "CM1106"; }
 
-  // Raw bytes of the most recent response, whatever its verdict. A parsed ppm that
-  // never changes can mean two very different things - a sensor returning a frozen
-  // but genuinely fresh frame, or a read path quietly recycling an old value - and
-  // only the wire bytes tell them apart. Length is 0 if nothing arrived.
+  // Bytes crudos de la ultima respuesta, sea cual sea su veredicto. Un valor en
+  // ppm que nunca cambia puede significar dos cosas muy distintas - un sensor que
+  // devuelve una trama nueva pero congelada, o un camino de lectura que reutiliza
+  // en silencio un valor viejo - y solo los bytes del cable las distinguen.
+  // Longitud 0 si no llego nada.
   const uint8_t *lastRaw() const { return _lastRaw; }
   uint8_t lastRawLen() const { return _lastRawLen; }
 
-  // Consecutive valid frames carrying the SAME CO2 value bytes (resp[3..4]).
+  // Tramas validas seguidas con el MISMO valor de CO2 (bytes resp[3..4]).
   //
-  // Deliberately NOT a whole-frame comparison: observed 2026-09-04, this unit
-  // keeps a counter in resp[6] that increments every read (checksum tracking it),
-  // so successive frames are never byte-identical even while the measurement
-  // itself is pegged. Whole-frame equality would therefore never fire. The device
-  // being alive and the measurement being live are separate facts - this tracks
-  // the second one.
+  // A proposito NO compara la trama entera: se vio el 2026-09-04 que esta unidad
+  // lleva un contador en resp[6] que sube en cada lectura (y el checksum con el),
+  // asi que dos tramas nunca son identicas aunque la medida este clavada. Comparar
+  // tramas enteras no detectaria nunca nada. Que el aparato este vivo y que la
+  // medida este viva son dos cosas distintas: esto vigila la segunda.
   uint16_t frozenValueRun() const { return _frozenRun; }
 
-  // The CO2 value bytes behind the most recent valid frame, for logging.
+  // Los bytes del valor de CO2 de la ultima trama valida, para el registro.
   uint16_t lastValueRaw() const { return _lastValue; }
 
-  // Power-cycle via EN. The datasheet offers no soft reset for this state, and the
-  // unit has previously only recovered from a full power cycle.
+  // Ciclo de alimentacion con EN: apagar offMs, encender y esperar el
+  // calentamiento. La hoja de datos no ofrece reinicio por software para este
+  // caso, y la unidad solo se ha recuperado siempre con un corte completo.
   void powerCycle(uint32_t offMs = 500);
 
 private:

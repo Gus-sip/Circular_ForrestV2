@@ -6,23 +6,33 @@
 #include <sfTk/bmv080.h>
 #include <sfTk/bmv080_defs.h>
 
-// I2C, shared bus. Uses the raw Bosch SDK directly rather than the SparkFun Arduino
-// wrapper (SparkFunBMV080/sfDevBMV080) - that wrapper collapses every
-// bmv080_status_code_t into a bare bool, which made the original wiring failure
-// (bmv080_open failing with E_BMV080_ERROR_HW_WRITE) impossible to see. The read/write
-// callbacks below are copied from the wrapper's own private implementation, not
-// reinvented: left-shift the 16-bit header by 1 bit for I2C, then delegate to
-// sfTkIBus::readRegister/writeRegister, with MSB-first byte order.
+// =============================================================================
+// BMV080 (Bosch) - PARTICULAS PM1 / PM2.5 / PM10
+// =============================================================================
 //
-// SET_LOOP_TASK_STACK_SIZE(60*1024) in the .cpp is required - bmv080_serve_interrupt
-// needs more stack than the ESP32 Arduino default loop task gets (per SparkFun's own
-// library header comment).
+// Bus I2C compartido. Usa directamente el SDK de Bosch en vez del envoltorio de
+// SparkFun para Arduino (SparkFunBMV080/sfDevBMV080): ese envoltorio reduce cada
+// bmv080_status_code_t a un simple verdadero/falso, y eso hizo invisible el fallo
+// de cableado original (bmv080_open fallando con E_BMV080_ERROR_HW_WRITE). Las
+// funciones de lectura/escritura de abajo estan copiadas de la implementacion
+// privada del propio envoltorio, no reinventadas: desplazar la cabecera de 16 bits
+// un bit a la izquierda para I2C y delegar en sfTkIBus::readRegister/writeRegister,
+// con el byte mas significativo primero.
 //
-// values[]: [0]=PM1, [1]=PM2.5, [2]=PM10 (ug/m3), [3]=obstructed (1/0).
-// Needs several seconds of continuous operation before a reading is valid (BMV080_STARTUP_DELAY_MS
-// in Config.h covers HW init/laser preheat/self-test) - readings can arrive before the
-// value has fully stabilized, since is_outside_measurement_range is the only validity
-// flag the SDK itself exposes.
+// SET_LOOP_TASK_STACK_SIZE(60*1024) en el .cpp es obligatorio:
+// bmv080_serve_interrupt necesita mas pila de la que el ESP32 da por defecto a la
+// tarea de loop (segun el comentario de la propia libreria de SparkFun).
+//
+// Los ficheros del SDK de Bosch (bmv080.h, bmv080_defs.h, lib_bmv080.a,
+// lib_postProcessor.a) NO vienen en la libreria publica: se copian a mano desde
+// bosch_bmv080_sdk/ con restore.ps1 (ver platformio.ini).
+//
+// values[]: [0] = PM1, [1] = PM2.5, [2] = PM10 (ug/m3), [3] = obstruido (1/0).
+// Necesita varios segundos funcionando antes de que una lectura sea valida
+// (BMV080_STARTUP_DELAY_MS en Config.h cubre arranque, precalentamiento del laser y
+// autotest). Pueden llegar lecturas antes de que el valor se estabilice del todo,
+// porque is_outside_measurement_range es el unico indicador de validez que expone
+// el SDK.
 class Bmv080Sensor : public ISensor {
 public:
   explicit Bmv080Sensor(uint8_t addr, TwoWire &wire = Wire) : _addr(addr), _wire(wire) {}
@@ -32,24 +42,22 @@ public:
   void sleep() override;
   const char *name() const override { return "BMV080"; }
 
-  // Duty-cycling. This part draws ~68mA with the laser running - by an order of
-  // magnitude the largest load in the system, and notes/power_budget.md budgets it
-  // for 20s every 30 min, not continuous operation. begin() leaves it measuring so
-  // presence is proven; the caller is expected to stopMeasurement() straight after
-  // and only start it again around an actual sample. Start/stop reuse the open
-  // handle, so neither pays the open/reset/self-test cost again.
+  // Encendido por turnos. Con el laser funcionando consume ~68 mA, con diferencia
+  // la mayor carga del sistema, asi que solo se enciende durante su propia medida.
+  // Arrancar y parar reutilizan el sensor ya abierto, asi que ninguna de las dos
+  // vuelve a pagar el coste de abrir/reiniciar/autotest.
   bool startMeasurement();
   bool stopMeasurement();
   bool isMeasuring() const { return _measuring; }
 
-  // Why begin() failed, and the SDK status code behind it. begin() otherwise
-  // collapses "not on the bus at any strap address" and "present but the laser
-  // would not start" into one bool - two faults with completely different causes
-  // and fixes.
+  // Por que fallo begin(), y el codigo de estado del SDK detras. Sin esto, begin()
+  // juntaria "no esta en el bus en ninguna direccion" y "esta, pero el laser no
+  // arranca" en un solo verdadero/falso - dos averias con causas y arreglos
+  // completamente distintos.
   enum class FailStage { None, Open };
   FailStage failStage() const { return _failStage; }
   int lastOpenStatus() const { return _lastOpenStatus; }
-  // SDK status from the last attempt to start the laser.
+  // Estado del SDK en el ultimo intento de arrancar el laser.
   int lastStartStatus() const { return _lastStartStatus; }
 
   // En que pasada abrio. Sirve para saber si los reintentos hacen falta de verdad
@@ -74,6 +82,7 @@ private:
   int _lastStartStatus = 0;
   bool _measuring = false;
 
+  // Lo rellena onDataReady() cuando el SDK entrega una medida.
   volatile bool _dataReady = false;
   bmv080_output_t _lastOutput{};
 

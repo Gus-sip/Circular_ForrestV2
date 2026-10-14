@@ -6,92 +6,103 @@
 #include "Config.h"
 #include "telemetry/SensorSnapshot.h"
 
-// Everything in this file is deliberately Arduino-free (no Arduino.h, no
-// HardwareSerial) so it can be exercised by a native/off-target unit test
-// (see test/test_nbiot_protocol) without pulling in the ESP32 toolchain.
-// ModemNBIoT is the only thing that talks to the UART; it hands this module
-// plain buffers/lines and gets structured results back.
+// =============================================================================
+// PROTOCOLO DEL MODEM NB-IoT: INTERPRETES DE RESPUESTAS AT Y DE JSON
+// =============================================================================
+//
+// Todo este archivo esta, a proposito, libre de Arduino (sin Arduino.h ni
+// HardwareSerial) para poder probarlo con una prueba unitaria nativa en el PC (ver
+// test/test_nbiot_protocol) sin el compilador del ESP32. ModemNBIoTMqtt es lo unico
+// que habla con el UART; a este modulo le pasa lineas de texto y recibe resultados
+// ya interpretados.
+//
+// QUE SE USA HOY: los interpretes de CEREG, CSQ, CCLK, los de MQTT (QMT*) y las
+// funciones de JSON. Las de socket UDP (QIOPEN, QIURC, QIRD), parseDownlink() y la
+// trama binaria (encodeBatch*) son de la via antigua por UDP, ya retirada: solo las
+// usa la prueba unitaria.
 
 namespace NbiotProtocol {
 
-// ---------- AT response line parsers ----------
-// Each takes one already-line-buffered, NUL-terminated response line (CRLF
-// stripped, exactly what ModemNBIoT's byte-at-a-time reader hands over) and
-// returns false if the line doesn't match at all, so the caller can try the
-// next parser or treat it as an unrecognized URC rather than guessing.
+// ---------- Interpretes de lineas de respuesta AT ----------
+// Cada uno recibe UNA linea de respuesta ya separada y terminada en '\0' (sin
+// CR/LF, tal como la entrega el lector byte a byte de ModemNBIoTMqtt) y devuelve
+// false si la linea no encaja en absoluto, para que quien llama pruebe el
+// siguiente interprete o la trate como un aviso no reconocido en vez de adivinar.
 
+// Estado de registro en la red movil (respuesta a AT+CEREG?).
 enum class CeregState : uint8_t {
   NOT_REGISTERED = 0,
-  REGISTERED_HOME = 1,
+  REGISTERED_HOME = 1,      // registrado en la red propia
   SEARCHING = 2,
   DENIED = 3,
   UNKNOWN = 4,
-  REGISTERED_ROAMING = 5,
+  REGISTERED_ROAMING = 5,   // registrado en itinerancia
 };
 
+// Registrado = red propia o itinerancia.
 inline bool cieregIsAttached(CeregState s) {
   return s == CeregState::REGISTERED_HOME || s == CeregState::REGISTERED_ROAMING;
 }
 
-// "+CEREG: <n>,<stat>[,...]" (unsolicited) or "+CEREG: <stat>" (query reply
-// when <n>=0). Only <stat> is needed here, so both shapes are accepted.
+// "+CEREG: <n>,<stat>[,...]" (aviso espontaneo) o "+CEREG: <stat>" (respuesta a la
+// consulta con <n>=0). Solo hace falta <stat>, asi que se aceptan las dos formas.
 bool parseCereg(const char *line, CeregState &out);
 
-// "+CSQ: <rssi>,<ber>". <rssi>=99 means "not known/not detectable".
-// Returns false if the line doesn't parse; rssiDbm is only valid when true.
+// "+CSQ: <rssi>,<ber>". <rssi>=99 significa "desconocido/no detectable".
+// Devuelve false si la linea no se entiende; rssiDbm solo vale si devuelve true.
 bool parseCsq(const char *line, int &rssiDbm);
 
-// "+CCLK: \"yy/MM/dd,hh:mm:ss[+/-zz]\"" (quotes and the trailing timezone
-// field are both optional). <zz> is a signed count of 15-minute steps from
-// UTC. Converts to Unix epoch milliseconds (UTC). Returns false if the line
-// doesn't parse or the fields are out of range; the caller still has to
-// sanity-check the value (a modem with no network time answers with a
-// year-2000-ish placeholder, which parses fine but is not real time).
+// "+CCLK: \"yy/MM/dd,hh:mm:ss[+/-zz]\"" (las comillas y la zona horaria final son
+// opcionales). <zz> es un numero con signo de pasos de 15 minutos respecto a UTC.
+// Convierte a milisegundos de epoca Unix (UTC). Devuelve false si la linea no se
+// entiende o los campos estan fuera de rango; quien llama tiene que comprobar
+// ademas el valor (un modem sin hora de red contesta con una fecha de relleno de
+// hacia el ano 2000, que se interpreta bien pero no es una hora real).
+// OJO: este modem (BC660K-GL) da la hora YA EN UTC; ver el .cpp.
 bool parseCclk(const char *line, int64_t &epochMs);
 
-// "+QIOPEN: <connectID>,<err>" - the async URC that follows the OK ack of
-// AT+QIOPEN. err==0 means the socket opened successfully.
+// HISTORICO (via UDP): "+QIOPEN: <connectID>,<err>", el aviso que sigue al OK de
+// AT+QIOPEN. err==0 significa que el socket se abrio.
 bool parseQiopen(const char *line, int &connectId, int &err);
 
-// "+QIURC: \"recv\",<connectID>,<dataLen>" - notifies that <dataLen> bytes
-// are waiting to be pulled with AT+QIRD=<connectID>,<dataLen>.
+// HISTORICO (via UDP): "+QIURC: \"recv\",<connectID>,<dataLen>" - avisa de que hay
+// <dataLen> bytes esperando para leerlos con AT+QIRD=<connectID>,<dataLen>.
 bool parseQiurcRecv(const char *line, int &connectId, int &dataLen);
 
-// "+QIRD: <len>" - the header line AT+QIRD's response starts with, followed
-// by <len> raw bytes on the next line(s). Only the header is parsed here;
-// the raw bytes are whatever the caller already captured after this line.
+// HISTORICO (via UDP): "+QIRD: <len>" - la cabecera de la respuesta de AT+QIRD,
+// seguida de <len> bytes en crudo en la(s) linea(s) siguiente(s). Aqui solo se
+// interpreta la cabecera.
 bool parseQirdHeader(const char *line, int &len);
 
-// ---------- MQTT URCs (BC660K-GL MQTT AT command set) ----------
-// Syntax below follows Quectel's standard QMT command shape shared across
-// the BC66/BC660K/EC-series family - cross-check against the actual
-// "BC660K-GL MQTT Application Note" if any of these ever come back
-// unparsed, rather than assuming the field layout is wrong.
+// ---------- Avisos MQTT (juego de comandos MQTT del BC660K-GL) ----------
+// La sintaxis sigue la forma QMT estandar de Quectel, comun a las familias
+// BC66/BC660K/EC. Si alguno vuelve sin entenderse, comprobarlo contra la "BC660K-GL
+// MQTT Application Note" antes de suponer que la disposicion de campos esta mal.
 
-// "+QMTOPEN: <client_idx>,<result>" - async URC after AT+QMTOPEN's OK ack.
-// result==0 means the TCP link to the broker opened successfully.
+// "+QMTOPEN: <client_idx>,<result>" - aviso tras el OK de AT+QMTOPEN.
+// result==0 significa que se abrio la conexion TCP con el servidor.
 bool parseQmtopen(const char *line, int &clientIdx, int &result);
 
-// "+QMTCONN: <client_idx>,<result>,<retCode>" - async URC after AT+QMTCONN's
-// OK ack. result==0 means the CONNECT packet was sent and a response
-// received; retCode==0 means the broker accepted the connection.
+// "+QMTCONN: <client_idx>,<result>,<retCode>" - aviso tras el OK de AT+QMTCONN.
+// result==0 significa que el paquete CONNECT salio y hubo respuesta; retCode==0
+// significa que el servidor acepto la conexion.
 bool parseQmtconn(const char *line, int &clientIdx, int &result, int &retCode);
 
-// "+QMTPUB: <client_idx>,<msgId>,<result>[,<value>]" - async URC after
-// AT+QMTPUB. result==0 means publish succeeded (value is only meaningful
-// for QoS>0, not used here since telemetry publishes at QoS 0).
+// "+QMTPUB: <client_idx>,<msgId>,<result>[,<value>]" - aviso tras AT+QMTPUB.
+// result==0 significa publicacion correcta (value solo importa con QoS>0, que aqui
+// no se usa: la telemetria se publica con QoS 0).
 bool parseQmtpub(const char *line, int &clientIdx, int &msgId, int &result);
 
-// "+QMTSTAT: <client_idx>,<errCode>" - unsolicited, reports the MQTT client
-// dropped (broker/network closed it, keepalive timeout, etc). Not tied to
-// any in-flight command - always routed through the URC path.
+// "+QMTSTAT: <client_idx>,<errCode>" - espontaneo: el cliente MQTT se ha caido (el
+// servidor o la red lo cerraron, se agoto el keepalive, etc.). No va ligado a ningun
+// comando en curso: siempre entra por el camino de avisos.
 bool parseQmtstat(const char *line, int &clientIdx, int &errCode);
 
-// "+QMTSUB: <client_idx>,<msgID>,<result>[,<value>]" - async URC after
-// AT+QMTSUB's OK ack. result==0 means the subscription was accepted.
+// "+QMTSUB: <client_idx>,<msgID>,<result>[,<value>]" - aviso tras el OK de
+// AT+QMTSUB. result==0 significa que la suscripcion se acepto.
 bool parseQmtsub(const char *line, int &clientIdx, int &msgId, int &result);
 
-// ---------- Inbound MQTT message (downlink from Module A) ----------
+// ---------- Mensaje MQTT entrante (ordenes desde Modulo A / ThingsBoard) ----------
 
 constexpr size_t kMqttTopicLen = 72;
 constexpr size_t kMqttPayloadLen = 320;
@@ -104,19 +115,19 @@ struct MqttMessage {
 };
 
 // "+QMTRECV: <client_idx>,<msgID>,"<topic>"[,<payload_len>],"<payload>""
-// Both URC shapes (with and without the explicit payload length) are accepted
-// - which one the module emits depends on AT+QMTCFG="recv/mode". The payload
-// is taken from the last quoted run on the line, so a payload containing
-// commas (every JSON one does) doesn't desync the fields after it.
+// Se aceptan las dos formas (con y sin la longitud explicita): cual emite el modulo
+// depende de AT+QMTCFG="recv/mode". El contenido se toma del ultimo tramo entre
+// comillas de la linea, para que un contenido con comas (todo JSON las tiene) no
+// descoloque los campos de detras.
 bool parseQmtrecv(const char *line, MqttMessage &out);
 
-// ---------- Minimal JSON field extraction ----------
-// Just enough for ThingsBoard's small RPC payloads - no allocator, no library,
-// no full parse. Each function scans for "<key>" and reads the value that
-// follows it, which is unambiguous for these payloads because their keys are
-// distinct and they nest at most two levels. Do NOT reuse this for arbitrary
-// JSON: it has no notion of scope, so a key repeated at a different depth
-// would match the first occurrence.
+// ---------- Extraccion minima de campos JSON ----------
+// Lo justo para los pequenos mensajes RPC de ThingsBoard: sin memoria dinamica, sin
+// libreria, sin analizar el JSON entero. Cada funcion busca "<clave>" y lee el
+// valor que la sigue, lo que no es ambiguo en estos mensajes porque sus claves son
+// distintas y anidan como mucho dos niveles. NO reutilizarlo para JSON arbitrario:
+// no entiende de ambitos, asi que una clave repetida a otra profundidad
+// coincidiria con la primera aparicion.
 bool jsonString(const char *json, const char *key, char *out, size_t cap);
 
 // Lee el valor de `key` sea cadena entrecomillada O NUMERO JSON DESNUDO, y lo
@@ -131,28 +142,23 @@ bool jsonString(const char *json, const char *key, char *out, size_t cap);
 // aqui solo anadiria una conversion de ida y vuelta donde se pierde precision.
 bool jsonScalar(const char *json, const char *key, char *out, size_t cap);
 bool jsonInt(const char *json, const char *key, long &out);
-// Extracts the brace-balanced object that follows "<key>": - used to pull the
-// "data" and "params" sub-objects out of a gateway RPC payload.
+// Extrae el objeto con llaves equilibradas que sigue a "<clave>": - se usa para
+// sacar los subobjetos "data" y "params" de un RPC de pasarela.
 bool jsonObject(const char *json, const char *key, char *out, size_t cap);
 
-// Iterates the key/value pairs of a flat JSON object body. Call with cursor
-// pointing at the object (or just past its '{'); returns false when there are
-// no more pairs. Values are returned as text with any surrounding quotes
-// stripped, so both {"A":1} and {"A":"1"} yield "1".
+// Recorre las parejas clave/valor del cuerpo de un objeto JSON plano. Se llama con
+// el cursor apuntando al objeto (o justo despues de su '{'); devuelve false cuando
+// no quedan parejas. Los valores se devuelven como texto sin las comillas, asi que
+// tanto {"A":1} como {"A":"1"} dan "1".
 bool jsonNextPair(const char *&cursor, char *key, size_t keyCap, char *value, size_t valueCap);
 
-// ---------- Downlink application grammar ----------
-// Server replies to an uplink datagram with either:
+// ---------- HISTORICO: gramatica de respuesta de la via UDP ----------
+// El servidor contestaba a un datagrama de subida con:
 //   ACK,<seq>
-//   ACK,<seq>,CFG,<version>,<key>=<value>,<key>=<value>,...
-// This is plain text (unlike the uplink, which is binary - see below): it's
-// rare, small, and worth keeping human-debuggable (matches the existing
-// nbiot_server.py prototype's `ACK,{seq}` reply and its `nc -u` test recipe).
-//
-// Parsing here only extracts structure - it does NOT know which keys are
-// valid or what range they're allowed to take. That semantic clamping lives
-// in ModemNBIoT, using the NBIOT_CFG_*_MIN/MAX constants from Config.h, so a
-// bad or unrecognized key/value can never be anything other than ignored.
+//   ACK,<seq>,CFG,<version>,<clave>=<valor>,<clave>=<valor>,...
+// Texto plano. Aqui solo se extrae la estructura; que claves son validas y en que
+// rango lo decidia ModemNBIoT con las constantes NBIOT_CFG_*_MIN/MAX de Config.h.
+// Ya no lo usa la via MQTT.
 constexpr uint8_t kMaxDownlinkKv = 4;
 constexpr uint8_t kDownlinkKeyLen = 8;
 constexpr uint8_t kDownlinkValueLen = 16;
@@ -171,56 +177,46 @@ struct DownlinkAck {
   uint8_t kvCount = 0;
 };
 
-// text is the raw UDP payload (already NUL-terminated by the caller).
-// Returns false only if it doesn't even start with "ACK,<number>" - anything
-// beyond that which doesn't fit the CFG grammar is simply left unparsed
-// (out.hasCfg stays false) rather than rejecting the whole ACK.
+// text es el contenido UDP en crudo (ya terminado en '\0' por quien llama).
+// Devuelve false solo si ni siquiera empieza por "ACK,<numero>"; lo que no encaje en
+// la gramatica CFG se deja sin interpretar (out.hasCfg sigue a false) en vez de
+// rechazar el ACK entero.
 bool parseDownlink(const char *text, DownlinkAck &out);
 
-// ---------- Uplink batch frame (binary) ----------
-// Text CSV for a full 13-field reading (temp,hum,pres,gas,pm1,pm25,pm10,co2,
-// co,coTemp,windAngle,windSpeed,windValid) plus a timestamp and link-quality
-// pair comes to ~75-80 bytes/reading even at 1 decimal place - a default
-// batch of 10 would blow well past the 500-byte budget on its own. Binary
-// fixed-point fields get one reading down to kBatchRecordSize bytes, which
-// is what actually makes "10 readings / 20 minutes" fit.
+// ---------- HISTORICO: trama binaria de lote de la via UDP ----------
+// Un CSV de texto con una lectura completa de 13 campos mas hora y calidad de enlace
+// ocupa ~75-80 bytes por lectura, y un lote de 10 superaba el presupuesto de 500
+// bytes. Con campos binarios de coma fija una lectura baja a kBatchRecordSize bytes.
+// (La via MQTT actual publica JSON y no usa esto.)
 //
-// All multi-byte fields are big-endian ("network order"), written manually
-// byte-by-byte rather than memcpy'd from a struct - no reliance on the
-// compiler's struct packing/padding or on ESP32 vs. server endianness
-// matching by accident.
+// Todos los campos de varios bytes van en big-endian ("orden de red"), escritos a
+// mano byte a byte en vez de copiar una estructura con memcpy: sin depender del
+// relleno del compilador ni de que el ESP32 y el servidor coincidan en orden por
+// casualidad.
 //
-// Frame layout:
-//   Header (kBatchHeaderSize = 5 bytes):
+// Disposicion:
+//   Cabecera (kBatchHeaderSize = 5 bytes):
 //     [0]   magic        0xF0
-//     [1:2] seq          uint16 BE, increments once per batch (wraps)
-//     [3]   count        uint8, number of records that follow
-//     [4]   cfgVersion   uint8, version of the last downlink CFG actually
-//                         applied (0 = none yet) - reported every uplink per
-//                         the "report the applied config version" requirement
-//   Record (kBatchRecordSize = 30 bytes), repeated `count` times:
-//     [0:1]   dtSec        uint16 BE, seconds since the OLDEST reading in
-//                           this batch (i.e. reading 0 always has dtSec=0)
-//     [2:3]   rssi         int16 BE, LoRa RSSI (dBm) at time of reception
-//     [4]     snr          int8,  LoRa SNR
-//     [5:6]   temp_x10     int16 BE, deg C * 10
-//     [7:8]   hum_x10      uint16 BE, %RH * 10
+//     [1:2] seq          uint16 BE, sube una vez por lote (da la vuelta)
+//     [3]   count        uint8, numero de registros que siguen
+//     [4]   cfgVersion   uint8, version del ultimo CFG aplicado (0 = ninguno)
+//   Registro (kBatchRecordSize = 30 bytes), repetido `count` veces:
+//     [0:1]   dtSec        uint16 BE, segundos desde la lectura MAS ANTIGUA del lote
+//     [2:3]   rssi         int16 BE, RSSI LoRa (dBm) al recibir
+//     [4]     snr          int8,  SNR LoRa
+//     [5:6]   temp_x10     int16 BE, grados C * 10
+//     [7:8]   hum_x10      uint16 BE, %HR * 10
 //     [9:10]  pres_x10     uint16 BE, hPa * 10
-//     [11:12] gas_x100ohm  uint16 BE, sensor resistance in units of 100 ohm
+//     [11:12] gas_x100ohm  uint16 BE, resistencia en unidades de 100 ohmios
 //     [13:14] pm1_x10      uint16 BE, ug/m3 * 10
 //     [15:16] pm25_x10     uint16 BE, ug/m3 * 10
 //     [17:18] pm10_x10     uint16 BE, ug/m3 * 10
 //     [19:20] co2_ppm      uint16 BE
 //     [21:22] co_x100      uint16 BE, ppm * 100
-//     [23:24] coTemp_x10   int16 BE, deg C * 10
-//     [25:26] windAngle_x10 uint16 BE, deg * 10 (0-3599)
+//     [23:24] coTemp_x10   int16 BE, grados C * 10
+//     [25:26] windAngle_x10 uint16 BE, grados * 10 (0-3599)
 //     [27:28] windSpeed_x10 uint16 BE
-//     [29]    flags        uint8, bit0 = windValid, bits 1-7 reserved (0)
-//
-// NOTE for whoever writes the server-side decoder (nbiot_server.py's current
-// FIELDS/parse_payload is a CSV placeholder and does not match this format -
-// it needs a binary decoder using this same layout before it can read real
-// uplinks).
+//     [29]    flags        uint8, bit0 = windValid, bits 1-7 reservados (0)
 constexpr uint8_t kBatchMagic = 0xF0;
 constexpr size_t kBatchHeaderSize = 5;
 constexpr size_t kBatchRecordSize = 30;
@@ -230,10 +226,10 @@ static_assert(kBatchHeaderSize + (size_t)NBIOT_CFG_READINGS_MAX * kBatchRecordSi
               "NBIOT_CFG_READINGS_MAX * kBatchRecordSize + header must fit under "
               "NBIOT_PAYLOAD_MAX_BYTES - lower NBIOT_CFG_READINGS_MAX or shrink the record");
 
-// Appends kBatchHeaderSize bytes to out (caller-owned buffer, must have room).
+// Escribe kBatchHeaderSize bytes en out (buffer de quien llama, con sitio suficiente).
 void encodeBatchHeader(uint16_t seq, uint8_t count, uint8_t cfgVersion, uint8_t *out);
 
-// Appends kBatchRecordSize bytes to out (caller-owned buffer, must have room).
+// Escribe kBatchRecordSize bytes en out (buffer de quien llama, con sitio suficiente).
 void encodeBatchRecord(const SensorSnapshot &snap, uint16_t dtSec, uint8_t *out);
 
 }  // namespace NbiotProtocol

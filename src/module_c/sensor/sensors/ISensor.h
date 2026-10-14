@@ -2,20 +2,25 @@
 
 #include "Reading.h"
 
-// Common interface so the Sampler doesn't care what bus or protocol is on the other
-// end of any given sensor.
+// =============================================================================
+// INTERFAZ COMUN DE TODOS LOS SENSORES
+// =============================================================================
+//
+// Todos los drivers implementan estas cuatro funciones, asi que quien los usa no
+// necesita saber que bus o que protocolo hay al otro lado (I2C, UART...).
 class ISensor {
 public:
   virtual ~ISensor() = default;
 
-  // One-shot init. False = not detected / failed to configure.
+  // Arranque, una sola vez. false = no detectado o no se pudo configurar.
   virtual bool begin() = 0;
 
-  // Never blocks longer than the sensor's own protocol requires.
+  // Nunca bloquea mas de lo que exija el propio protocolo del sensor.
   virtual Reading read() = 0;
 
-  // Quiesce the part. The PowerManager still owns the rail - this just tells the
-  // sensor to stop doing work, it doesn't cut power.
+  // Dejar el sensor en reposo. La alimentacion la sigue controlando el firmware
+  // principal (los rails): esto solo le dice al sensor que deje de trabajar, no
+  // le quita la corriente.
   virtual void sleep() = 0;
 
   virtual const char *name() const = 0;

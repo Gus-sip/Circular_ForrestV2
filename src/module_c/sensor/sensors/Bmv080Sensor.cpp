@@ -1,14 +1,18 @@
 #include "Bmv080Sensor.h"
 
-// Settling after a reset before the sensor accepts a measurement command.
+// Espera tras un reinicio antes de que el sensor acepte una orden de medida.
 #define BMV080_POST_RESET_MS 100
-// Pause between attempts to start the laser.
+// Pausa entre intentos de arrancar el laser.
 #define BMV080_START_RETRY_MS 150
 
+// Mas pila para la tarea de loop: bmv080_serve_interrupt la necesita.
 #if defined(ESP32)
 SET_LOOP_TASK_STACK_SIZE(60 * 1024);
 #endif
 
+// ---- Funciones que el SDK de Bosch llama para hablar con el bus I2C ----
+
+// Leer registros. En I2C la cabecera se desplaza un bit a la izquierda.
 int8_t Bmv080Sensor::readCB(bmv080_sercom_handle_t handle, uint16_t header, uint16_t *payload,
                              uint16_t payloadLength) {
   if (handle == nullptr) return -5;
@@ -19,6 +23,7 @@ int8_t Bmv080Sensor::readCB(bmv080_sercom_handle_t handle, uint16_t header, uint
   return (rc == ksfTkErrOk && nRead == payloadLength) ? 0 : -2;
 }
 
+// Escribir registros.
 int8_t Bmv080Sensor::writeCB(bmv080_sercom_handle_t handle, uint16_t header, const uint16_t *payload,
                               uint16_t payloadLength) {
   if (handle == nullptr) return -5;
@@ -28,26 +33,30 @@ int8_t Bmv080Sensor::writeCB(bmv080_sercom_handle_t handle, uint16_t header, con
   return (rc == ksfTkErrOk) ? 0 : -3;
 }
 
+// Esperar el tiempo que pida el SDK.
 int8_t Bmv080Sensor::delayCB(uint32_t durationMs) {
   delay(durationMs);
   return 0;
 }
 
+// El SDK llama aqui cuando tiene una medida nueva: se guarda para read().
 void Bmv080Sensor::onDataReady(bmv080_output_t output, void *callbackParameters) {
   Bmv080Sensor *self = (Bmv080Sensor *)callbackParameters;
   self->_lastOutput = output;
   self->_dataReady = true;
 }
 
+// Abre el sensor probando todas las direcciones posibles, tres pasadas, y lo deja
+// configurado pero SIN medir (laser apagado).
 bool Bmv080Sensor::begin() {
-  // The I2C address is set by the CS/SDO straps, and it genuinely differs between
-  // boards: node C1 answers at 0x57, node C2 at 0x56. Rather than require a
-  // per-board build - unworkable across a 200-node deployment - try the configured
-  // address first and then the rest of the strap range, exactly as Bme690Sensor
-  // already does for its 0x76/0x77 pair.
+  // La direccion I2C la fijan los pines CS/SDO, y de verdad cambia entre placas:
+  // el nodo C1 contesta en 0x57 y el C2 en 0x56. En vez de exigir una compilacion
+  // por placa - inviable en un despliegue de 200 nodos - se prueba primero la
+  // direccion configurada y luego el resto del rango, igual que Bme690Sensor hace
+  // con su pareja 0x76/0x77.
   //
-  //   CS high, SDO high -> 0x57      CS low,  SDO high -> 0x55
-  //   CS high, SDO low  -> 0x56      CS low,  SDO low  -> 0x54
+  //   CS alto, SDO alto -> 0x57      CS bajo, SDO alto -> 0x55
+  //   CS alto, SDO bajo -> 0x56      CS bajo, SDO bajo -> 0x54
   static const uint8_t kStrapAddrs[4] = {0x57, 0x56, 0x55, 0x54};
 
   bmv080_status_code_t rc = E_BMV080_ERROR_HW_WRITE;
@@ -65,8 +74,8 @@ bool Bmv080Sensor::begin() {
     }
 
     for (uint8_t attempt = 0; attempt < 5; attempt++) {
-      // Attempt 0 uses whatever was configured; later attempts walk the strap range
-      // and skip the one already tried.
+      // El intento 0 usa la direccion configurada; los siguientes recorren el
+      // rango y se saltan la que ya se probo.
       uint8_t tryAddr = (attempt == 0) ? _addr : kStrapAddrs[attempt - 1];
       if (attempt > 0 && tryAddr == _addr) continue;
 
@@ -76,11 +85,11 @@ bool Bmv080Sensor::begin() {
       rc = bmv080_open(&_handle, (bmv080_sercom_handle_t)&_bus, (bmv080_callback_read_t)readCB,
                        (bmv080_callback_write_t)writeCB, (bmv080_callback_delay_t)delayCB);
       if (rc == E_BMV080_OK) {
-        _addr = tryAddr;  // remember it, so read() and any retry use the live address
+        _addr = tryAddr;  // recordarla, para que read() y cualquier reintento usen la buena
         _openPasses = (uint8_t)(pasada + 1);
         break;
       }
-      // bmv080_open leaves no handle behind on failure, so nothing to close here.
+      // Si bmv080_open falla no deja nada abierto, asi que no hay que cerrar nada.
       _handle = nullptr;
     }
   }
@@ -91,45 +100,45 @@ bool Bmv080Sensor::begin() {
   }
 
   bmv080_reset(_handle);
-  // A reset needs settling before the sensor will accept a measurement command.
-  // Without it the first bmv080_start_continuous_measurement() after begin() fails,
-  // which used to be reported as "NOT FOUND" and is now reported as a read NoAck.
+  // Tras un reinicio hay que esperar antes de que el sensor acepte una orden de
+  // medida. Sin esta pausa, el primer bmv080_start_continuous_measurement() despues
+  // de begin() falla.
   delay(BMV080_POST_RESET_MS);
 
   bool doObstructionDetection = true;
   bmv080_set_parameter(_handle, "do_obstruction_detection", (void *)&doObstructionDetection);
 
-  // DO NOT start a measurement here.
+  // AQUI NO SE ARRANCA NINGUNA MEDIDA.
   //
-  // begin() used to finish with bmv080_start_continuous_measurement() and return
-  // its result, which conflated two entirely different failures under one "NOT
-  // FOUND": the sensor being absent, and the sensor being present but unable to
-  // START ITS LASER. The laser is the 68mA load that has browned this board out
-  // repeatedly, so the second case is the likely one - and it was being reported
-  // as a missing sensor, which sent the diagnosis toward the I2C bus and the
-  // hardware instead of the supply.
+  // Antes begin() terminaba con bmv080_start_continuous_measurement() y devolvia su
+  // resultado, lo que juntaba dos fallos completamente distintos bajo un mismo "NOT
+  // FOUND": el sensor ausente, y el sensor presente pero incapaz de ARRANCAR SU
+  // LASER. El laser es la carga de 68 mA que ha tumbado esta placa repetidas veces,
+  // asi que el segundo caso era el probable - y se informaba como sensor ausente,
+  // lo que mandaba el diagnostico hacia el bus I2C y el hardware en vez de hacia
+  // la alimentacion.
   //
-  // It was also wasted work: the caller stops the measurement again immediately,
-  // because the sequential-slot design starts the laser only inside the BMV080's
-  // own slot, with every other load quiesced. Opening the sensor is what begin()
-  // is for; measuring is the slot's job.
+  // Ademas era trabajo tirado: quien llama para la medida en el acto, porque el
+  // laser solo se enciende dentro del turno del propio BMV080, con todo lo demas en
+  // reposo. Abrir el sensor es el trabajo de begin(); medir es el del turno.
   //
-  // So begin() now succeeds when the sensor OPENS. A laser that will not start is
-  // reported later, by the slot, as a read failure - which is what it actually is.
+  // Asi que begin() tiene exito cuando el sensor ABRE. Un laser que no arranca se
+  // informa despues, en el turno, como fallo de lectura - que es lo que es.
   _measuring = false;
   _failStage = FailStage::None;
   return true;
 }
 
+// Enciende el laser y empieza a medir de forma continua.
 bool Bmv080Sensor::startMeasurement() {
   if (_handle == nullptr) return false;
   if (_measuring) return true;
 
-  // Retry the start. This is where the laser actually fires - the 68mA load that
-  // has browned this board out repeatedly - so a single refusal is not proof the
-  // sensor is broken, and one retry after a short pause costs nothing on the
-  // healthy path. The SDK status is kept so a persistent failure can be diagnosed
-  // rather than guessed at.
+  // Se reintenta el arranque. Aqui es donde se enciende de verdad el laser - la
+  // carga de 68 mA que ha tumbado esta placa varias veces - asi que una negativa no
+  // prueba que el sensor este roto, y reintentar tras una pausa corta no cuesta nada
+  // si va bien. Se guarda el estado del SDK para poder diagnosticar un fallo
+  // persistente en vez de adivinarlo.
   bmv080_status_code_t rc = E_BMV080_ERROR_HW_WRITE;
   for (int attempt = 0; attempt < 3; attempt++) {
     rc = bmv080_start_continuous_measurement(_handle);
@@ -143,14 +152,16 @@ bool Bmv080Sensor::startMeasurement() {
   return _measuring;
 }
 
+// Apaga el laser.
 bool Bmv080Sensor::stopMeasurement() {
   if (_handle == nullptr || !_measuring) return true;
   bmv080_status_code_t rc = bmv080_stop_measurement(_handle);
-  _measuring = false;  // treat as off regardless - never leave the laser believed-on
+  _measuring = false;  // se da por apagado pase lo que pase: nunca creer el laser encendido
   _dataReady = false;
   return rc == E_BMV080_OK;
 }
 
+// Atiende al SDK; si en esta llamada entrego una medida (onDataReady), la devuelve.
 Reading Bmv080Sensor::read() {
   Reading r;
   _dataReady = false;
@@ -176,6 +187,7 @@ Reading Bmv080Sensor::read() {
   return r;
 }
 
+// Dormir = apagar el laser.
 void Bmv080Sensor::sleep() {
   stopMeasurement();
 }

@@ -1,79 +1,68 @@
 /*
- * CHIP FOREST bring-up + LoRa TX: all five sensors sampled continuously into a
- * last-known-good cache, and that cache transmitted over the RYLR998 to the
- * ground-station receiver (Module B) once every LORA_TX_PERIOD_MS.
+ * =============================================================================
+ * CHIP FOREST - MODULO C (NODO SENSOR) - FIRMWARE DE PRODUCCION
+ * =============================================================================
  *
- * Payload schema (must match Module B's TelemetryParser exactly):
+ * Que hace este programa:
+ *   Un nodo de deteccion de incendios forestales. Mide cinco sensores, decide si
+ *   hay riesgo de incendio y manda los datos por radio LoRa a Modulo B, que los
+ *   sube a ThingsBoard. Funciona con bateria, asi que pasa casi todo el tiempo en
+ *   sueno profundo.
+ *
+ *   Sensores:  BME690 (temperatura, humedad, presion, gas)   BMV080 (particulas)
+ *              CM1106 (CO2)   SEN0466 (CO)   Calypso (viento)
+ *   Radio:     RYLR998, LoRa 868 MHz, hacia Modulo B (direccion 2)
+ *
+ * Como esta organizado el archivo (de arriba abajo):
+ *   1. Configuracion: pines, parametros de radio, tiempos, umbrales.
+ *   2. LED de estado.
+ *   3. Memoria que sobrevive al sueno (RTC) y el RELOJ del nodo.
+ *   4. El CALENDARIO: cada sensor tiene su periodo, por estado de alarma.
+ *   5. Comandos que llegan por radio (CFG,...).
+ *   6. Arranque: guardia de arranques (modo seguro), rails, I2C, setup().
+ *   7. Sueno profundo.
+ *   8. Lectura de sensores, de uno en uno ("slots").
+ *   9. Almacen de lecturas y ALARMA (NORMAL / PRE-ALARMA / ALARMA).
+ *  10. Transmision a Modulo B y paquete de estado (STAT).
+ *  11. Bateria e hibernacion.
+ *  12. loop().
+ *
+ * Ciclo normal, en una frase: cada despertar es un arranque nuevo del ESP32;
+ * setup() mira en el calendario que trabajos vencen, enciende solo lo necesario,
+ * lee esos sensores de uno en uno, evalua la alarma, transmite si toca y vuelve a
+ * dormir hasta el siguiente vencimiento. En PRE-ALARMA y ALARMA el nodo no duerme.
+ *
+ * ---- Formato de la telemetria (debe coincidir con el TelemetryParser de B) ----
  *   temp,hum,pres,gas,pm1,pm25,pm10,co2,co,coTemp,windAngle,windSpeed,windValid
- * See src/module_b/communications/telemetry/TelemetryParser.h for the
- * authoritative field list/order - provisional on both ends; if either side
- * changes this encoding, update the other to match.
+ * Una sola lectura va con ese formato tal cual. Varias van en LOTE:
+ *   B,<cuantas>,<lectura>;<lectura>;...   (cada lectura + su edad en segundos)
+ * Ver src/module_b/communications/telemetry/TelemetryParser.h. Un campo que esa
+ * lectura no midio va como -999 y Modulo B no lo publica.
  *
- * ---- Cadence (2026-09-01) --------------------------------------------------
- * Sample-then-send is split into two independent rates:
- *   - loop() re-reads EVERY sensor every SAMPLE_GAP_MS (~2s) and updates its
- *     cached value whenever the read succeeds. A sensor that hasn't produced a
- *     valid reading yet just keeps being retried; once it has, the cache holds
- *     the freshest good value.
- *   - The radio transmits that whole cached snapshot to Module B once every
- *     LORA_TX_PERIOD_MS (default 5 min; first packet 30s after boot). Module B
- *     in turn batches to Module A / ThingsBoard on its own ~10-min cadence
- *     (MQTT_BATCH_SECONDS in module_b/communications/Config.h).
- * So by the time a packet goes out, each sensor has had ~150 read attempts -
- * even a flaky sensor almost always has a fresh value in it.
+ * ---- Parametros LoRa (SF7/BW7/CR1/preambulo 12) ----
+ * SF7 (no el "7,7,1,4" generico, que este modulo rechazo con +ERR=18: el preambulo
+ * tenia que ser 12). A SF7/BW125/CR4-5/preambulo 12, un paquete de ~75 bytes son
+ * ~137 ms en el aire. El ciclo de trabajo del 1% de EU868 permite ~36 s por hora; en
+ * estado normal se transmite una vez cada 30 minutos, muy por debajo del limite.
+ * SF7 cuesta ~5-6 dB de enlace frente a SF9 (aproximadamente la mitad de alcance,
+ * peor a traves de vegetacion); ninguna prueba de alcance en campo ha confirmado aun
+ * que el despliegue funcione a SF7. TIENE que coincidir con LORA_PARAM_SF del
+ * Config.h de Modulo B.
  *
- * ---- LoRa parameters (SF7/BW7/CR1/preamble12) ----------------------------
- * SF7 (not the generic "7,7,1,4" default, which returned +ERR=18 from this
- * module - preamble had to be 12). At SF7/BW125/CR4-5/preamble12 with an
- * ~75-byte payload one packet is ~137ms on air. The EU868 1% duty cycle
- * allows ~36s airtime/hour; at a 5-min send period that's ~12 packets/hour
- * (~1.6s/hour) - three orders of magnitude under the cap, so the duty cycle
- * is never the binding constraint at this cadence. LORA_TX_PERIOD_MIN_MS is
- * kept at 15s purely as a sanity floor. SF7 costs ~5-6dB link budget vs SF9
- * (~half the range, worse through foliage) - no field range test has
- * confirmed the deployment closes at SF7 yet. MUST match Module B's
- * Config.h LORA_PARAM_SF.
- *
- * ---- No sleep yet -------------------------------------------------------
- * The node runs a plain delay(SAMPLE_GAP_MS) between sample passes - NOT
- * light or deep sleep. Light sleep was removed 2026-08-28: on the ESP32-S3 it
- * kills USB-Serial/JTAG (port re-enumerates every cycle, wedges the host) and
- * halts the Calypso UART ISR. delay() keeps USB + all UART ISRs serviced and
- * preserves driver state, so the BMV080 5s / CM1106 3s warmups are paid once
- * at boot. The cost is power - this firmware does NOT meet the supercap
- * budget in notes/power_budget.md. The deployment version (deep sleep,
- * switched rails, per-sensor sample periods, Normal/Prealarma/Alarma states)
- * is a separate build on top of this - see that doc.
- *
- * The post-TX LORA_POST_TX_LISTEN_MS window is still the only moment Module B
- * can reach this node with a CFG downlink - whatever relays a command down
- * must hold it and send it the instant it sees this node's uplink.
- *
- * Downlink command grammar (Module B -> this node), styled to match
- * pp1-lora-receiver's own Module A->B grammar (NbiotProtocol.h) so a future
- * relay is a thin translation rather than two incompatible formats:
- *   CFG,<key>=<value>[,<key>=<value>...]
- * Recognized keys: INTERVAL (the LoRa send period, seconds, clamped to
- * [LORA_TX_PERIOD_MIN_MS/1000, LORA_TX_PERIOD_MAX_MS/1000]), and one per sensor -
- * BME690/SEN0466/BMV080/CM1106/CALYPSO (0/1) - to mute/unmute it without a
- * reflash (e.g. BME690, which is known-not-detected on this board per
- * STATUS.md). Unrecognized keys are ignored, not fatal. Applied config is
- * volatile only - it resets to these compiled-in defaults on every reboot,
- * by design (no NVS persistence for this pass). Only commands from
- * LORA_RX_ADDR (Module B) are processed; this is basic sender-address
- * filtering, not authentication - no auth layer exists anywhere in this
- * system yet. On success this node replies ACK,<key>=<value>,... with the
- * actually-applied (post-clamp) values, so a clamp is visible to the sender
- * instead of silently assumed away. A command that doesn't parse as CFG, or
- * applies nothing recognized, gets no ACK - airtime isn't spent acking noise.
- *
- * Missing/not-yet-ready sensor readings: each field keeps its last
- * successfully read value rather than snapping to zero on a transient miss,
- * so one bad cycle doesn't look identical to the sensor genuinely reading
- * zero. A sensor that has never read successfully sends 0. This means the
- * CSV payload alone can't distinguish "sensor briefly busy" from "sensor
- * stuck since boot" - only whether packets are arriving at all, which the
- * receiver's own staleness timer already covers. Fine for this milestone.
+ * ---- Comandos que puede recibir el nodo (Modulo B -> este nodo) ----
+ * Solo se oyen en la ventana de LORA_POST_TX_LISTEN_MS que sigue a cada envio: es
+ * el UNICO momento en que el nodo escucha. Formato:
+ *   CFG,<clave>=<valor>[,<clave>=<valor>...]
+ * Claves: TIME (hora de red), INTERVAL (periodo de envio), NXT_LECTURA y NXT_ENVIO
+ * (multiplicadores de los periodos), ALARM (bajar la alarma a mano), BME690 /
+ * SEN0466 / BMV080 / CM1106 / CALYPSO (activar o silenciar un sensor, 0/1), y los
+ * umbrales de alarma por nombre. Las claves desconocidas se ignoran.
+ * Solo se aceptan comandos de LORA_RX_ADDR (Modulo B): es un filtro por direccion
+ * del emisor, NO una autenticacion - el sistema no tiene autenticacion en este
+ * enlace. Si se aplica algo, el nodo contesta ACK,<clave>=<valor>,... con los
+ * valores realmente aplicados (tras recortarlos a sus limites), para que el
+ * recorte sea visible. Un comando que no se entiende o no aplica nada no recibe
+ * ACK: no se gasta tiempo de aire contestando ruido.
  */
 
 #include <Arduino.h>
@@ -95,225 +84,200 @@
 #include <Preferences.h>
 #include <driver/gpio.h>
 
-// ---------- RYLR998 wiring - GPIO4/5 are unused by pins.h's sensor map ----------
-#define LORA_RX_PIN 4  // module TXD -> ESP RX
-#define LORA_TX_PIN 5  // module RXD <- ESP TX
+// =============================================================================
+// 1. CONFIGURACION
+// =============================================================================
 
-// ---------- LoRa link parameters - MUST match pp1-lora-receiver's Config.h ----------
-#define LORA_BAND_HZ 868000000UL  // EU868, Spain deployment (confirmed)
+// ---------- Cableado de la radio RYLR998 (GPIO4/5, libres en el mapa de pins.h) ----------
+#define LORA_RX_PIN 4  // TXD del modulo -> RX del ESP
+#define LORA_TX_PIN 5  // RXD del modulo <- TX del ESP
+
+// ---------- Parametros del enlace LoRa - TIENEN que coincidir con el Config.h de Modulo B ----------
+#define LORA_BAND_HZ 868000000UL  // EU868, despliegue en Espana (confirmado)
 #define LORA_NETWORK_ID 5
-// SF7 (was SF9): halves airtime enough to make the 15s TX_INTERVAL_MS below
-// legal under the EU868 1% duty cycle - see the file-header airtime math.
-// Costs ~5-6dB link budget vs SF9. MUST match Module B's Config.h
-// (LORA_PARAM_SF) exactly. Re-verify AT+PARAMETER=7,7,1,12 comes back +OK on
-// real hardware - this SF/BW/CR/preamble combo has not been confirmed on
-// this module (an earlier 7,7,1,4 attempt returned +ERR=18).
+// SF7 (antes SF9): reduce a la mitad el tiempo en el aire. Cuesta ~5-6 dB de enlace
+// frente a SF9. TIENE que coincidir exactamente con LORA_PARAM_SF del Config.h de
+// Modulo B.
 #define LORA_PARAM_SF 7
 #define LORA_PARAM_BW 7
 #define LORA_PARAM_CR 1
 #define LORA_PARAM_PREAMBLE 12
-// Transmit power, dBm (AT+CRFOP, 0..22). The module's 22 dBm default draws
-// ~120mA in the TX burst, and this PCB's supply cannot source that step - the
-// board reset on every single transmit, 3 for 3, immediately after "[tx] sending".
-// 14 dBm cuts the burst substantially while staying a normal LoRa link budget.
-// This is a mitigation, not a cure: the real fix is bulk capacitance on the rail
-// (see the note in rylr998_bridge.cpp). Raise it once the supply can take it.
+// Potencia de transmision, dBm (AT+CRFOP, 0..22). Los 22 dBm por defecto del modulo
+// piden ~120 mA en la rafaga de transmision, y la alimentacion de esta placa no
+// aguanta ese escalon: la placa se reiniciaba en todas las transmisiones, 3 de 3,
+// justo despues de "[tx] sending". 14 dBm reduce mucho la rafaga y sigue siendo un
+// enlace LoRa normal. Es una mitigacion, no una cura: el arreglo de verdad es mas
+// capacidad en el rail (ver la nota en rylr998_bridge.cpp). Subirla cuando la
+// alimentacion lo aguante.
 #define LORA_TX_POWER_DBM 14
 
-// This node's AT+ADDRESS - the number Module B sees as "+RCV addr=<n>", and the
-// ONLY thing distinguishing one node from another on the air. Every node shipped
-// with 1, so Module B could not tell them apart and two nodes' readings
-// interleaved under one identity in the log.
+// Direccion AT+ADDRESS de este nodo: el numero que Modulo B ve como
+// "+RCV addr=<n>", y lo UNICO que distingue a un nodo de otro en el aire. Todos los
+// nodos salieron de fabrica con 1, asi que Modulo B no podia distinguirlos y las
+// lecturas de dos nodos se mezclaban bajo una misma identidad.
 //
-// Overridable per build so one firmware serves every node - see the
-// env:module-c-node* environments. Address 2 is Module B itself and must never be
-// used by a node. Keep these in step with NBIOT_NODE_NAMES in Module B's Config.h,
-// and never renumber a node already known to ThingsBoard.
+// Se puede cambiar en cada compilacion para que un mismo firmware sirva a todos los
+// nodos: ver los entornos env:module-c-node* de platformio.ini. La direccion 2 es
+// Modulo B y no la puede usar nunca un nodo. Mantenerlas al dia con
+// NBIOT_NODE_NAMES del Config.h de Modulo B, y no renumerar nunca un nodo que
+// ThingsBoard ya conoce.
 //
-//   1 = C1 (NodoC-1)   2 = Module B (receiver)   3 = C2   4 = C3
+//   1 = C1 (NodoC-1)   2 = Modulo B (receptor)   3 = C2   4 = C3
 #ifndef LORA_MY_ADDR
 #define LORA_MY_ADDR 1
 #endif
-#define LORA_RX_ADDR 2  // pp1-lora-receiver's AT+ADDRESS
+#define LORA_RX_ADDR 2  // direccion AT+ADDRESS de Modulo B
 
-// LoRa send period - Module C -> Module B. Sampling runs continuously
-// (SAMPLE_GAP_MS); this is only how often the cached snapshot is transmitted.
-// Runtime-tunable via CFG,INTERVAL=<seconds>. At this cadence the EU868 duty
-// cycle is a non-issue (see file header); the MIN floor is just a sanity guard.
-#define LORA_TX_PERIOD_MS 300000UL      // 5 min - now the FALLBACK deadline, not the cadence
-#define LORA_TX_PERIOD_MIN_MS 15000UL   // sanity floor - CFG,INTERVAL can't go below this
-#define LORA_TX_PERIOD_MAX_MS 86400000UL  // 24h ceiling - guards a fat-fingered CFG
-#define FIRST_TX_DELAY_MS 30000UL       // retained for reference; the readiness gate supersedes it
+// Periodo de envio heredado del firmware anterior (sin calendario). Hoy el envio
+// lo decide el calendario (trabajo JOB_TX en kJobs[]); este valor queda como
+// reserva y se puede cambiar con CFG,INTERVAL=<segundos>, dentro de los limites.
+#define LORA_TX_PERIOD_MS 300000UL      // 5 min - ya es el plazo de RESERVA, no la cadencia
+#define LORA_TX_PERIOD_MIN_MS 15000UL   // suelo de seguridad: CFG,INTERVAL no puede bajar de aqui
+#define LORA_TX_PERIOD_MAX_MS 86400000UL  // techo de 24 h: protege de un CFG mal tecleado
+#define FIRST_TX_DELAY_MS 30000UL       // HISTORICO: ya no se usa en ningun sitio
 
-// ---------- Readiness-gated transmit ----------
-// A packet goes out when every ENABLED and PRESENT sensor has produced at least
-// one fresh reading since the previous packet - so Module B receives a genuinely
-// coherent snapshot rather than a mix of new values and stale cache. Two guards
-// bound that, and both are load-bearing:
+// ---------- Envio condicionado a tener todo leido (HISTORICO) ----------
+// Del firmware anterior al calendario: se transmitia cuando todos los sensores
+// habian dado una lectura nueva desde el paquete anterior, con un hueco minimo
+// entre envios. Hoy el envio lo marca el calendario. LORA_TX_MIN_GAP_MS ya no se
+// usa en ningun sitio.
+#define LORA_TX_MIN_GAP_MS 15000UL      // HISTORICO: ya no se usa
+
+// En pre-alarma y alarma el nodo transmite mucho mas a menudo: un incendio es la
+// unica situacion en que la rapidez importa mas que el tiempo de aire.
 //
-//   MIN_GAP  - sampling runs every SAMPLE_GAP_MS, so "all fresh" can be satisfied
-//              within seconds. Without a floor the radio would transmit almost
-//              continuously, blowing both the EU868 duty cycle and the power
-//              budget. Nothing is ever sent sooner than this after the last TX.
-//   MAX_WAIT - a sensor that never returns (disconnected Calypso, a sensor that
-//              fails mid-deployment) must not silence the node forever. On this
-//              deadline we transmit whatever we have and name the missing sensors
-//              in the log, so a stalled sensor degrades the data instead of
-//              stopping it. This is what g_txPeriodMs / CFG,INTERVAL now sets.
-#define LORA_TX_MIN_GAP_MS 15000UL      // never transmit more often than this
-
-// While in pre-alarm or alarm the node transmits far more often - a fire is the
-// one situation where latency matters more than airtime.
-//
-// DUTY CYCLE, STATED PLAINLY: at SF7 a ~116-byte packet is roughly 0.2 s on air.
-// At 5 s that is about 4%, which is OVER the 1% EU868 limit for this band. It is
-// deliberate and it is bounded - it only happens while a node is reporting a fire,
-// not in normal operation, and a node in alarm that nobody hears is useless. If
-// that trade is not acceptable for a given deployment, raise this; the alarm still
-// works, it just reports less often.
+// CICLO DE TRABAJO, DICHO CLARAMENTE: a SF7 un paquete de ~116 bytes son ~0,2 s en
+// el aire. Cada 5 s serian un ~4%, POR ENCIMA del limite del 1% de EU868. Era
+// deliberado y acotado (solo mientras un nodo informa de un incendio).
+// ESTADO ACTUAL: esta constante ya no se usa; en alarma el envio lo marca el
+// calendario (JOB_TX: 15 min en pre-alarma, 3 min en alarma), muy por debajo del
+// limite.
 #define ALARM_TX_MIN_GAP_MS 5000UL
 
-// ---------- BMV080 duty cycling ----------
-// The laser draws ~68mA - the largest load in the system by an order of magnitude,
-// and notes/power_budget.md budgets it at 20s per 30 min, not continuously. This
-// firmware ran it continuously (roughly 90x its energy allowance), and the board
-// reset on every boot where it was measuring. It is now started only around an
-// actual sample and stopped the moment a frame lands.
-#define BMV080_MEASURE_TIMEOUT_MS 30000UL  // give up waiting for a frame after this
-#define BMV080_SETTLE_MS 2000UL            // laser preheat before frames are meaningful
+// ---------- Encendido por turnos del BMV080 ----------
+// El laser consume ~68 mA, con diferencia la mayor carga del sistema. Un firmware
+// anterior lo tenia encendido sin parar (unas 90 veces su presupuesto de energia) y
+// la placa se reiniciaba en cada arranque en que estaba midiendo. Ahora solo se
+// enciende durante una medida y se apaga en cuanto llega un dato.
+#define BMV080_MEASURE_TIMEOUT_MS 30000UL  // dejar de esperar un dato pasado este tiempo
+#define BMV080_SETTLE_MS 2000UL            // precalentamiento del laser antes de que los datos valgan
 
-// ---------- Fire detection thresholds ----------
-// ---- Fire thresholds ----
+// ---------- Umbrales de deteccion de incendio ----------
 //
-// The real figures from the project's alarma/prealarma spreadsheet were
-// transcribed on 2026-09-28 and live in kAlarmRules[], next to the state machine
-// that uses them - they have to be declared after the reading globals they point
-// at. See that table for the numbers, the per-magnitude direction, and the reason
-// each disabled rule is disabled.
+// Las cifras reales de la hoja de alarma/prealarma del proyecto se transcribieron
+// el 2026-09-28 y estan en kAlarmRules[], junto a la maquina de estados que las usa
+// (tienen que declararse despues de las variables de lectura a las que apuntan). En
+// esa tabla estan los numeros, la direccion de cada magnitud y el motivo de cada
+// regla desactivada.
 
-// Consecutive reads with every rule clear before a level auto-clears. More than
-// one, so a single dip cannot end an alarm during a real fire.
+// Lecturas seguidas con todas las reglas por debajo antes de bajar de nivel. Mas de
+// una, para que un solo descenso no termine una alarma en un incendio real.
 #define ALARM_CLEAR_CONSECUTIVE 5
 
-// ---- PRE-ALARM CONFIRMATION WINDOW ----
+// ---- VENTANA DE CONFIRMACION DE LA PRE-ALARMA ----
 //
-// Pre-alarm is a question, not a verdict. The node holds it for this long and then
-// decides: anything still over its threshold when the window expires escalates to
-// full ALARM, because a condition that lasts an hour is not sensor noise.
-// Everything back under clears to NORMAL before then, via the usual clean-read run.
+// La pre-alarma es una pregunta, no un veredicto. El nodo la mantiene este tiempo y
+// entonces decide: lo que siga por encima de su umbral cuando se acabe la ventana
+// sube a ALARMA, porque una condicion que dura una hora no es ruido del sensor. Lo
+// que vuelva por debajo antes baja a NORMAL por el camino habitual de lecturas
+// limpias.
 //
-// An ALARM-level reading still escalates IMMEDIATELY and does not wait for this.
-// Waiting an hour on a 60 C reading would be absurd: the window exists to confirm
-// a doubtful signal, not to delay an obvious one.
+// Una lectura de nivel ALARMA sigue subiendo AL MOMENTO y no espera a esto. Esperar
+// una hora con 60 C seria absurdo: la ventana existe para confirmar una senal
+// dudosa, no para retrasar una evidente.
 //
-// 60 MINUTES, raised from 10 on 2026-10-14 (decision of the user). The cost is
-// power: pre-alarm never sleeps, so a node can now stay awake six times longer on
-// a signal that never reaches the alarm threshold.
+// 60 MINUTOS, subido desde 10 el 2026-10-14 (decision del usuario). El coste es
+// energia: en pre-alarma el nodo no duerme, asi que ahora puede pasar seis veces mas
+// tiempo despierto con una senal que nunca llega al umbral de alarma.
 //
-// Overridable desde platformio.ini (-DPREALARM_CONFIRM_MS=...) para los builds de
-// medicion, que necesitan otra duracion para poder medir intervalos.
+// Se puede cambiar desde platformio.ini (-DPREALARM_CONFIRM_MS=...) para los builds
+// de medicion, que necesitan otra duracion para poder medir intervalos.
 #ifndef PREALARM_CONFIRM_MS
 #define PREALARM_CONFIRM_MS 3600000UL  // 60 minutes
 #endif
 
 // ---------------------------------------------------------------------------
-// MEASUREMENT BUILD ONLY - REMOVE BEFORE DEPLOYMENT
+// SOLO PARA BUILDS DE MEDICION - QUITAR ANTES DEL DESPLIEGUE
 //
-// Pins the alarm state so each of the three power profiles can be measured on a
-// PPK2 for as long as the meter needs, instead of waiting for real smoke:
+// Fija el estado de alarma para poder medir con el PPK2 cada uno de los tres
+// perfiles de consumo el tiempo que haga falta, sin esperar a que haya humo real:
 //
-//   0  not forced - normal firmware, the state machine runs as designed
-//   1  pinned PRE-ALARM
-//   2  pinned ALARM
+//   0  sin forzar - firmware normal, la maquina de estados funciona como esta disenada
+//   1  PRE-ALARMA fija
+//   2  ALARMA fija
 //
-// When forced, updateAlarmState() returns immediately: the state can neither
-// clear nor escalate, so a pinned PRE-ALARM stays pre-alarm instead of being
-// promoted by the 60-minute confirmation window.
+// Forzado, updateAlarmState() vuelve en el acto: el estado no puede ni bajar ni
+// subir, asi que una PRE-ALARMA fija sigue en pre-alarma en vez de subir a alarma al
+// acabar la ventana de confirmacion.
 //
-// WHY THIS IS DANGEROUS TO LEAVE IN. A node built with 1 or 2 is DEAF TO ITS OWN
-// SENSORS - it reports a fire that is not there and, worse, could never report one
-// that was, because the state is frozen. It also never sleeps, so on a battery it
-// is flat within hours. Every boot prints a banner saying so, and loop() repeats
-// it, precisely so a test build cannot be mistaken for a real one.
+// POR QUE ES PELIGROSO DEJARLO. Un nodo compilado con 1 o 2 esta SORDO A SUS PROPIOS
+// SENSORES: informa de un incendio que no existe y, peor, nunca podria informar de
+// uno real, porque el estado esta congelado. Ademas nunca duerme, asi que con
+// bateria se agota en horas. Cada arranque imprime un aviso y loop() lo repite,
+// precisamente para que un build de prueba no se confunda con uno real. Los
+// entornos que lo activan son los medir-* de platformio.ini.
 #ifndef FORCE_ALARM_STATE
 #define FORCE_ALARM_STATE 0
 #endif
 
-// The status LED is a measurement confound in the raised states.
+// El LED de estado falsea las medidas de consumo en los estados altos.
 //
-// ledOff() only runs on the way into deep sleep, and the raised states never
-// sleep - so the WS2812 stays lit from the last transmit for the whole test and
-// its draw lands in the numbers. Set to 1 to keep it dark throughout.
+// ledOff() solo se ejecuta al entrar en sueno profundo, y los estados altos nunca
+// duermen: el WS2812 se queda encendido desde el ultimo envio durante toda la
+// prueba y su consumo entra en los numeros. Con 1 se mantiene apagado siempre.
 //
-// Worth knowing beyond this test: that is REAL behaviour, not a test artefact. A
-// node genuinely in alarm leaves its LED lit indefinitely, which is wasted current
-// at exactly the moment the battery matters most.
+// Conviene saberlo mas alla de la prueba: es el comportamiento REAL. Un nodo de
+// verdad en alarma deja el LED encendido indefinidamente, que es corriente
+// desperdiciada justo cuando mas importa la bateria.
 #ifndef FORCE_LED_OFF
 #define FORCE_LED_OFF 0
 #endif
 // ---------------------------------------------------------------------------
 
-// Defined further down, beside kAlarmRules which they depend on. Declared here
-// because the CFG parser and the boot-seed block both run long before that.
+// Definidas mas abajo, junto a kAlarmRules, de la que dependen. Se declaran aqui
+// porque el interprete de CFG y el bloque de inicializacion del arranque las usan
+// mucho antes.
 static void seedThresholds();
 static void validateThresholds();
 static bool setThresholdByName(const char *key, float value);
 static float *thresholdSlot(const char *key);
 
-// ---------- Activity LED ----------
-// The ESP32-S3 module's own RGB LED (WS2812 on GPIO48, PIN_NEOPIXEL in the
-// esp32s3 variant). Lit only while the node is actually doing something: from the
-// moment a tick decides it has work, through rail bring-up, sensor reads and the
-// transmit, and switched off immediately before deep sleep.
+// =============================================================================
+// 2. LED DE ESTADO
+// =============================================================================
 //
-// Idle ticks never light it, which makes it a useful health indicator at a glance:
-//   brief flash every third tick  -> healthy, cycle running
-//   solid on                      -> stuck awake, something is blocking
-//   never lights                  -> not completing ticks at all
+// LED direccionable WS2812 en PIN_STATUS_LED (GPIO21); ver pins.h para saber por
+// que es ese pin y no el PIN_NEOPIXEL 48 de la variante.
 //
-// Deliberately DIM. A WS2812 at full white draws ~60mA - comparable to the BMV080
-// laser and more than the ESP32 itself - which would undo the power work this
-// firmware exists to do. The values below are a few percent of full scale, still
-// clearly visible indoors, and cost on the order of a milliamp.
-// Status LED: addressable WS2812 on PIN_STATUS_LED (GPIO21) - see pins.h for why
-// it is that pin and not the variant's PIN_NEOPIXEL 48.
+// Colores, para leer el comportamiento del nodo desde el otro lado de la sala:
 //
-// Three states, so the node's behaviour is readable from across the room:
+//   VERDE (onda)  en cada despertar del sueno profundo. Prueba de que el
+//                 temporizador salto y el nodo volvio: si falta, el nodo no
+//                 despierta.
+//   AZUL          mantenido durante una lectura de sensores.
+//   BLANCO        mantenido durante una transmision.
+//   ROJO          algo va mal y el nodo no lo puede arreglar solo (un sensor que se
+//                 esperaba y no contesto, o modo seguro).
+//   APAGADO       dormido.
 //
-//   GREEN flash   every wake from deep sleep, including idle ticks. Proof the
-//                 timer fired and the node came back - a missing green flash is
-//                 the node failing to wake at all.
-//   YELLOW        held while actually working: rails up, sensors reading, radio
-//                 transmitting. Its duration shows how long a working tick takes.
-//   OFF           asleep.
+// EL BRILLO ES UNA DECISION DE CONSUMO, no estetica.
 //
-// At the default 3 read / 4 transmit counters a healthy node reads as: green wave,
-// dark, green wave, dark, green wave then a yellow stretch (the read), then next
-// tick a green wave and a shorter yellow stretch (the transmit). Green with no
-// yellow ever means ticks are being counted but work is not happening; yellow that
-// never goes out means it is stuck awake.
+// Estos valores eran 120 y 120/80, descritos en un comentario como "un pequeno
+// porcentaje del maximo". Era falso: 120/255 es casi la mitad, en dos canales a la
+// vez. Paso desapercibido tanto tiempo porque el LED NO SE ENCENDIA: el orden de
+// colores era incorrecto (ver ledWrite), asi que el pixel recibia una trama que
+// nunca aceptaba y apenas consumia nada.
 //
-// Note the read and transmit schedules are INDEPENDENT counters, each resetting on
-// its own threshold - 3 and 4 share no common factor below 12, so which tick of a
-// frame carries the transmit drifts, and every 12th tick does both at once.
+// En cuanto se arreglo el orden de colores y el LED se encendio de verdad, la placa
+// empezo a sufrir reinicios POWERON: un colapso real de la alimentacion, no un fallo
+// de software. Un WS2812 en blanco al maximo son ~60 mA, comparable al laser del
+// BMV080, y el color de trabajo se mantenia durante toda la lectura incluida la
+// rafaga de ~120 mA de la radio. Es justo la carga simultanea que los turnos de este
+// firmware existen para evitar.
 //
-// BRIGHTNESS IS A POWER DECISION HERE, not a cosmetic one.
-//
-// These were 120 and 120/80, described in a comment as "a few percent of full
-// scale". That was simply wrong - 120/255 is nearly half, on two channels at once.
-// It went unnoticed for as long as it did because the LED was not lighting AT ALL:
-// the colour order was wrong (see ledWrite), so the pixel was being driven with a
-// frame it never accepted and drew almost nothing.
-//
-// The moment the colour order was fixed and the LED actually lit, the board began
-// taking POWERON resets - a true supply collapse, not a software fault. A WS2812
-// at full white is ~60mA, rivalling the BMV080 laser, and the yellow state is HELD
-// for the whole working tick including the radio's ~120mA transmit burst. That is
-// precisely the concurrent-load pattern that this firmware's sequential slots exist
-// to avoid.
-//
-// So: low enough to be cheap, high enough to see across a room. A WS2812 is very
-// bright - 30/255 is comfortably visible indoors and costs single-digit mA.
+// Asi que: lo bastante bajo para ser barato y lo bastante alto para verse desde
+// lejos. Un WS2812 es muy brillante: 30/255 se ve de sobra en interior y cuesta unos
+// pocos mA.
 #define LED_GREEN_R 0
 #define LED_GREEN_G 30
 #define LED_GREEN_B 0
@@ -323,54 +287,49 @@ static float *thresholdSlot(const char *key);
 #define LED_BLUE_R 0
 #define LED_BLUE_G 0
 #define LED_BLUE_B 30
-// White = transmitting. All three channels, so it draws roughly three times a
-// single-channel colour at the same per-channel value - kept at 30 for that
-// reason. Safe here because the LED is blanked across the radio burst itself
-// (see transmitStore), so it is never lit at the tightest moment for the supply.
+// Blanco = transmitiendo. Los tres canales, asi que consume unas tres veces lo que
+// un color de un solo canal con el mismo valor; por eso se deja en 30. Es seguro
+// porque el LED se apaga durante la propia rafaga de la radio (ver transmitStore),
+// asi que nunca esta encendido en el momento mas critico para la alimentacion.
 #define LED_WHITE_R 30
 #define LED_WHITE_G 30
 #define LED_WHITE_B 30
-#define LED_FLASH_MS 120
+#define LED_FLASH_MS 120  // HISTORICO: ya no se usa
 
-// Wake indicator shape: a smooth ramp up and back down rather than a hard blink.
+// Forma del indicador de despertar: una rampa suave de subida y bajada en vez de un
+// parpadeo seco. El brillo va en los valores RGB que se le mandan al WS2812.
 //
-// Only the WS2812 path actually fades - the brightness is carried in the RGB
-// values sent to it. The plain-level fallback in ledWrite() is a bare digital pin
-// with no PWM behind it, so on a plain LED this still reads as a flash, just a
-// longer one. GPIO21 on these boards is a WS2812, so the wave is what shows.
-//
-// COST, because this fires on EVERY wake including idle ticks: an idle tick was
-// otherwise almost free - a few hundred milliseconds awake at ~40mA. A 500ms wave
-// roughly doubles that, which on solar is a real number, not a rounding error.
-// Worth it on the bench where the point is to SEE the node working; turn
-// LED_WAVE_MS down (or back to ledFlashWake) for deployment.
+// COSTE, porque se dispara en CADA despertar: un despertar sin trabajo era casi
+// gratis, unos cientos de milisegundos despierto a ~40 mA, y una onda de 500 ms lo
+// duplica aproximadamente. Merece la pena en el banco, donde lo que se quiere es VER
+// trabajar al nodo; para el despliegue, bajar LED_WAVE_MS.
 #define LED_WAVE_MS 500
 #define LED_WAVE_STEPS 24
 
-// This LED is NEO_RGB, NOT the WS2812B-standard NEO_GRB that neopixelWrite()
-// hardcodes. Established on node C2 by sweeping all six colour orders and asking
-// each for pure green - only NEO_RGB actually showed green.
+// Este LED es NEO_RGB, NO el NEO_GRB estandar del WS2812B que neopixelWrite() lleva
+// fijo. Se establecio en el nodo C2 probando los seis ordenes de color y pidiendo
+// verde puro a cada uno: solo NEO_RGB mostro verde.
 //
-// That mismatch is why every colour was wrong, and why it could not be fixed by
-// swapping channels: neopixelWrite() puts the green byte first on the wire, this
-// part reads the first byte as red, so the error is in the FRAME rather than in
-// the arguments. Single-channel probing gave results no permutation could explain
-// (one channel producing teal) and two runs contradicted each other. A driver with
-// an explicit colour order settles it; do not "simplify" this back to
-// neopixelWrite().
+// Esa diferencia es la razon de que todos los colores salieran mal, y de que no se
+// pudiera arreglar intercambiando canales: neopixelWrite() pone el byte del verde
+// primero en el cable y esta pieza lee el primer byte como rojo, asi que el error
+// esta en la TRAMA, no en los argumentos. Un driver con orden de color explicito lo
+// resuelve; no "simplificarlo" volviendo a neopixelWrite().
 //
-// The old implementation also did a plain digitalWrite() after the pixel write, to
-// cover the LED being a plain one rather than addressable. That is gone: the type
-// is now known, and holding the data line HIGH between frames corrupts the timing
-// of the next frame.
+// La version antigua hacia ademas un digitalWrite() despues de escribir el pixel,
+// por si el LED era uno normal y no direccionable. Ya no: el tipo es conocido, y
+// mantener la linea de datos alta entre tramas estropea la temporizacion de la
+// siguiente.
 static Adafruit_NeoPixel g_statusLed(1, PIN_STATUS_LED, NEO_RGB + NEO_KHZ800);
 static bool g_ledBegun = false;
 
+// Pone el LED de un color. El argumento `level` es de la version antigua y ya no
+// hace nada.
 static void ledWrite(uint8_t r, uint8_t g, uint8_t b, bool level) {
-  (void)level;  // legacy plain-LED argument, no longer meaningful
+  (void)level;  // argumento heredado del LED normal, ya sin significado
 #if FORCE_LED_OFF
-  // Forced dark for a power measurement - see FORCE_LED_OFF. Done HERE rather
-  // than at the call sites so no colour can slip through a path I missed.
+  // Forzado a oscuras para una medida de consumo - ver FORCE_LED_OFF. Se hace AQUI
+  // y no en cada llamada, para que ningun color se escape por un camino olvidado.
   r = g = b = 0;
 #endif
   if (!g_ledBegun) {
@@ -385,17 +344,16 @@ static void ledOff() {
   ledWrite(0, 0, 0, false);
 }
 
-// One wave: fade up to full colour and back down. Blocking, like everything else
-// on the wake path.
+// Una onda: subir hasta el color completo y volver a bajar. Bloqueante, como todo
+// lo demas en el camino del despertar.
 //
-// The triangle is computed as a level 0..half..0 and scaled into each channel, so
-// a colour with a zero channel (green is 0,120,0) stays that colour throughout
-// rather than drifting hue as it fades.
+// El triangulo se calcula como un nivel 0..mitad..0 que se aplica a cada canal, asi
+// que un color con un canal a cero conserva su tono durante toda la onda.
 static void ledWave(uint8_t r, uint8_t g, uint8_t b) {
   const int half = LED_WAVE_STEPS / 2;
   const int stepMs = LED_WAVE_MS / LED_WAVE_STEPS;
   for (int i = 0; i <= LED_WAVE_STEPS; i++) {
-    int level = (i <= half) ? i : (LED_WAVE_STEPS - i);  // 0 -> half -> 0
+    int level = (i <= half) ? i : (LED_WAVE_STEPS - i);  // 0 -> mitad -> 0
     ledWrite((uint8_t)((int)r * level / half), (uint8_t)((int)g * level / half),
              (uint8_t)((int)b * level / half), level > 0);
     delay(stepMs);
@@ -403,59 +361,50 @@ static void ledWave(uint8_t r, uint8_t g, uint8_t b) {
   ledOff();
 }
 
-// Green wave: "I woke up". Fires on every wake, idle ticks included, so a missing
-// wave is the node failing to wake at all.
+// Onda verde: "me he despertado". Se dispara en cada despertar, asi que si falta es
+// que el nodo no despierta.
 static void ledFlashWake() {
   ledWave(LED_GREEN_R, LED_GREEN_G, LED_GREEN_B);
 }
 
-// White, held for the whole of a transmit, not blinked, so its length is
-// meaningful - a transmit is ~1s against the read tick's ~19s of blue.
+// Blanco, mantenido durante toda la transmision (no un parpadeo), para que su
+// duracion signifique algo.
 static void ledWorking() {
   ledWrite(LED_WHITE_R, LED_WHITE_G, LED_WHITE_B, true);
 }
 
-// Red: something is wrong that the node cannot fix itself - a sensor that was
-// expected and did not answer, or safe mode. Deliberately the SAME brightness as
-// the others so it is a colour change rather than an attention-grabbing flash;
-// the point is to be readable from a distance, not to be loud.
+// Rojo: algo va mal que el nodo no puede arreglar solo - un sensor que se esperaba
+// y no contesto, o modo seguro. A proposito con el MISMO brillo que los demas: es un
+// cambio de color legible de lejos, no un destello para llamar la atencion.
 //
-// This matters specifically for untethered testing: with no serial cable, the LED
-// and the radio are the only two things that can tell you the node is unhappy.
+// Importa sobre todo en pruebas sin cable: sin puerto serie, el LED y la radio son
+// lo unico que puede decir que el nodo tiene un problema.
 static void ledTrouble() {
   ledWrite(LED_RED_R, LED_RED_G, LED_RED_B, true);
 }
 
-// Blue, held for the whole of a READ tick. Distinguishing reading from
-// transmitting matters at a glance: a read tick is ~19s (every sensor plus the
-// post-heater rail cycle) while a transmit is barely a second, so the two are
-// unmistakable by duration alone once they are different colours.
+// Azul, mantenido durante una lectura de sensores. Distinguir leer de transmitir de
+// un vistazo es util: una lectura completa dura ~19 s y una transmision apenas un
+// segundo.
 static void ledReading() {
   ledWrite(LED_BLUE_R, LED_BLUE_G, LED_BLUE_B, true);
 }
 
-// ---------- Deep sleep ----------
-// The ESP keeps its own 3V3 rail and sleeps itself on a timer (~10-15uA),
-// retaining RTC memory; the power MCU is not involved in waking it. Each wake is
-// a complete cycle: rails on -> init -> sample until every expected sensor is
-// fresh -> transmit -> rails off -> sleep.
+// ---------- Sueno profundo ----------
+// El ESP mantiene su propio rail de 3V3 y se duerme a si mismo con un temporizador
+// (~10-15 uA), conservando la memoria RTC. Cada despertar es un ciclo completo:
+// encender lo necesario -> leer -> transmitir si toca -> apagar -> dormir.
 //
-// SEN0466 is deliberately left OUT of the sleeping cycle for now. It needs a 210s
-// settle per notes/power_budget.md, which would dominate every wake; sleeping
-// through that window is a later change (it needs a multi-phase wake). Until then
-// including it would simply stall each cycle for three and a half minutes.
-// Set to 0 for bench testing: the node stays awake, samples continuously and
-// transmits on a plain timer. Useful when you need the serial port to stay put and
-// the LED to be watchable, rather than the port vanishing every 10 seconds.
-// Overridable from platformio.ini (-DSLEEP_ENABLED=0) so a bench or measurement
-// build needs no source edit - see the medir-tiempos environment.
+// Con 0 el nodo no duerme: se queda despierto, lee sin parar y transmite con un
+// temporizador simple. Util en el banco cuando se necesita que el puerto serie no
+// desaparezca y poder mirar el LED. Se puede cambiar desde platformio.ini
+// (-DSLEEP_ENABLED=0) sin tocar el codigo - ver el entorno medir-tiempos.
 #ifndef SLEEP_ENABLED
 #define SLEEP_ENABLED 1
 #endif
 
-// Transmit cadence when SLEEP_ENABLED is 0. The tick counters cannot drive it in
-// this mode - they advance once per boot, and without sleep there are no reboots,
-// so they would sit at 1/3 forever and nothing would ever be sent.
+// Cadencia de envio cuando SLEEP_ENABLED vale 0 (sin sueno no hay calendario que la
+// marque).
 #define NOSLEEP_TX_GAP_MS 15000UL
 // SUELO DEL SUENO, y nada mas. Ya no es "un tick": el trabajo se programa por
 // TIEMPO - cada sensor con su periodo en minutos - y la duracion de cada sueno la
@@ -464,144 +413,101 @@ static void ledReading() {
 // Sobrevive solo como valor por defecto del argumento de enterDeepSleep(), para
 // las llamadas defensivas que no tienen un vencimiento que consultar.
 #define SLEEP_CYCLE_SECONDS 10UL
-// Were the sensor rails brought up on this wake?
+// Se encendieron los rails de sensores en este despertar?
 //
-// Tracked with a flag rather than read back off the pins: these are outputs, and
-// on an idle or hibernation wake nothing has driven them since deep sleep latched
-// them off, so a pin read would describe the latch rather than this boot.
+// Se lleva con una variable en vez de leer los pines: son salidas, y en un despertar
+// sin trabajo o de hibernacion nada las ha conducido desde que el sueno las enclavo
+// apagadas, asi que leer el pin describiria el enclavamiento, no este arranque.
 static bool g_railsUp = false;
 static bool railsArePowered() { return g_railsUp; }
 
 
-// Below this, the reading is not a flat pack - it is a missing divider.
+// Por debajo de esto la lectura no es una bateria vacia: es que falta el divisor.
 //
-// The board cannot run from a pack this low (the rail collapses around 1.9V), so
-// a node that is transmitting this packet while reporting 0.5V is telling us about
-// its wiring, not its energy. An older PCB with no divider fitted floats at
-// ~100 mV, which is ~0.12V through the ratio and lands well under this.
+// La placa no puede funcionar con una tension tan baja (el rail cae hacia 1,9 V),
+// asi que un nodo que esta transmitiendo este paquete mientras dice 0,5 V esta
+// hablando de su cableado, no de su energia. Una placa antigua sin divisor flota en
+// ~100 mV, que a traves del factor son ~0,12 V, muy por debajo de esto.
 #define SUPERCAP_V_SANITY_FLOOR 0.8f
 
-// ---- LOW-BATTERY HIBERNATION ----
+// ---- HIBERNACION POR BATERIA BAJA ----
 //
-// Below HIB_ENTER_V the node stops being a sensor node and becomes a voltmeter
-// that sleeps: no sensor reads, both rails off, the radio off and silent. It wakes
-// only to look at the pack, and resumes normal operation once charging has brought
-// it back to HIB_EXIT_V.
+// Por debajo de HIB_ENTER_V el nodo deja de ser un nodo sensor y pasa a ser un
+// voltimetro que duerme: sin lecturas, los dos rails apagados, la radio apagada y
+// en silencio. Solo despierta para mirar la bateria, y vuelve a funcionar cuando la
+// carga la ha subido hasta HIB_EXIT_V.
 //
-// THE POINT IS THE CELLS, NOT THE UPTIME. A 3.8V supercapacitor pack of this kind
-// is damaged by being run down hard, so hibernation is a protective stop: better a
-// node that pauses and comes back than one that flattens its pack and needs the
-// hardware replaced.
+// LO QUE SE PROTEGE SON LAS CELDAS, NO EL TIEMPO EN MARCHA. Un pack de
+// supercondensadores de 3,8 V como este se dana si se descarga a fondo, asi que la
+// hibernacion es una parada de proteccion: mejor un nodo que se para y vuelve que
+// uno que agota su pack y obliga a cambiar el hardware.
+// OJO: estos valores son de la epoca de los supercondensadores. Desde el
+// 2026-09-24 la fuente es una bateria de litio, y no se han recalculado.
 //
-// The gap between the two thresholds is hysteresis and is not optional. Without
-// it, a pack hovering at the limit would resume, draw current, sag below the limit,
-// hibernate, recover, resume... thrashing between the two at exactly the moment it
-// has least energy to waste. 0.3V is wide enough that only real charging crosses it.
+// La separacion entre los dos umbrales es histeresis y no es opcional. Sin ella, un
+// pack justo en el limite volveria a funcionar, consumiria, bajaria del limite,
+// hibernaria, se recuperaria... oscilando justo cuando menos energia tiene que
+// gastar. 0,3 V es suficiente para que solo una carga de verdad lo cruce.
 #define HIB_ENTER_V 2.2f
 #define HIB_EXIT_V 2.5f
 
-// How often hibernation wakes to look at the pack.
+// Cada cuanto despierta la hibernacion para mirar la bateria.
 //
-// There is no analog wake-on-threshold on the ESP32-S3 - nothing can interrupt the
-// chip when a voltage crosses a level - so "wait until charged" has to be polling.
-// A check is a boot, one ADC read and back to sleep with no rail powered: roughly
-// 400ms. At 10 minutes that is about 0.8 mAh per day against a ~176 mAh pack.
+// El ESP32-S3 no tiene despertar analogico por umbral - nada puede interrumpir al
+// chip cuando una tension cruza un nivel - asi que "esperar a que se cargue" tiene
+// que ser preguntar de vez en cuando. Una comprobacion es un arranque, una lectura
+// del ADC y vuelta a dormir sin ningun rail encendido: unos 400 ms. Cada 10 minutos
+// son unos 0,8 mAh al dia.
 //
-// Longer saves little and costs responsiveness: the node would sit hibernating
-// through the first part of a sunny morning with a full pack.
+// Mas tiempo ahorra poco y cuesta respuesta: el nodo seguiria hibernando durante la
+// primera parte de una manana soleada con el pack ya lleno.
 #define HIB_CHECK_SECONDS 600UL
 
-// One STAT as the node enters hibernation, before it goes quiet.
+// Un STAT al entrar en hibernacion, antes de quedarse callado.
 //
-// Hibernation itself transmits NOTHING - that is the whole point. But a node that
-// simply stops, with no last word, is indistinguishable at Module A from a node
-// that has died, and the cost of telling those apart is someone walking into a
-// forest. One packet on the way down turns a mystery into a status.
+// La hibernacion en si no transmite NADA: esa es la idea. Pero un nodo que
+// simplemente se calla, sin ultima palabra, no se distingue en Modulo A de un nodo
+// que ha muerto, y distinguirlos cuesta que alguien se meta en el bosque. Un paquete
+// al apagarse convierte un misterio en un estado.
 //
-// Set to 0 for true silence from the moment the threshold is crossed.
+// Con 0, silencio total desde el momento en que se cruza el umbral.
 #define HIB_ANNOUNCE_ENTRY 1
 
-// How long to hold before sleeping so the host can drain the USB CDC buffer.
+// Cuanto esperar antes de dormir para que el PC termine de leer el buffer USB.
 //
-// Serial.flush() is NOT sufficient on the ESP32-S3's USB-Serial/JTAG: it waits
-// only until the buffer is handed to the USB stack, and if the host is not polling
-// at that moment the bytes sit in the endpoint FIFO and die with the peripheral.
-// At 50ms the entire tail of every read tick was lost - [read], [store] and
-// [sleep] all vanished while the earlier [bmv080] and [cm1106] lines survived,
-// which is what a tail-loss looks like as opposed to a crash.
+// Serial.flush() NO basta en el USB-Serial/JTAG del ESP32-S3: solo espera a que el
+// buffer pase a la pila USB, y si el PC no esta leyendo en ese momento los bytes se
+// quedan en la FIFO del endpoint y mueren con el periferico. Con 50 ms se perdia
+// toda la cola de cada lectura - [read], [store] y [sleep] desaparecian mientras
+// las lineas anteriores sobrevivian -, que es como se ve una perdida de cola frente
+// a un cuelgue.
 //
-// This is BENCH instrumentation. It is pure waste in the field (the awake time it
-// adds is spent doing nothing at all), so drop it to ~50ms for deployment - by
-// which point there is no USB host listening anyway.
-// 400ms was for watching the log over USB. In the field there is no host draining
-// the buffer, so it is pure awake time on every single wake - dropped for
-// untethered running. Raise it again when debugging on a cable.
+// En el campo no hay ningun PC leyendo el buffer, asi que es tiempo despierto puro en
+// cada despertar: se bajo a 60 ms para funcionar sin cable. Subirlo para depurar
+// con cable.
 #define SLEEP_USB_DRAIN_MS 60
 
-// ---------- Tick scheduling ----------
-// Every wake is one tick. Two counters advance on EVERY tick and each resets when
-// it reaches its own threshold, so the two schedules are independent:
+// ---------- Planificacion por ticks (HISTORICO) ----------
+// El firmware anterior funcionaba por "ticks": cada despertar era un tick, y unos
+// contadores decidian cada cuantos ticks se leia y se transmitia (SENSOR_READ,
+// LORA_TRANS, BURST). Lo SUSTITUYO el calendario por tiempo (seccion 4, kJobs[]),
+// porque un tick no medio nunca tiempo real: duraba 17,8-18,8 s en vez de 10.
 //
-//   sensor_read -> read the FAST sensors (BME690, CM1106, BMV080) and store the
-//                  reading. Default 3 ticks = 30s.
-//   lora_trans  -> transmit everything stored since the last transmit, then clear
-//                  the store. Default 3 ticks = 30s.
-//
-// Both thresholds are settable from Module A (CFG,SENSOR_READ / CFG,LORA_TRANS).
-// A tick where neither is due does no sensor or radio initialisation at all and
-// goes straight back to sleep - that is what makes a 10s tick affordable, since
-// the BMV080's startup alone would otherwise cost 5s of every 10s tick.
-// --- "Dueto Centinela": two sensor groups on two schedules ---
-//
-// SENTINEL, every tick: BME690 temperature/humidity/pressure with the GAS HEATER
-// OFF, plus CO. Both are fast and cheap, and both are the signals that move first
-// in a fire. This is the group that justifies a 10s tick.
-//
-// BURST, every BURST_EVERY_DEFAULT ticks: the expensive sensors - BME690 gas
-// (10.8s of heater), BMV080 (68mA laser), CM1106 (power-cycle plus warm-up) and
-// the wind sensor. Particulates and CO2 change on the timescale of a spreading
-// fire, not of seconds, so 15 minutes matches the phenomenon and costs a
-// seventieth of what sampling them every 30s costs.
-//
-// Both counters live in RTC memory and both are settable from Module A, so the
-// balance between detection latency and battery life can be retuned in the field
-// without a reflash.
-// Overridable from platformio.ini so a measurement build can force a burst every
-// tick without touching the source - see medir-normal-t.
+// Las constantes de abajo quedan de esa epoca. BURST_EVERY_DEFAULT,
+// SENSOR_READ_EVERY_DEFAULT, LORA_TRANS_EVERY_DEFAULT, COUNTER_EVERY_MIN/MAX,
+// READINGS_PER_PACKET_MAX, BATCH_READING_WORST_BYTES y readingsPerPacket() ya no
+// se usan en ningun sitio.
 #ifndef BURST_EVERY_DEFAULT
 #define BURST_EVERY_DEFAULT 90   // ticks; 90 x 10s nominal = 15 min, 26.7 min real
 #endif
-
-// NOTE ON THE SENTINEL CADENCE. The sentinels are cheap in SENSOR terms, but on
-// this board they are not free: the BME690 sits behind the gated 3V3 rail, so
-// reading it means powering that rail and re-initialising the sensor - roughly a
-// second, against ~0.15s for a tick that powers nothing.
-//
-// So a true 10s sentinel cadence (SENSOR_READ=1) costs ~10% duty on rail bring-up
-// alone. It becomes genuinely cheap only once the sentinel sensors are permanently
-// powered, which is a board change (the 3V3 rail currently gates all of them
-// together).
-//
-// Until then SENSOR_READ stays at 3 - sentinels every 30s - which keeps the idle
-// ticks free. Set CFG,SENSOR_READ=1 for 10s sentinels when the power budget allows
-// it or the hardware changes.
 
 #define SENSOR_READ_EVERY_DEFAULT 3
 #define LORA_TRANS_EVERY_DEFAULT 4
 #define COUNTER_EVERY_MIN 1
 #define COUNTER_EVERY_MAX 360           // 1 hour at a 10s tick
 
-// The RYLR998 accepts at most 240 bytes per packet. One reading in the compact
-// batch format runs ~56 bytes typically and up to ~70 in the worst case (every
-// field wide and negative), so three readings plus the "B,n," header is the most
-// that reliably fits. Rather than split a batch across packets, LORA_TRANS is
-// limited so a batch always fits in one - which is why the ratio, not LORA_TRANS
-// alone, is what gets validated:
-//
-//     readings per packet = ceil(LORA_TRANS / SENSOR_READ)
-//
-// So with SENSOR_READ=3, LORA_TRANS may go up to 9 (3 readings). Raising
-// SENSOR_READ raises the permitted LORA_TRANS in step.
+// El RYLR998 admite como mucho 240 bytes por paquete. Una lectura en formato de lote
+// ocupa ~56 bytes normalmente y hasta ~70 en el peor caso.
 #define READINGS_PER_PACKET_MAX 3
 #define BATCH_READING_WORST_BYTES 70
 
@@ -630,105 +536,99 @@ static bool railsArePowered() { return g_railsUp; }
 // reporta - esa es la red de seguridad, no este numero.
 #define READING_STORE_MAX 8
 
-// Readings a given counter pair would accumulate between transmits.
+// HISTORICO (planificador por ticks): lecturas que acumularia un par de contadores
+// entre envios. Ya no se llama desde ningun sitio.
 static uint16_t readingsPerPacket(uint16_t sensorReadEvery, uint16_t loraTransEvery) {
   if (sensorReadEvery == 0) return 0xFFFF;
   return (uint16_t)((loraTransEvery + sensorReadEvery - 1) / sensorReadEvery);
 }
 
 
-// Longest a single scheduled read may spend waiting for every fast sensor to go
-// fresh. Bounds the awake time of a reading tick; whatever is still stale is sent
-// as its last known value and named in the log.
-// Ceiling for one read tick. Must now cover every slot PLUS the post-heater rail
-// cycle and the BMV080's startup delay that follows it, so it is far wider than
-// when the slots merely ran back to back.
+// Techo de tiempo de un barrido de lectura. Tiene que cubrir todos los turnos MAS el
+// ciclo de rails tras el calefactor y la espera de arranque del BMV080 que le sigue.
+// Si se agota, los sensores que falten se quedan sin leer en esa vuelta (y su
+// vencimiento no se mueve, asi que vuelven a vencer enseguida).
 #define SENSOR_READ_WINDOW_MS 45000UL
-// EL SEN0466 VA CABLEADO DIRECTO A CORRIENTE, SALTANDOSE EL TRANSISTOR.
+// SEN0466 FUERA DEL CICLO CON SUENO: 0 = se lee como los demas.
 //
-// Puesto a 0 el 2026-10-08, cuando se confirmo ese cableado. Antes valia 1 y el
-// sensor quedaba fuera del ciclo entero, porque con el rail conmutado sus 210 s de
-// estabilizacion habria que pagarlos EN CADA DESPERTAR - imposible contra un tick
-// de 17.8 s.
+// Puesto a 0 el 2026-10-08, cuando se vio que el sensor iba cableado directo a la
+// alimentacion. Antes valia 1 y el sensor quedaba fuera del ciclo entero, porque con
+// el rail conmutado sus 210 s de estabilizacion habria que pagarlos EN CADA
+// DESPERTAR.
 //
-// Alimentado permanentemente eso ya no aplica: los 210 s se pagan UNA VEZ, al
-// energizar la placa, y a partir de ahi el sensor esta siempre caliente y listo.
-// El centinela ya lo lee - el codigo estaba, solo faltaba que el arranque lo
-// inicializara - asi que el CO pasa a medirse en cada lectura de centinela, que es
-// lo que pide el documento de estrategia: "SEN0466 (CO, encendido 24/7)".
-//
-// Si alguna placa NO lleva ese cableado directo, su SEN0466 volvera a dar NotInit
-// tras el primer sueno y hay que ponerlo a 1 para esa placa.
+// Alimentado de forma permanente eso ya no aplica: los 210 s se pagan UNA VEZ, al
+// encender la placa, y a partir de ahi el sensor esta siempre caliente y listo.
+// Desde el 2026-10-14 tiene su propia puerta en GPIO16, que en el banco se mantiene
+// encendida tambien durante el sueno (SEN0466_GATE_ALWAYS_ON), asi que sigue
+// valiendo 0.
 #define SLEEP_SKIP_SEN0466 0
 
-// The SEN0466's stabilisation time, from its datasheet and confirmed by the
-// 210s the bring-up has always quoted. It needs this much CONTINUOUS power; any
-// interruption restarts it, which is why recoverRailsAfterHeater() now leaves the
-// 5V rail alone.
+// Tiempo de estabilizacion del SEN0466, segun su hoja de datos y confirmado por los
+// 210 s que siempre ha citado la puesta en marcha. Necesita esa alimentacion de forma
+// CONTINUA; cualquier corte la reinicia, y por eso recoverRailsAfterHeater() ya no
+// toca el rail de 5 V.
 #define SEN0466_WARMUP_MS 210000UL
 
-// WHY THE CO SENSOR CAN RUN IN PRE-ALARM AND ALARM BUT NOT IN NORMAL OPERATION.
+// POR QUE EL SENSOR DE CO PODIA FUNCIONAR EN PRE-ALARMA Y ALARMA PERO NO EN NORMAL
+// (diseno de antes de la puerta en GPIO16).
 //
-// In the normal cycle the node sleeps, and sleeping cuts both rails. 210s of
-// warm-up per wake against a 17.8s tick is not a trade-off, it is impossible - so
-// the sensor stays out, as it always has.
+// En el ciclo normal el nodo duerme, y dormir cortaba la alimentacion del sensor.
+// 210 s de calentamiento en cada despertar no es un compromiso, es imposible.
 //
-// In PRE-ALARM and ALARM the node does not sleep at all. The rails stay up
-// continuously, so the warm-up can run once and then the sensor reads for as long
-// as the state lasts. It becomes available about 3.5 minutes in - comfortably
-// inside the 60-minute pre-alarm confirmation window, which is exactly the moment
-// somebody wants to know whether there is carbon monoxide.
+// En PRE-ALARMA y ALARMA el nodo no duerme: la alimentacion se mantiene, el
+// calentamiento se hace una vez y despues el sensor lee mientras dure el estado.
+// Esta disponible a los ~3,5 minutos, de sobra dentro de la ventana de 60 minutos de
+// confirmacion, que es justo cuando alguien quiere saber si hay monoxido.
 //
-// What this does NOT do is let CO *trigger* anything: it cannot contribute to
-// entering pre-alarm, because it is not measured until pre-alarm has already been
-// entered. It is a confirmation input, not a detection input. Making CO a
-// detector means keeping the 5V rail powered through the sleeping cycle, and the
-// sensor has no sleep mode - a measured ~15mA, permanently. That is a battery
-// decision, not a firmware one.
+// Lo que esto NO hace es dejar que el CO *dispare* nada: no puede contribuir a
+// entrar en pre-alarma, porque no se mide hasta que ya se ha entrado. Es un dato de
+// confirmacion, no de deteccion. Para que el CO detecte hay que mantenerlo
+// alimentado durante el sueno, y el sensor no tiene modo de reposo: unos 15 mA
+// medidos, permanentes. Es una decision de bateria, no de firmware.
 #define SEN0466_RUN_WHEN_AWAKE 1
 
-// A power-cycled board must always give a window to reflash in. Deep sleep drops
-// the USB-Serial/JTAG, so without this the port would vanish seconds after boot
-// and reappear only briefly each cycle - the same class of problem that got light
-// sleep removed from this firmware once before. On a COLD boot (power-on or
-// reset, i.e. not a timer wake) the node refuses to sleep for this long.
+// Una placa recien encendida siempre tiene que dar una ventana para reflashearla. El
+// sueno profundo apaga el USB-Serial/JTAG, asi que sin esto el puerto desapareceria
+// segundos despues de arrancar y solo volveria brevemente en cada ciclo. En un
+// arranque EN FRIO (encendido o reset, no un despertar del temporizador) el nodo se
+// niega a dormir durante este tiempo.
 #define SLEEP_COLD_BOOT_AWAKE_MS 30000UL
 
-// Safety net: never stay awake indefinitely because one sensor never goes fresh
-// and the TX deadline is long. Bounds the worst-case energy of a single wake.
+// Red de seguridad: no quedarse nunca despierto indefinidamente porque un sensor no
+// conteste. HISTORICO: ya no se usa en ningun sitio.
 #define SLEEP_MAX_AWAKE_MS 120000UL
 
-// Rail gates are held through deep sleep. Left un-held they go Hi-Z, and a
-// floating P-FET gate can drift back to conducting - leaving the sensor rails
-// powered for the whole sleep and wasting exactly what sleeping was meant to
-// save. These are all GPIO<=21, so they are RTC-capable and can be held.
+// Las puertas de los rails se enclavan durante el sueno profundo. Sin enclavar
+// quedan en alta impedancia, y la puerta de un P-FET al aire puede volver a conducir
+// - dejando los rails encendidos todo el sueno y gastando justo lo que dormir debia
+// ahorrar. Todos son GPIO <= 21, asi que son de dominio RTC y se pueden enclavar.
 static const gpio_num_t kHeldGates[] = {(gpio_num_t)PIN_PCB_EN_A, (gpio_num_t)PIN_PCB_EN_B,
                                         (gpio_num_t)PIN_LORA_EN, (gpio_num_t)PIN_SEN0466_EN};
 
-// SEN0466 gate (GPIO16) policy. BENCH SETTING: on from boot and held on through
-// deep sleep, so the sensor stays warm and its presence on the bus can be checked
-// straight away. It needs ~210 s of warm-up after power-on before a reading means
-// anything, and a NORMAL wake lasts ~20 s - switching it with the other rails
-// would mean it is never warm outside pre-alarm. The cost is its draw (~15 mA
-// measured) for the whole sleep. Deciding this for deployment is still open.
+// Politica de la puerta del SEN0466 (GPIO16). AJUSTE DE BANCO: encendida desde el
+// arranque y mantenida tambien durante el sueno, para que el sensor este siempre
+// caliente y su presencia en el bus se pueda comprobar enseguida. Necesita ~210 s
+// de calentamiento tras encenderse antes de que una lectura signifique algo, y un
+// despertar NORMAL dura ~20 s: conmutarla con los demas rails significaria que nunca
+// esta caliente fuera de la pre-alarma. El coste es su consumo (~15 mA medidos)
+// durante todo el sueno. La decision para el despliegue sigue abierta.
 #define SEN0466_GATE_ALWAYS_ON 1
 
-// ---------- CM1106 freeze recovery ----------
-// This unit keeps answering with valid frames whose counter byte increments while
-// the CO2 value stays pegged (see Cm1106Sensor::frozenValueRun). It has only ever
-// recovered from a full power cycle, so past this many consecutive identical
-// values, cycle EN rather than keep publishing a dead number.
+// ---------- Recuperacion del CM1106 congelado ----------
+// Esta unidad sigue contestando con tramas validas cuyo contador sube mientras el
+// valor de CO2 se queda clavado (ver Cm1106Sensor::frozenValueRun). Solo se ha
+// recuperado siempre con un corte completo. HISTORICO: este limite ya no se usa;
+// hoy el CM1106 recibe un ciclo de alimentacion en CADA lectura (ver runSlot).
 #define CM1106_FREEZE_LIMIT 20
 
-#define SAMPLE_GAP_MS 2000UL   // re-read every sensor into its cache this often
-#define READ_LOG_GAP_MS 10000UL  // throttle the [read] diagnostic line to at most this rate
+#define SAMPLE_GAP_MS 2000UL   // pausa entre vueltas de loop() cuando el nodo esta despierto
+#define READ_LOG_GAP_MS 10000UL  // HISTORICO: ya no se usa
 
-#define LORA_POST_TX_LISTEN_MS 2000  // window after each TX to receive a queued CFG command - see file header
+#define LORA_POST_TX_LISTEN_MS 2000  // ventana tras cada envio para recibir un comando CFG - ver la cabecera
 
-// The Calypso streams NMEA continuously. flushInput() drops whatever's stale in
-// the RX buffer, then read() is polled for up to this long for a fresh
-// checksum-valid $--MWV. With the UART ISR running (no sleep) this usually
-// returns almost immediately.
+// El Calypso emite NMEA sin parar. flushInput() descarta lo viejo del buffer y
+// despues se pregunta a read() durante como mucho este tiempo por una frase $--MWV
+// nueva con checksum valido.
 #define CALYPSO_READ_WINDOW_MS 1500
 
 // CUANTO TARDA EL CALYPSO EN ESTAR MIDIENDO desde que recibe alimentacion.
@@ -737,11 +637,10 @@ static const gpio_num_t kHeldGates[] = {(gpio_num_t)PIN_PCB_EN_A, (gpio_num_t)PI
 // corriente en cada sueno y arranca de cero en cada despertar. Antes de emitir
 // una medida real ejecuta un autotest de varios segundos.
 //
-// 20 s es el valor que usa calypso_probe.cpp, elegido con margen cuando se
-// descubrio que el sensor parecia muerto solo porque se le preguntaba pronto. NO
-// esta medido con precision: la traza [calypso] que ahora imprime cada lectura
-// dice cuanto llevaba encendido el rail cuando llego la primera trama valida, y
-// con unas cuantas se puede ajustar este numero a lo que de verdad necesita.
+// Medido el 2026-10-09 en 30 lecturas: sin trama a los ~6 s y a los ~12,4 s de
+// encenderlo; con trama a los 22,7 s y a los 29,2 s. La frontera esta entre 12,4 y
+// 22,7 s, y por eso 20 s. La traza [calypso] de cada lectura dice cuanto llevaba
+// encendido el rail cuando llego la trama, para seguir ajustandolo con datos.
 //
 // Esto NO se espera dentro del slot: se le suma a la PREPARACION del trabajo, de
 // modo que el nodo despierta antes y para cuando llega el minuto pedido el sensor
@@ -749,31 +648,27 @@ static const gpio_num_t kHeldGates[] = {(gpio_num_t)PIN_PCB_EN_A, (gpio_num_t)PI
 // instante, que es justo lo que la estrategia quiere evitar.
 #define CALYPSO_BOOT_MS 20000UL
 
-PowerManager power;
+// ---- Objetos: un objeto por sensor, la radio y el gestor de alimentacion ----
+PowerManager power;  // stub: no toca pines, ver PowerManager.h
 
 Bme690Sensor bme690(BME690_I2C_ADDR);
 Sen0466Sensor sen0466(SEN0466_I2C_ADDR);
 Bmv080Sensor bmv080(BMV080_I2C_ADDR);
 Cm1106Sensor cm1106(Serial2, PIN_CM1106_RX, PIN_CM1106_TX, PIN_CM1106_EN, CM1106_WARMUP_MS, CM1106_BAUD);
 CalypsoSensor calypso(Serial1, PIN_CALYPSO_RX, PIN_CALYPSO_TX, CALYPSO_BAUD);
-RYLR998 radio(Serial0, LORA_RX_PIN, LORA_TX_PIN);  // UART0 is free - UART1/UART2 taken above
+RYLR998 radio(Serial0, LORA_RX_PIN, LORA_TX_PIN);  // UART0 libre: UART1 y UART2 ya estan ocupados arriba
 
-// Survives resets and is cleared only by true power loss. A count > 1 after
-// leaving the board completely alone proves it resets on its own, rather than
-// being reset by a host touching DTR/RTS over USB - a distinction this project
-// could not measure before, and one that decides whether the resets are a power
-// fault or a tooling artefact.
-// RTC_NOINIT_ATTR, deliberately NOT RTC_DATA_ATTR: the latter lives in
-// .rtc.data, which is reloaded from the flash image on every reset, so a counter
-// there reads 1 forever and proves nothing. NOINIT survives any reset that keeps
-// the RTC domain powered, and is only lost on genuine power loss - which is
-// exactly the distinction being measured. It starts as garbage at true power-on,
-// hence the magic word.
-// BUMPED TO 05 because g_hibernating is a NEW RTC_NOINIT variable. RTC_NOINIT
-// memory survives both deep sleep and a reset, and is only re-seeded when this word
-// changes - so without the bump a board with existing state would come up with
-// g_hibernating holding whatever junk was in that address, and could hibernate
-// immediately on a full pack. This trap has cost three debugging sessions already.
+// =============================================================================
+// 3. MEMORIA QUE SOBREVIVE AL SUENO (RTC_NOINIT) Y EL RELOJ DEL NODO
+// =============================================================================
+//
+// RTC_NOINIT_ATTR, a proposito y NO RTC_DATA_ATTR: esta ultima vive en .rtc.data,
+// que se recarga desde la imagen de la flash en cada reinicio, asi que un contador
+// ahi valdria 1 siempre y no probaria nada. NOINIT sobrevive al sueno y a cualquier
+// reinicio que mantenga alimentado el dominio RTC, y solo se pierde con un corte de
+// alimentacion de verdad. Al encender en frio contiene basura, y por eso existe la
+// palabra magica de abajo.
+//
 // SUBIR ESTE NUMERO CADA VEZ QUE SE ANADE ESTADO EN RTC_NOINIT. No es opcional.
 //
 // La memoria RTC_NOINIT sobrevive al RE-FLASHEO, no solo al sueno. Asi que un
@@ -785,6 +680,8 @@ RYLR998 radio(Serial0, LORA_RX_PIN, LORA_TX_PIN);  // UART0 is free - UART1/UART
 // multiplicadores y el calendario quedaron sin sembrar. El sueno se divide por la
 // deriva, asi que una deriva basura da un sueno arbitrario, y el planificador
 // nunca llego a re-fasear - en el log no aparecia ni una linea [sched].
+// (Antes ya habia costado tres sesiones de depuracion: g_hibernating con basura
+// podia hacer hibernar al nodo con la bateria llena.)
 //
 // 0xC0FFEE0A: StoredReading.tickAge pasa a takenS. MISMO TAMANO, OTRO SIGNIFICADO:
 //             antes era una cuenta de despertares y ahora son segundos del reloj
@@ -800,28 +697,32 @@ RYLR998 radio(Serial0, LORA_RX_PIN, LORA_TX_PIN);  // UART0 is free - UART1/UART
 // 0xC0FFEE07: g_thr[][] sembrado desde kAlarmRules
 #define BOOTCOUNT_MAGIC 0xC0FFEE0AUL
 RTC_NOINIT_ATTR uint32_t g_bootMagic;
+// Arranques desde la ultima perdida de alimentacion. Un valor > 1 dejando la placa
+// sola prueba que se reinicia por si misma, y no porque el PC toque DTR/RTS por USB:
+// distingue un fallo de alimentacion de un efecto de las herramientas.
 RTC_NOINIT_ATTR uint32_t g_bootCount;
 
-// Survives deep sleep (and any reset that keeps the RTC domain). Lets each wake
-// report where it sits in the run, and carries the downlink-tuned send period
-// across sleeps - without this, CFG,INTERVAL would silently revert to the
-// compiled-in default on every single wake, which would look like the downlink
-// being ignored.
+// Cuenta de despertares. Sobrevive al sueno: permite que cada despertar diga en que
+// punto de la serie esta.
 RTC_NOINIT_ATTR uint32_t g_wakeCount;
 
-// Set immediately before esp_deep_sleep_start(), cleared on the next boot. This is
-// what identifies a wake, NOT esp_sleep_get_wakeup_cause(): a chip reset clears the
-// wakeup cause, and on the bench a reset is routine - waking drops USB, the host
-// re-enumerates and opening the port resets the ESP32-S3. Relying on the cause made
-// every wake look like a cold boot, so the node held awake 30s each time and never
-// really slept. Observed on node C2, 2026-09-08. This flag survives that reset
-// because RTC_NOINIT does.
+// Se pone justo antes de esp_deep_sleep_start() y se borra en el arranque
+// siguiente. ES ESTO lo que identifica un despertar, NO
+// esp_sleep_get_wakeup_cause(): un reinicio del chip borra la causa, y en el banco
+// un reinicio es lo normal (al despertar cae el USB, el PC lo vuelve a enumerar y
+// abrir el puerto reinicia el ESP32-S3). Fiarse de la causa hacia que cada
+// despertar pareciera un arranque en frio, asi que el nodo se quedaba 30 s despierto
+// cada vez y nunca dormia de verdad. Visto en el nodo C2, 2026-09-08. Esta marca
+// sobrevive a ese reinicio porque RTC_NOINIT lo hace.
 RTC_NOINIT_ATTR uint32_t g_sleepFlag;
 #define SLEEP_FLAG_MAGIC 0x5EEDBEEFUL
 
-// True while the node is in low-battery hibernation. RTC_NOINIT so it survives the
-// deep sleep between checks - the whole state machine is one bool plus the ADC.
+// True mientras el nodo esta en hibernacion por bateria baja. RTC_NOINIT para que
+// sobreviva al sueno entre comprobaciones: la maquina de estados entera es este bool
+// mas el ADC.
 RTC_NOINIT_ATTR bool g_hibernating;
+// El periodo de envio ajustado por CFG,INTERVAL. Sin guardarlo en RTC volveria al
+// valor compilado en cada despertar, y pareceria que el comando se ignora.
 RTC_NOINIT_ATTR uint32_t g_txPeriodMsPersist;
 
 // ---------------------------------------------------------------------------
@@ -839,7 +740,7 @@ RTC_NOINIT_ATTR uint32_t g_txPeriodMsPersist;
 // LA SOLUCION. Modulo B si tiene la hora de red (AT+CCLK? por cada enganche,
 // `netNowMs()`), y el nodo ya abre una ventana de escucha de 2 s despues de cada
 // transmision por donde recibe comandos CFG. Asi que la sincronizacion no
-// necesita protocolo nuevo: es una clave CFG mas, `CFG,TIME=<epoca en ms>`.
+// necesita protocolo nuevo: es una clave CFG mas, `CFG,TIME=<epoca en SEGUNDOS>`.
 //
 // DOS RELOJES, Y HAY QUE NO CONFUNDIRLOS:
 //
@@ -916,8 +817,10 @@ static uint64_t wallNowMs() {
 
 
 
-// One stored reading. Kept in RTC memory so the batch survives deep sleep between
-// the tick that recorded it and the tick that finally transmits it.
+// ---- Almacen de lecturas pendientes de enviar ----
+// Cada lectura guardada vive en memoria RTC, para que el lote sobreviva a los suenos
+// entre el despertar que la tomo y el que por fin la transmite.
+//
 // NO MEDIDO EN ESTA LECTURA. Un sensor que no toca en este instante no publica un
 // numero: publica esto, y Modulo B omite el campo entero en vez de mandar el
 // centinela a ThingsBoard.
@@ -941,23 +844,28 @@ struct StoredReading {
 };
 RTC_NOINIT_ATTR StoredReading g_store[READING_STORE_MAX];
 RTC_NOINIT_ATTR uint16_t g_storeCount;
-RTC_NOINIT_ATTR uint32_t g_storeDropped;  // readings lost to a full store
+RTC_NOINIT_ATTR uint32_t g_storeDropped;  // lecturas perdidas por almacen lleno
 
-// Pre-alarm. Continuous all-sensor operation until the readings settle or Module A
-// clears it. Held in RTC so an alarm survives the sleeps it will mostly prevent.
-// Three levels now, matching the spreadsheet. ALARM_FIRE is new - the firmware
-// previously had no full-alarm state at all, only pre-alarm.
+// Estado de alarma. En RTC para que una alarma sobreviva a los suenos (que en estado
+// alto casi no hay). Tres niveles, como la hoja de umbrales.
 //
-// Ordered so "at least pre-alarm" is a >= test: several places must treat both
-// raised states the same way (stay awake, do not sleep), and >= cannot silently
-// miss the new state the way a chain of == would.
+// Ordenados para que "al menos pre-alarma" sea una comparacion >=: varios sitios
+// tienen que tratar igual los dos estados altos (quedarse despierto, no dormir), y
+// >= no puede olvidarse de uno como lo haria una cadena de ==.
 enum AlarmState : uint8_t { ALARM_NORMAL = 0, ALARM_PREALARM = 1, ALARM_FIRE = 2 };
 RTC_NOINIT_ATTR uint8_t g_alarmState;
-RTC_NOINIT_ATTR uint16_t g_alarmClearRun;   // consecutive clean reads while in pre-alarm
+RTC_NOINIT_ATTR uint16_t g_alarmClearRun;   // lecturas limpias seguidas mientras el estado esta alto
 
-// ===========================================================================
-//  PLANIFICADOR POR TIEMPO
-// ===========================================================================
+// =============================================================================
+// 4. EL CALENDARIO (PLANIFICADOR POR TIEMPO)
+// =============================================================================
+//
+// Resumen: cada sensor es un "trabajo" con su periodo en minutos (distinto en
+// NORMAL, PRE-ALARMA y ALARMA) y su tiempo de preparacion. El nodo duerme hasta el
+// siguiente vencimiento menos la preparacion, atiende lo que toca y vuelve a dormir.
+// Funciones: schedRephase() rehace el calendario, schedEvaluate() decide que toca
+// en este despertar, schedMarkDone() pasa un trabajo hecho a su siguiente
+// vencimiento, schedSleepSeconds() calcula cuanto dormir.
 //
 // Sustituye al planificador por ticks. El viejo contaba "cada N ticks", y un tick
 // no media tiempo: el sueno eran 10 s fijos ADEMAS del trabajo, asi que el tick
@@ -1207,64 +1115,65 @@ static uint32_t schedSleepSeconds(uint8_t state) {
   if (nodeMs > 3600000.0) nodeMs = 3600000.0;    // tope de 1 h, defensivo
   return (uint32_t)((nodeMs + 500.0) / 1000.0);  // al segundo mas cercano
 }
-
-// Milliseconds accumulated in pre-alarm, and why it is not just a millis() stamp.
+// Milisegundos acumulados en pre-alarma, y por que no es una simple marca de millis().
 //
-// g_alarmState is RTC_NOINIT and survives a reset, so a node that browns out
-// mid-pre-alarm comes back still in pre-alarm - but millis() restarts at zero. A
-// stored start-time would therefore hand it a fresh window on every reset,
-// and a node resetting under the 35mA continuous load that pre-alarm imposes could
-// postpone a real fire alarm indefinitely without anything looking wrong.
+// g_alarmState es RTC_NOINIT y sobrevive a un reinicio, asi que un nodo que se cae
+// por tension a mitad de una pre-alarma vuelve todavia en pre-alarma - pero millis()
+// empieza de cero. Una hora de inicio guardada le daria una ventana nueva en cada
+// reinicio, y un nodo que se reinicie bajo la carga continua de ~35 mA de la
+// pre-alarma podria aplazar una alarma de incendio real indefinidamente sin que nada
+// pareciera ir mal.
 //
-// Accumulating instead means the window survives whatever the node does.
+// Acumulando, la ventana sobrevive haga lo que haga el nodo.
 RTC_NOINIT_ATTR uint32_t g_prealarmMs;
-RTC_NOINIT_ATTR float g_gasBaseline;        // BME690 gas resistance in clean air
+RTC_NOINIT_ATTR float g_gasBaseline;        // resistencia de gas del BME690 en aire limpio
 
-// Which sensors read OK on the most recent READ tick, as a 5-bit field
-// (bme, bmv, co2, co, wind - MSB first).
+// Que sensores leyeron bien en la ultima lectura, como un campo de 5 bits
+// (bme, bmv, co2, co, viento - el mas significativo primero).
 //
-// Must be RTC_NOINIT and must be SEPARATE from the g_*St status variables. The
-// status packet goes out on a TRANSMIT tick, where by definition no sensor was
-// read, so the live statuses are still at their power-on defaults and report every
-// sensor dead:
+// Tiene que ser RTC_NOINIT y tiene que estar SEPARADO de las variables de estado
+// g_*St. El paquete de estado sale en un despertar de ENVIO, en el que puede que no
+// se haya leido ningun sensor, asi que los estados en vivo siguen con su valor de
+// arranque y dirian que todos los sensores estan muertos:
 //
-//   [stat] STAT,23,8,0,00000,17467      <- all five "dead"
-//   [read] bme=OK bmv=OK co2=OK ...     <- the very next tick, all fine
+//   [stat] STAT,23,8,0,00000,17467      <- los cinco "muertos"
+//   [read] bme=OK bmv=OK co2=OK ...     <- el siguiente despertar, todo bien
 //
-// On an untethered node that is worse than no status at all: it would cry wolf on
-// every single packet and make a genuine failure unnoticeable.
+// En un nodo sin cable eso es peor que no tener estado: daria la falsa alarma en
+// cada paquete y haria invisible una averia real.
 RTC_NOINIT_ATTR uint8_t g_lastReadHealth;
-RTC_NOINIT_ATTR uint32_t g_lastReadWake;  // which wake produced it, so age is visible
+RTC_NOINIT_ATTR uint32_t g_lastReadWake;  // que despertar lo produjo, para ver su antiguedad
 
-bool g_wokeFromTimer = false;   // this boot was a deep-sleep wake, not a cold boot
+bool g_wokeFromTimer = false;   // este arranque es un despertar del sueno, no un arranque en frio
 uint32_t g_setupDoneMs = 0;
 
-// BMV080 duty-cycle state - see BMV080_MEASURE_TIMEOUT_MS.
+// Estado del encendido por turnos del BMV080 - ver BMV080_MEASURE_TIMEOUT_MS.
 enum class BmvPhase { Idle, Measuring };
 BmvPhase g_bmvPhase = BmvPhase::Idle;
 uint32_t g_bmvPhaseStartedMs = 0;
 
+// Arranco cada sensor (y la radio) en este despertar?
 bool bmeReady = false;
 bool sen0466Ready = false;
 bool bmvReady = false;
 bool radioReady = false;
 
-// Last-known-good readings. A field stays at its last good value rather than
-// snapping to 0 on a transient miss.
+// Ultimas lecturas buenas de cada magnitud. Un campo conserva su ultimo valor bueno
+// en vez de caer a 0 por un fallo puntual.
 //
-// THESE MUST BE RTC_NOINIT, NOT PLAIN GLOBALS. Now that each wake services only
-// ONE sensor, every other field in a packet comes from a previous wake - and deep
-// sleep wipes ordinary RAM. As plain globals the cache reset to zero on every
-// wake, so a packet carried one fresh value and twelve zeros:
+// TIENEN QUE SER RTC_NOINIT, NO VARIABLES NORMALES. Como cada despertar atiende solo
+// los sensores que le tocan, el resto de valores viene de despertares anteriores - y
+// el sueno profundo borra la RAM normal. Como variables normales la cache se ponia a
+// cero en cada despertar, y un paquete llevaba un valor nuevo y doce ceros:
 //
 //   bme=NotInit(T0.0 H0.0 gas0) bmv=OK(pm2.5=0.0) ... STALE: BME690,CM1106
 //
-// which looks exactly like three dead sensors. In RTC memory they survive the
-// sleep, so the packet carries a full set whose fields are merely staggered in
-// age by up to one rotation.
+// que parece exactamente tres sensores muertos. En memoria RTC sobreviven al sueno.
+// (Lo que se ENVIA no es esta cache: es cada lectura con solo lo que midio, ver
+// storeCurrentReading. Esta cache la usa la alarma.)
 //
-// Seeded to zero in the BOOTCOUNT_MAGIC block below, like every other RTC_NOINIT
-// value - they hold garbage on a true power-on until then.
+// Se ponen a cero en el bloque de BOOTCOUNT_MAGIC de mas abajo, como cualquier otro
+// valor RTC_NOINIT: al encender en frio contienen basura hasta entonces.
 RTC_NOINIT_ATTR float g_temp, g_hum, g_pres, g_gas;
 RTC_NOINIT_ATTR float g_pm1, g_pm25, g_pm10;
 RTC_NOINIT_ATTR float g_co2;
@@ -1272,8 +1181,10 @@ RTC_NOINIT_ATTR float g_co, g_coTemp;
 RTC_NOINIT_ATTR float g_windAngle, g_windSpeed;
 RTC_NOINIT_ATTR bool g_windValid;
 
-// Set when a sensor returns a good reading; cleared for all sensors immediately
-// after each transmit. These - not a timer - decide when the next packet goes out.
+// "Fresco": este sensor ha dado una lectura buena EN ESTE BARRIDO. Se limpian al
+// empezar cada barrido (runDueSensorJobs) y solo las pone el sensor que lee de
+// verdad. Deciden que campos lleva cada fila guardada y que reglas de alarma tienen
+// dato.
 bool g_bmeFresh = false;
 // El BME690 sirve a DOS trabajos y g_bmeFresh no los distingue: la lectura rapida
 // da T/H/P con el calefactor apagado y NO toca el gas. Sin una bandera propia, una
@@ -1285,33 +1196,40 @@ bool g_co2Fresh = false;
 bool g_coFresh = false;
 bool g_calFresh = false;
 
-// Status of each sensor's most recent read attempt - for the [read] diag line.
+// Resultado del ultimo intento de lectura de cada sensor, para la linea de
+// diagnostico.
 ReadingStatus g_bmeSt = ReadingStatus::NotInitialized;
 ReadingStatus g_coSt = ReadingStatus::NotInitialized;
 ReadingStatus g_bmvSt = ReadingStatus::NotInitialized;
 ReadingStatus g_co2St = ReadingStatus::NotInitialized;
 ReadingStatus g_calSt = ReadingStatus::NotInitialized;
 
-// Runtime-mutable config, pushed via downlink CFG - see file header. Volatile
-// only: resets to these compiled-in defaults on every reboot, by design.
-uint32_t g_txPeriodMs = LORA_TX_PERIOD_MS;  // CFG,INTERVAL=<seconds>
+// =============================================================================
+// 5. COMANDOS QUE LLEGAN POR RADIO (CFG,...)
+// =============================================================================
+
+// Configuracion modificable en marcha mediante comandos CFG - ver la cabecera del
+// archivo. Solo en RAM: vuelve a estos valores compilados en cada reinicio, a
+// proposito (salvo lo que se guarda expresamente en RTC).
+uint32_t g_txPeriodMs = LORA_TX_PERIOD_MS;  // CFG,INTERVAL=<segundos>
 bool g_bmeEnabled = true;
 bool g_sen0466Enabled = true;
 bool g_bmvEnabled = true;
 bool g_cm1106Enabled = true;
 bool g_calypsoEnabled = true;
 
-// Parses/applies a "CFG,<key>=<value>[,<key>=<value>...]" downlink command
-// into the g_* runtime globals above. Unrecognized keys are logged and
-// skipped, not fatal. Returns true (with ackPayload filled, comma-joined
-// "<key>=<value>" tokens of what was actually applied post-clamp) only if at
-// least one key was recognized - see file header for why a no-op command
-// gets no ACK.
+// Interpreta y aplica un comando "CFG,<clave>=<valor>[,<clave>=<valor>...]" sobre
+// las variables de configuracion de arriba. Las claves desconocidas se apuntan en el
+// log y se saltan, sin fallar. Devuelve true (con ackPayload relleno: los
+// "<clave>=<valor>" realmente aplicados, tras recortarlos a sus limites, separados
+// por comas) solo si se reconocio al menos una clave - ver en la cabecera por que un
+// comando que no aplica nada no recibe ACK.
 static bool applyConfigCommand(const char *payload, uint8_t len, char *ackPayload, size_t ackCap) {
   static const char kPrefix[] = "CFG,";
   static const size_t kPrefixLen = sizeof(kPrefix) - 1;
   if (len <= kPrefixLen || memcmp(payload, kPrefix, kPrefixLen) != 0) return false;
 
+  // Copia del cuerpo (lo que va detras de "CFG,") para poder trocearla.
   char buf[241];
   uint8_t bodyLen = len - (uint8_t)kPrefixLen;
   if (bodyLen >= sizeof(buf)) bodyLen = sizeof(buf) - 1;
@@ -1322,6 +1240,7 @@ static bool applyConfigCommand(const char *payload, uint8_t len, char *ackPayloa
   size_t ackLen = 0;
   bool appliedAny = false;
 
+  // Recorrer cada "<clave>=<valor>" separado por comas.
   char *saveptr = nullptr;
   char *tok = strtok_r(buf, ",", &saveptr);
   while (tok != nullptr) {
@@ -1397,8 +1316,9 @@ static bool applyConfigCommand(const char *payload, uint8_t len, char *ackPayloa
           snprintf(appliedKv, sizeof(appliedKv), "TIME=%lu", epochS);
         }
       } else if (strcmp(key, "INTERVAL") == 0) {
+        // Periodo de envio heredado (ver LORA_TX_PERIOD_MS). Se recorta a sus
+        // limites, y se guarda en RTC al dormir para que sobreviva al sueno.
         long seconds = atol(valueStr);
-        // Also persisted to RTC at sleep, so a downlink-set period survives.
         const long minSeconds = LORA_TX_PERIOD_MIN_MS / 1000;
         const long maxSeconds = LORA_TX_PERIOD_MAX_MS / 1000;
         if (seconds < minSeconds) {
@@ -1412,17 +1332,13 @@ static bool applyConfigCommand(const char *payload, uint8_t len, char *ackPayloa
         snprintf(appliedKv, sizeof(appliedKv), "INTERVAL=%ld", seconds);
       // ---- NxT: multiplicadores de la v2 del protocolo A->C ----
       //
-      // LA MULTIPLICACION LA HACE EL NODO, NO MODULO B.
-      //
-      // Los periodos base - 3 ticks para los centinelas, 90 para el burst, 4 para
-      // transmitir - son constantes de ESTE fichero. Si Modulo B calculara los
-      // ticks tendria que llevarlas duplicadas, y se desincronizarian en cuanto
-      // alguien tocara una aqui. Modulo B manda la N en crudo; el nodo multiplica
-      // contra sus propios valores, valida, y ACKea los ticks que de verdad
-      // aplico - que es lo unico que permite a Modulo A mostrar el periodo real.
-      //
-      // El ACK devuelve los ticks resultantes y no la N, a proposito: con N=1.5 y
-      // base 3 salen 5 ticks (4.5 redondeado), y lo que importa saber es 5.
+      // LA MULTIPLICACION LA HACE EL NODO, NO MODULO B. Los periodos base son
+      // constantes de ESTE fichero (la tabla kJobs[]). Si Modulo B los calculara
+      // tendria que llevarlos duplicados, y se desincronizarian en cuanto alguien
+      // tocara uno aqui. Modulo B manda la N en crudo; el nodo multiplica contra sus
+      // propios valores, valida y confirma lo que de verdad aplico.
+      // (El texto original de este comentario hablaba de ticks; desde el
+      // calendario por tiempo, N multiplica minutos.)
       } else if (strcmp(key, "NXT_LECTURA") == 0) {
         // "Cada sensor se lee cada N x su periodo minimo de lectura. N >= 1."
         //
@@ -1464,8 +1380,8 @@ static bool applyConfigCommand(const char *payload, uint8_t len, char *ackPayloa
           snprintf(appliedKv, sizeof(appliedKv), "NXT_ENVIO=%.2f", (double)n);
         }
       } else if (strcmp(key, "ALARM") == 0) {
-        // Force-clear from Module A. Setting it is deliberately NOT supported:
-        // an alarm should be raised by the sensors, not asserted remotely.
+        // Bajar la alarma a mano desde Modulo A. ACTIVARLA a distancia NO se admite,
+        // a proposito: una alarma la tienen que levantar los sensores, no una orden.
         if (atoi(valueStr) == 0) {
           g_alarmState = ALARM_NORMAL;
           g_alarmClearRun = 0;
@@ -1475,6 +1391,7 @@ static bool applyConfigCommand(const char *payload, uint8_t len, char *ackPayloa
           Serial.println("[downlink] ALARM can only be cleared (ALARM=0), not set - ignored");
           matched = false;
         }
+      // ---- Activar (1) o silenciar (0) un sensor sin reflashear ----
       } else if (strcmp(key, "BME690") == 0) {
         g_bmeEnabled = atoi(valueStr) != 0;
         snprintf(appliedKv, sizeof(appliedKv), "BME690=%d", g_bmeEnabled ? 1 : 0);
@@ -1491,29 +1408,25 @@ static bool applyConfigCommand(const char *payload, uint8_t len, char *ackPayloa
         g_calypsoEnabled = atoi(valueStr) != 0;
         snprintf(appliedKv, sizeof(appliedKv), "CALYPSO=%d", g_calypsoEnabled ? 1 : 0);
 
-      // ---- Fire thresholds, e.g. CFG,temp_pre_on=50 ----
+      // ---- Umbrales de incendio, p. ej. CFG,temp_pre_on=50 ----
       //
-      // Tried LAST, after every fixed key, so a threshold name can never shadow a
-      // config key. The names are the rule names from kAlarmRules suffixed with
-      // _pre_on / _pre_off / _alarma_on / _alarma_off, which is exactly what the
-      // Module A dashboard sends.
+      // Se prueban LOS ULTIMOS, despues de todas las claves fijas, para que un nombre
+      // de umbral nunca pueda tapar una clave de configuracion. Los nombres son los
+      // de las reglas de kAlarmRules con el sufijo _pre_on / _pre_off / _alarma_on /
+      // _alarma_off, que es exactamente lo que manda el panel de Modulo A.
       //
-      // The ACK echoes back the value the node STORED, so a dashboard showing a
-      // threshold is showing what the node is really using rather than what it was
-      // asked to use.
-      // THE ACK REPORTS WHAT WAS STORED, NOT WHAT ARRIVED.
+      // EL ACK DEVUELVE LO QUE SE GUARDO, NO LO QUE LLEGO.
       //
-      // This used to echo valueStr - the characters Module A sent - which proves
-      // only that the key matched a rule. The comment above has always claimed it
-      // echoed the stored value; now it does. Module A uses this to display the
-      // threshold the node is really using, so an echo of the request would make
-      // the dashboard agree with itself by construction and never reveal a
-      // disagreement.
+      // Antes devolvia valueStr - los caracteres que mando Modulo A -, lo que solo
+      // prueba que la clave coincidio con una regla. Modulo A usa esto para mostrar
+      // el umbral que el nodo usa de verdad, asi que devolver la peticion haria que
+      // el panel estuviera de acuerdo consigo mismo por construccion y no revelara
+      // nunca un desacuerdo.
       //
-      // Formatted with %.2f and then trimmed, rather than %g: this toolchain's
-      // nano-newlib snprintf cannot be relied on for the rarer conversions - the
-      // same reason appendI64() exists instead of %lld - and a format specifier
-      // that silently emits nothing would put a malformed ACK on the air.
+      // Se formatea con %.2f y se recortan los ceros, en vez de usar %g: el snprintf
+      // de la nano-newlib de este compilador no es de fiar con las conversiones
+      // menos comunes - el mismo motivo por el que existe appendI64() en vez de %lld
+      // - y un formato que no emitiera nada pondria un ACK mal formado en el aire.
       } else if (float *slot = thresholdSlot(key)) {
         *slot = (float)atof(valueStr);
         char num[20];
@@ -1530,6 +1443,7 @@ static bool applyConfigCommand(const char *payload, uint8_t len, char *ackPayloa
         matched = false;
       }
 
+      // Anadir lo aplicado a la respuesta ACK, separado por comas.
       if (matched) {
         appliedAny = true;
         size_t kvLen = strlen(appliedKv);
@@ -1550,6 +1464,7 @@ static bool applyConfigCommand(const char *payload, uint8_t len, char *ackPayloa
   return appliedAny;
 }
 
+// Nombre corto de cada estado de lectura, para el log.
 static const char *statusName(ReadingStatus s) {
   switch (s) {
     case ReadingStatus::NotInitialized: return "NotInit";
@@ -1562,28 +1477,29 @@ static const char *statusName(ReadingStatus s) {
   return "?";
 }
 
-// Handles one inbound LoRa message drained during the post-TX listen window -
-// either a recognized CFG downlink (apply + ACK) or anything else (logged
-// only; no command protocol beyond CFG exists yet).
+// Atiende un mensaje LoRa recibido en la ventana de escucha tras un envio: un CFG
+// reconocido (se aplica y se contesta ACK) o cualquier otra cosa (solo se apunta en
+// el log).
 static void handleInboundMessage(const LoRaMessage &msg) {
   Serial.printf("[downlink] from addr %u (%d bytes, rssi %d, snr %d): %.*s\n", msg.senderAddr, msg.length,
                 msg.rssi, msg.snr, msg.length, msg.payload);
 
+  // Solo se aceptan ordenes de Modulo B (filtro por direccion, no autenticacion).
   if (msg.senderAddr != LORA_RX_ADDR) {
     Serial.println("[downlink] ignored - not from Module B (LORA_RX_ADDR)");
     return;
   }
 
-  // SILENCE IS THE WRONG ANSWER TO A COMMAND WE UNDERSTOOD BUT COULD NOT APPLY.
+  // CALLARSE ES LA RESPUESTA EQUIVOCADA A UNA ORDEN ENTENDIDA PERO NO APLICABLE.
   //
-  // This used to just return. Module B cannot tell silence-because-rejected from
-  // silence-because-out-of-range, so it waited out the full downlink timeout and
-  // reported "timeout" - the wrong one of the protocol's four states, a quarter of
-  // an hour after the fact. The operator is told the node is unreachable when it
-  // is sitting there having refused the command.
+  // Antes simplemente volvia. Modulo B no puede distinguir el silencio por rechazo
+  // del silencio por falta de cobertura, asi que agotaba el plazo entero y decia
+  // "timeout" - el estado equivocado de los cuatro del protocolo, un cuarto de hora
+  // despues. Al operador se le decia que el nodo era inalcanzable cuando estaba ahi
+  // habiendo rechazado la orden.
   //
-  // A CFG we recognised but applied nothing from now gets an explicit NACK, which
-  // Module B turns into status "error" immediately.
+  // Un CFG reconocido del que no se aplica nada recibe ahora un NACK explicito, que
+  // Modulo B convierte de inmediato en el estado "error".
   const bool looksLikeCfg = (msg.length >= 4 && strncmp(msg.payload, "CFG,", 4) == 0);
 
   char kv[200];
@@ -1609,56 +1525,67 @@ static void handleInboundMessage(const LoRaMessage &msg) {
   Serial.printf("[cfg] applied, ACK sent: %s (%s)\n", ack, sent ? "ok" : "FAILED");
 }
 
-// Bring-up instrumentation. Each begin() below is a candidate for the reset seen
-// on 2026-09-04 (board reboots right after "BMV080: OK"), so every step is
-// announced BEFORE it runs and flushed - USB CDC buffers, and anything still
-// queued is lost when the chip drops, which is exactly the case we're chasing.
+// =============================================================================
+// 6. ARRANQUE: GUARDIA DE ARRANQUES, RAILS, BUS I2C
+// =============================================================================
+
+// Instrumentacion de la puesta en marcha. Cada paso se anuncia ANTES de ejecutarlo
+// y se vacia el buffer: el USB CDC guarda los datos, y lo que siga en cola se pierde
+// si el chip se cae, que es justo el caso que se buscaba (reinicios justo despues de
+// "BMV080: OK", 2026-09-04).
 static void step(const char *what) {
   Serial.printf("[step] %s ...\n", what);
   Serial.flush();
   delay(20);
 }
 
-// ---------------- Boot guard (NVS) ----------------
-// The RTC boot counter reports "true power-on" on EVERY reset, which means the RTC
-// domain is being lost - the supply is actually collapsing, not a task crashing.
-// RTC RAM cannot measure that, because the event being measured destroys it.
+// ---------------- Guardia de arranques (NVS) ----------------
+// El contador de arranques en RTC dice "encendido real" en CADA reinicio cuando el
+// dominio RTC se pierde - es decir, cuando la alimentacion se cae de verdad, no
+// cuando una tarea falla. La RAM RTC no puede medir eso, porque el propio suceso la
+// destruye.
 //
-// NVS lives in flash and survives a power loss, so it can. If the NVS count climbs
-// 1, 2, 3, 4 while the RTC counter reads 1 every boot, the supply theory is
-// confirmed outright - two counters, same resets, only one of them survives.
+// La NVS vive en la flash y sobrevive a un corte, asi que si puede. Si la cuenta en
+// NVS sube 1, 2, 3, 4 mientras el contador RTC dice 1 en cada arranque, la teoria de
+// la alimentacion queda confirmada: dos contadores, los mismos reinicios, y solo uno
+// sobrevive.
 //
-// It also drives safe mode: after three consecutive boots with no run long enough
-// to be called good, the rails are left OFF so the port stays usable for
-// reflashing instead of the board looping forever.
+// Tambien gobierna el MODO SEGURO: con 12 o mas arranques seguidos sin una vuelta lo
+// bastante larga para darla por buena (ver g_safeMode en setup()), los rails se
+// quedan APAGADOS para que el puerto siga sirviendo para reflashear en vez de que la
+// placa entre en un bucle sin fin.
+//
+// OJO: la cuenta vive en la particion NVS (0x9000), que un flasheo normal NO borra.
+// El mensaje de arranque que dice "clear it by flashing again" es incorrecto; para
+// borrarla hay que borrar esa particion (esptool erase_region 0x9000 0x5000).
 static Preferences bootStore;
 static uint32_t nvsBoots = 0;
 
-// COUNTS CRASHES, NOT WAKES. The distinction is the whole point.
+// CUENTA FALLOS, NO DESPERTARES. Esa distincion es lo importante.
 //
-// This used to increment on EVERY boot, with bootGuardMarkGood() clearing it only
-// after a run lasted 15s. That is incompatible with deep sleep: an idle tick wakes
-// and sleeps again in well under 15s, so the counter was never cleared, climbed on
-// every single wake, and tripped safe mode after 12 of them. EVERY healthy
-// sleeping node did this, within about two minutes of being switched on.
+// Antes sumaba en CADA arranque, y bootGuardMarkGood() solo la borraba tras 15 s de
+// funcionamiento. Eso es incompatible con el sueno profundo: un despertar sin trabajo
+// se duerme en mucho menos de 15 s, asi que la cuenta nunca se borraba, subia en cada
+// despertar y activaba el modo seguro a los 12. TODOS los nodos sanos que dormian lo
+// hacian, a los dos minutos de encenderlos.
 //
-// It was proved by the node's own distress packet: "SAFE,12,8,17" - twelve boots,
-// reset reason 8 = DEEPSLEEP, seventeen wakes. Twelve PERFECTLY NORMAL timer wakes
-// were being counted as twelve failures.
+// Lo demostro el propio paquete de socorro del nodo: "SAFE,12,8,17" - doce arranques,
+// motivo de reinicio 8 = DEEPSLEEP, diecisiete despertares. Doce despertares
+// PERFECTAMENTE NORMALES contados como doce fallos.
 //
-// A deep-sleep wake is the firmware working exactly as designed and must never
-// count against it. Only a boot that did NOT come from our own sleep - a crash, a
-// brownout, a watchdog, a power cut - is evidence of trouble, and that is what the
-// guard now counts.
+// Un despertar del sueno es el firmware funcionando tal como esta disenado y nunca
+// debe contar en su contra. Solo un arranque que NO viene de nuestro propio sueno -
+// un fallo, una caida de tension, un perro guardian, un corte - es indicio de
+// problemas, y eso es lo que cuenta ahora la guardia.
 static void bootGuardBegin(bool wokeFromTimer) {
   bootStore.begin("boot", false);
   nvsBoots = bootStore.getUInt("n", 0);
 
   if (wokeFromTimer) {
-    // Reaching a scheduled wake means the previous cycle completed and slept on
-    // purpose. That is a healthy run however short it was, so the counter is
-    // cleared here rather than waiting for loop()'s 15s timer - which a short tick
-    // never reaches.
+    // Llegar a un despertar programado significa que el ciclo anterior termino y se
+    // durmio a proposito. Es una vuelta sana por corta que fuera, asi que la cuenta
+    // se borra aqui en vez de esperar al temporizador de 15 s de loop(), al que un
+    // despertar corto no llega nunca.
     if (nvsBoots != 0) {
       bootStore.putUInt("n", 0);
       Serial.printf("Boot guard: timer wake - counter cleared (was %lu)\n",
@@ -1674,29 +1601,30 @@ static void bootGuardBegin(bool wokeFromTimer) {
   Serial.flush();
 }
 
-// Called once a run has lasted long enough to count as healthy.
+// Se llama una vez que una vuelta ha durado lo bastante para darla por sana.
 static void bootGuardMarkGood() {
   bootStore.putUInt("n", 0);
   Serial.println("Boot guard: run marked good, NVS counter cleared");
   Serial.flush();
 }
 
-// Raw chip-ID read, usable at any point in setup() and independent of the sensor
-// driver. Every previous look at this register happened AFTER bme690.begin() had
-// already failed, which cannot distinguish "the device never transacts" from
-// "something between the bus scan and begin() breaks it". Calling this at two
-// different moments does distinguish them.
+// DIAGNOSTICO: lectura cruda del ID del BME690, utilizable en cualquier punto de
+// setup() e independiente del driver. Antes este registro solo se miraba DESPUES de
+// que bme690.begin() hubiera fallado, y eso no distingue "el aparato nunca contesta"
+// de "algo entre el escaneo del bus y begin() lo estropea". Llamarla en dos momentos
+// distintos si los distingue.
 static void probeBmeChipId(const char *when) {
   const uint8_t addrs[2] = {0x76, 0x77};
   for (int i = 0; i < 2; i++) {
     uint8_t addr = addrs[i];
 
-    // Try the REGISTER READ even when the bare address probe fails.
+    // Intentar la LECTURA DEL REGISTRO aunque falle la prueba de direccion.
     //
-    // This used to `continue` on a failed zero-length write, which assumes a
-    // device that will not ACK an empty transaction cannot answer a real one.
-    // That is not true of every I2C part, and it meant a sensor could be declared
-    // absent without ever being asked a question. Report both results instead.
+    // Antes se saltaba la direccion si fallaba una escritura de longitud cero, lo que
+    // supone que un aparato que no da ACK a una transaccion vacia no puede contestar
+    // a una de verdad. Eso no es cierto en todas las piezas I2C, y significaba
+    // declarar ausente un sensor sin haberle preguntado nada. Se informan los dos
+    // resultados.
     Wire.beginTransmission(addr);
     uint8_t probe = Wire.endTransmission();
 
@@ -1734,11 +1662,11 @@ static void probeBmeChipId(const char *when) {
   Serial.flush();
 }
 
-// Bus scan. The BME690 and BMV080 share this bus, so a scan separates "sensor
-// gone from the bus" from "sensor present but not answering" - and proves the bus
-// itself by whatever else replies on the same wires at the same instant. Node C1
-// lost its BME690 mid-session and this was what identified it as physical in one
-// line rather than an afternoon.
+// DIAGNOSTICO: escaneo del bus I2C. El BME690 y el BMV080 comparten bus, asi que un
+// escaneo separa "el sensor ha desaparecido del bus" de "el sensor esta pero no
+// contesta" - y prueba el propio bus con lo que conteste en los mismos cables en el
+// mismo instante. El nodo C1 perdio su BME690 a mitad de una sesion y esto fue lo
+// que lo identifico como fisico en una linea en vez de en una tarde.
 static void scanI2C(const char *when) {
   Serial.printf("--- I2C scan (%s) ---\n", when);
   int found = 0;
@@ -1753,13 +1681,6 @@ static void scanI2C(const char *when) {
   Serial.flush();
 }
 
-// Rails brought up one at a time, with USB given time to enumerate first.
-//
-// The soft-start ramp that used to live here has been removed. It was written for
-// the inrush theory, which the bisect disproved - it made the board die EARLIER,
-// mid-ramp, and the real cause turned out to be steady-state sensor overlap. Plain
-// writes now, identical to the minimal rail sketch that holds these same rails for
-// 80+ seconds with zero resets.
 // RECUPERACION DEL BUS I2C ANTES DE USARLO.
 //
 // EL SINTOMA QUE LA MOTIVA, visto en C3 el 2026-10-08: los TRES sensores de I2C
@@ -1786,10 +1707,11 @@ static void scanI2C(const char *when) {
 //
 // Devuelve si el bus quedo utilizable. Imprime siempre que haya tenido que actuar,
 // porque un bus que se atasca a menudo es un sintoma por si mismo.
-// SI EL RAIL DE 3V3 LLEGA DE VERDAD AL BUS, medido por el propio ESP32 y sin
-// polimetro.
 //
-// Las resistencias de pull-up del I2C se alimentan del rail de 3V3. Entonces:
+// ---- Diagnostico de las lineas (i2cLineState / i2cReportPullups) ----
+//
+// SI EL RAIL DE 3V3 LLEGA DE VERDAD AL BUS, medido por el propio ESP32 y sin
+// polimetro. Las resistencias de pull-up del I2C se alimentan del rail de 3V3:
 //
 //   * leidas SIN pull-up interno, si las lineas siguen ALTAS es que las externas
 //     tienen tension -> el rail llega al bus.
@@ -1801,7 +1723,10 @@ static void scanI2C(const char *when) {
 // distintas, y entre una y otra hay una pista, un conector y el propio transistor.
 //
 // CUIDADO AL LEERLO: un ALTO aqui no prueba que los sensores funcionen, solo que
-// hay tension en las pull-up. Un BAJO si es concluyente en el otro sentido.
+// hay tension en las pull-up. Y con los rails APAGADOS es normal ver las lineas
+// SUJETAS: los sensores sin alimentar tiran de ellas hacia masa (visto en C3 el
+// 2026-10-14: sujetas antes de encender los rails, LIBRES despues).
+//
 // Estado de una linea del bus, distinguiendo las TRES causas que se confunden
 // entre si cuando una linea lee BAJO:
 //
@@ -1834,6 +1759,7 @@ static const char *i2cLineState(uint8_t pin) {
   return "LIBRE (lenta)";
 }
 
+// Imprime el estado de SDA y SCL en un momento dado del arranque.
 static void i2cReportPullups(const char *cuando) {
   const char *sda = i2cLineState(PIN_I2C_SDA);
   const char *scl = i2cLineState(PIN_I2C_SCL);
@@ -1841,6 +1767,7 @@ static void i2cReportPullups(const char *cuando) {
   Serial.flush();
 }
 
+// Recuperacion del bus: si SDA esta bajo, hasta 9 pulsos de SCL y un STOP.
 static bool i2cRecoverBus() {
   i2cReportPullups("antes de Wire.begin");
   pinMode(PIN_I2C_SCL, OUTPUT_OPEN_DRAIN);
@@ -1877,10 +1804,25 @@ static bool i2cRecoverBus() {
   return libre;
 }
 
+// ENCIENDE LOS RAILS, de uno en uno: 3V3, 5V, LoRa, y la habilitacion del BMV080.
+//
+// Primero los apaga los dos (cada puerta con su nivel inactivo, que son opuestos).
+// En modo seguro se quedan apagados y vuelve.
+//
+// La rampa de arranque suave que habia aqui se quito. Se escribio para la teoria de
+// la corriente de arranque, que las pruebas desmintieron: hacia que la placa muriera
+// ANTES, a media rampa, y la causa real resulto ser varios sensores consumiendo a la
+// vez. Ahora son escrituras simples, identicas a las del programa minimo de rails
+// que mantiene estos mismos rails mas de 80 s sin un solo reinicio.
+//
+// Cada paso se imprime ANTES y DESPUES: si sobrevive "about to" pero no "asserted",
+// muere en la propia escritura; si sobreviven los dos pero no "settled", muere en la
+// espera que sigue. Son averias distintas. (Asi se vio el 2026-10-14 el corto del
+// rail LoRa en C3: el log se cortaba siempre en "LoRa: about to assert".)
 static void enableRails(bool safeMode) {
   pinMode(PIN_PCB_EN_A, OUTPUT);
   pinMode(PIN_PCB_EN_B, OUTPUT);
-  // Both OFF first - each gate's own inactive level, since the two are opposite.
+  // Los dos APAGADOS primero - cada puerta con su propio nivel inactivo, porque son opuestos.
   digitalWrite(PIN_PCB_EN_A, (PIN_PCB_EN_A_ACTIVE == LOW) ? HIGH : LOW);
   digitalWrite(PIN_PCB_EN_B, (PIN_PCB_EN_B_ACTIVE == LOW) ? HIGH : LOW);
 
@@ -1891,13 +1833,10 @@ static void enableRails(bool safeMode) {
     return;
   }
 
-  delay(2000);  // let USB enumerate before anything loads VBUS
-  // A print before AND after each write. "about to" surviving but "asserted" not
-  // means it dies in the write itself; both surviving but not "settled" means it
-  // dies during the delay that follows. Those are different faults.
+  delay(2000);  // dejar que el USB enumere antes de cargar nada la alimentacion
   Serial.println("3V3: about to assert");
   Serial.flush();
-  g_railsUp = true;  // so hibernation knows whether the sensors can still be told to sleep
+  g_railsUp = true;  // para que la hibernacion sepa si aun se puede dormir a los sensores
   digitalWrite(PIN_PCB_EN_A, PIN_PCB_EN_A_ACTIVE);
   Serial.println("3V3: asserted");
   Serial.flush();
@@ -1905,10 +1844,7 @@ static void enableRails(bool safeMode) {
   Serial.println("3V3: settled");
   Serial.flush();
 
-  // Plain write, exactly as the minimal rail sketch does it - that sketch holds
-  // this same rail for 80+ seconds with zero resets, so making this identical
-  // removes soft-start as a variable. (Soft-start made it die EARLIER, mid-ramp,
-  // which argued against inrush being the cause anyway.)
+  // Escritura simple, exactamente como en el programa minimo de rails.
   Serial.println("5V: about to assert (plain write)");
   Serial.flush();
   digitalWrite(PIN_PCB_EN_B, PIN_PCB_EN_B_ACTIVE);
@@ -1924,15 +1860,15 @@ static void enableRails(bool safeMode) {
   digitalWrite(PIN_LORA_EN, PIN_LORA_EN_ACTIVE);
   Serial.println("LoRa: asserted");
 
-  // BMV080 enable - see PIN_BMV080_EN in pins.h. Without it the sensor opens but
-  // will not start its laser.
+  // Habilitacion del BMV080 - ver PIN_BMV080_EN en pins.h. Sin ella el sensor abre
+  // pero no enciende el laser.
   pinMode(PIN_BMV080_EN, OUTPUT);
   digitalWrite(PIN_BMV080_EN, PIN_BMV080_EN_ACTIVE);
   Serial.printf("BMV080 EN: GPIO%d -> %s\n", PIN_BMV080_EN,
                 PIN_BMV080_EN_ACTIVE == LOW ? "LOW" : "HIGH");
 
-  // Supercap sense is an INPUT. Left as an input explicitly, because this pin was
-  // briefly driven as an output during the BMV080 enable hunt.
+  // La medida de bateria es una ENTRADA. Se deja como entrada expresamente, porque
+  // este pin se condujo como salida por error durante la busqueda del BMV080.
   pinMode(PIN_SUPERCAP_SENSE, INPUT);
   Serial.flush();
   delay(500);
@@ -1941,28 +1877,25 @@ static void enableRails(bool safeMode) {
   Serial.flush();
 }
 
+// Se arranco en modo seguro? Se decide una vez en setup().
 static bool g_safeMode = false;
 
-// How long a safe-mode boot holds before restarting into normal operation. Long
-// enough to be caught on serial and to reflash, short enough that a node is not
-// out of service for long. Safe mode is a pause, not a terminal state.
+// Cuanto aguanta un arranque en modo seguro antes de reiniciarse en modo normal. Lo
+// bastante para pillarlo por el puerto serie y reflashear, y lo bastante corto para
+// que el nodo no este mucho tiempo fuera de servicio. El modo seguro es una pausa,
+// no un estado final.
 #define SAFE_MODE_RECOVER_MS 60000UL
 
-// Brings up ONLY the LoRa rail and radio - no sensors, since sensor load is the
-// usual reason for being in safe mode in the first place - and sends one packet
-// saying so. Without this a node in safe mode is indistinguishable from a dead
-// one, which is exactly how node C1 cost days of investigation.
-
-// One packet on the way into hibernation, then silence.
+// UN PAQUETE AL ENTRAR EN HIBERNACION, y despues silencio.
 //
-// Modelled on sendSafeModeDistress() and for the same reason: a node that simply
-// stops looks exactly like a node that has died. Deliberately NOT the telemetry
-// format, so it can never be mistaken for a reading - Module B logs an
-// unrecognised payload verbatim, so it surfaces as kind=other rather than being
-// dropped.
+// Mismo motivo que sendSafeModeDistress(): un nodo que simplemente se para parece
+// exactamente un nodo que ha muerto. A proposito NO usa el formato de telemetria,
+// para que nunca se confunda con una lectura: Modulo B apunta tal cual una trama que
+// no reconoce, asi que aparece como kind=other en vez de perderse.
 //
-// Brings up ONLY the LoRa rail. Sensors stay off; the pack is already low and the
-// whole purpose of this state is to stop drawing from it.
+// Enciende SOLO el rail de LoRa. Los sensores siguen apagados: la bateria ya esta
+// baja y todo este estado existe para dejar de gastarla.
+//   Trama: HIB,<mV de la bateria>,<mV para salir>,<despertares>
 static void sendHibernationNotice(float volts) {
   Serial.println("[HIBERNATE] sending one notice, then going silent");
   Serial.flush();
@@ -1992,6 +1925,17 @@ static void sendHibernationNotice(float volts) {
   digitalWrite(PIN_LORA_EN, (PIN_LORA_EN_ACTIVE == LOW) ? HIGH : LOW);
 }
 
+// PAQUETE DE SOCORRO DEL MODO SEGURO.
+//
+// Enciende SOLO el rail de LoRa y la radio - ningun sensor, porque la carga de los
+// sensores es el motivo habitual de estar en modo seguro - y manda un paquete
+// diciendolo. Sin esto un nodo en modo seguro no se distingue de uno muerto, que es
+// exactamente lo que costo dias de investigacion con el nodo C1.
+//   Trama: SAFE,<arranques fallidos>,<motivo del reinicio>,<despertares>
+//
+// OJO: si lo que falla es el propio rail de LoRa (como en C3 el 2026-10-14, con un
+// corto), este paquete tumba la placa en cada arranque y el modo seguro no puede
+// salir solo: hay que reparar el hardware y borrar la cuenta en NVS.
 static void sendSafeModeDistress() {
   Serial.println("[safe mode] sending distress packet (radio only, sensors stay off)");
   Serial.flush();
@@ -2008,9 +1952,9 @@ static void sendSafeModeDistress() {
     return;
   }
 
-  // Deliberately NOT the telemetry format: this must not be mistaken for a
-  // reading. Module B logs an unrecognised payload verbatim rather than dropping
-  // it, so it will surface in porthole_data.csv as kind=other.
+  // A proposito NO es el formato de telemetria: no debe confundirse con una lectura.
+  // Modulo B apunta tal cual una trama que no reconoce en vez de tirarla, asi que
+  // aparece en porthole_data.csv como kind=other.
   char msg[96];
   int len = snprintf(msg, sizeof(msg), "SAFE,%lu,%d,%lu", (unsigned long)nvsBoots,
                      (int)esp_reset_reason(), (unsigned long)g_wakeCount);
@@ -2022,27 +1966,41 @@ static void sendSafeModeDistress() {
   Serial.flush();
 }
 
-// Defined below, but setup() must be able to sleep before it ever powers a rail.
+// Definida mas abajo, pero setup() tiene que poder dormir antes de encender ningun rail.
 static void enterDeepSleep(const char *why, uint32_t seconds = SLEEP_CYCLE_SECONDS);
 
-// Reads the supercapacitor divider. Declared here because the hibernation check
-// runs at the very top of setup(), long before the definition further down.
-// Defined further down, next to the supercap helpers it depends on.
+// Definidas mas abajo, junto a las funciones de la bateria de las que dependen. Se
+// declaran aqui porque la comprobacion de hibernacion se hace al principio de
+// setup(), mucho antes de su definicion.
 static void enterHibernation(float volts, bool announce);
 static int readSupercapMv();
 static float supercapVolts();
 
-// A cold boot always initialises fully and stays awake, whatever the counters say:
-// that is the window in which the board can be reflashed, and skipping init there
-// would leave a freshly powered node looking dead for its first few ticks.
+// Un arranque en frio (encendido o reset, no un despertar del sueno) siempre
+// inicializa todo y se queda despierto: es la ventana en la que se puede reflashear
+// la placa.
 static bool isColdBoot();
 
-// What this tick owes. Decided BEFORE anything is powered, so an idle tick can
-// return to sleep without bringing up a single rail.
+// Que debe este despertar: leer sensores y/o transmitir. Se decide ANTES de encender
+// nada, para que un despertar sin trabajo pueda volver a dormir sin encender ni un
+// solo rail.
 static bool g_readDue = false;
 static bool g_txDue = false;
-// The expensive sensor group is due this tick - see BURST_EVERY_DEFAULT.
 
+// =============================================================================
+// setup(): SE EJECUTA EN CADA DESPERTAR (cada despertar es un arranque nuevo)
+// =============================================================================
+//
+// Orden:
+//   1. Diagnostico del bus I2C antes de tocar nada; esperar al USB solo en frio.
+//   2. Motivo del reinicio, guardia de arranques (modo seguro), y siembra de la
+//      memoria RTC si es un encendido en frio (BOOTCOUNT_MAGIC).
+//   3. Medir la bateria (antes de encender nada) y decidir si hiberna.
+//   4. Consultar el calendario: que vence en este despertar. Si nada, a dormir sin
+//      encender ningun rail.
+//   5. Soltar los pines enclavados, encender el SEN0466 y los rails, recuperar el
+//      bus I2C, arrancar SOLO los sensores que tocan, y la radio si hay envio.
+// El trabajo en si (leer, transmitir, dormir) lo hace loop().
 void setup() {
   Serial.begin(115200);
 
@@ -2071,27 +2029,27 @@ void setup() {
     Serial.flush();
   }
 
-  // WAIT FOR A USB HOST ONLY ON A COLD BOOT - never on a timer wake.
+  // ESPERAR A UN PC POR USB SOLO EN UN ARRANQUE EN FRIO - nunca al despertar.
   //
-  // This used to wait unconditionally:
+  // Antes esperaba siempre:
   //
   //     while (!Serial && millis() - waitStart < 3000) delay(10);
   //     delay(500);
   //
-  // In the field there IS no USB host, so `!Serial` stays true and every wake -
-  // including the idle ticks that are supposed to be nearly free - burned the full
-  // 3s, plus another 500ms unconditionally. At a 10s tick that is 3.5s of every
-  // 10s: a 35% duty cycle at ~40mA, roughly 14mA average, spent waiting for a
-  // serial port that will never appear.
+  // En el campo NO hay PC, asi que `!Serial` sigue siendo verdad y cada despertar -
+  // incluidos los que no tienen trabajo y deberian ser casi gratis - gastaba los 3 s
+  // enteros, mas otros 500 ms. Con un despertar cada 10 s eran 3,5 s de cada 10: un
+  // 35% del tiempo a ~40 mA, unos 14 mA de media, esperando un puerto serie que no
+  // iba a aparecer nunca.
   //
-  // It also hid itself during development: on the bench, USB IS attached, `Serial`
-  // goes true within milliseconds and the wait collapses - so every measurement
-  // taken with a cable understated the real field consumption.
+  // Ademas se escondia durante el desarrollo: en el banco SI hay USB, `Serial` se
+  // pone a verdad en milisegundos y la espera desaparece - asi que todas las medidas
+  // hechas con cable subestimaban el consumo real en el campo.
   //
-  // g_sleepFlag is RTC_NOINIT and survives deep sleep, so it can be read here
-  // before anything else has run. A timer wake means nobody is watching: skip
-  // straight to work. A cold boot means someone may have just plugged it in and
-  // wants to see the banner, so keep the wait there.
+  // g_sleepFlag es RTC_NOINIT y sobrevive al sueno, asi que se puede leer aqui antes
+  // de que corra nada mas. Un despertar del temporizador significa que nadie esta
+  // mirando: directo al trabajo. Un arranque en frio significa que alguien puede
+  // haberlo enchufado y quiere ver el mensaje de arranque, asi que ahi se espera.
   if (g_sleepFlag != SLEEP_FLAG_MAGIC) {
     uint32_t waitStart = millis();
     while (!Serial && millis() - waitStart < 3000) delay(10);
@@ -2101,6 +2059,7 @@ void setup() {
   Serial.println();
   Serial.println("=== CHIP FOREST + LoRa TX: sensors -> RYLR998 -> ground station ===");
 #if FORCE_ALARM_STATE
+  // Build de medicion: aviso bien visible de que el estado de alarma esta forzado.
   g_alarmState = (FORCE_ALARM_STATE >= 2) ? ALARM_FIRE : ALARM_PREALARM;
   g_alarmClearRun = 0;
   g_prealarmMs = 0;
@@ -2115,6 +2074,7 @@ void setup() {
 #endif
   Serial.flush();
 
+  // Motivo del ultimo reinicio, en texto, para el log.
   esp_reset_reason_t rr = esp_reset_reason();
   const char *rrName = rr == ESP_RST_POWERON    ? "POWERON"
                        : rr == ESP_RST_EXT      ? "EXT"
@@ -2128,15 +2088,18 @@ void setup() {
                                                  : "OTHER";
   esp_sleep_wakeup_cause_t wakeCause = esp_sleep_get_wakeup_cause();
 
-  // The flag is authoritative; the cause is only reported for diagnosis.
+  // La marca manda; la causa del despertar solo se imprime como diagnostico.
   g_wokeFromTimer = (g_sleepFlag == SLEEP_FLAG_MAGIC);
   g_sleepFlag = 0;
 
-  // The boot guard needs to know whether this was our own timer wake, so it runs
-  // HERE and not earlier - a deep-sleep wake must not be counted as a failure.
-  // (It still runs before any rail is touched, which was the original intent.)
+  // La guardia de arranques necesita saber si este arranque es nuestro propio
+  // despertar, asi que va AQUI y no antes: un despertar del sueno no debe contarse
+  // como fallo. (Sigue yendo antes de tocar ningun rail, que era la idea original.)
   bootGuardBegin(g_wokeFromTimer);
 
+  // ---- Siembra de la memoria RTC tras un encendido real ----
+  // La palabra magica no coincide = la RTC trae basura (o es un firmware con otra
+  // disposicion). Se ponen todas las variables RTC_NOINIT a un valor conocido.
   if (g_bootMagic != BOOTCOUNT_MAGIC) {
     g_bootMagic = BOOTCOUNT_MAGIC;
     g_bootCount = 0;
@@ -2165,20 +2128,16 @@ void setup() {
     g_txMultiplier = 1.0f;
     for (uint8_t j = 0; j < JOB_COUNT; j++) g_nextDueMs[j] = 0;
     g_schedPhasedForState = ALARM_NORMAL;
-    // The reading cache lives in RTC_NOINIT too, so it holds garbage on a true
-    // power-on and must be seeded here with everything else.
+    // La cache de lecturas tambien vive en RTC_NOINIT, asi que en un encendido real
+    // contiene basura y hay que sembrarla aqui con todo lo demas.
     g_temp = g_hum = g_pres = g_gas = 0.0f;
     g_pm1 = g_pm25 = g_pm10 = 0.0f;
     g_co2 = 0.0f;
     g_co = g_coTemp = 0.0f;
     g_windAngle = g_windSpeed = 0.0f;
     g_windValid = false;
-    // Start DUE, not at zero, so the first working tick runs a burst immediately.
-    // Otherwise a freshly powered node spends its first BURST_EVERY_DEFAULT ticks
-    // (15 minutes by default) transmitting gas/PM/CO2 as zeros, which is
-    // indistinguishable from three dead sensors at the receiving end.
-    // A freshly seeded node starts awake. If the pack really is low, the check in
-    // setup() puts it straight back into hibernation on this same boot.
+    // Un nodo recien sembrado arranca despierto. Si la bateria esta baja de verdad,
+    // la comprobacion de setup() lo devuelve a hibernacion en este mismo arranque.
     g_hibernating = false;
 
     // EL ESTADO DE ALARMA TAMBIEN HAY QUE SEMBRARLO.
@@ -2197,6 +2156,7 @@ void setup() {
     // que ningun sensor haya cruzado nada. En un sistema de deteccion de
     // incendios eso es una falsa alarma que se dispara justo cuando una placa se
     // reinicia en campo, que es cuando menos se puede ir a mirar.
+    // (Las tres asignaciones de alarma estan repetidas dos veces; es inofensivo.)
     g_alarmState = ALARM_NORMAL;
     g_prealarmMs = 0;
     g_alarmClearRun = 0;
@@ -2237,17 +2197,12 @@ void setup() {
                   "  stays open long enough to reflash\n",
                   (int)wakeCause, (unsigned long)SLEEP_COLD_BOOT_AWAKE_MS);
   }
-  // Carry the downlink-tuned send period across sleeps.
+  // Recuperar el periodo de envio ajustado por comando, que sobrevive al sueno.
   g_txPeriodMs = g_txPeriodMsPersist;
 
-  // Every boot is one tick, so both counters advance here - this is the only place
-  // they do. loop() then compares each against its own threshold to decide what
-  // this tick owes. Counting in setup() rather than loop() matters: loop() runs
-  // many times per wake, so incrementing there would race through the thresholds
-  // in milliseconds instead of once per 10s tick.
-
-  // Reset reason FIRST - before any bail-out can skip it. This costs one line per
-  // wake and is the difference between diagnosing a reset and guessing at it.
+  // El motivo del reinicio LO PRIMERO, antes de que cualquier salida temprana se lo
+  // salte. Cuesta una linea por despertar y es la diferencia entre diagnosticar un
+  // reinicio y adivinarlo.
   Serial.printf("Last reset reason: %d = %s\n", (int)rr, rrName);
   Serial.printf("Node address: %d (Module B sees this as +RCV addr=%d)\n", LORA_MY_ADDR,
                 LORA_MY_ADDR);
@@ -2266,51 +2221,51 @@ void setup() {
                   (unsigned)g_alarmState);
   }
 
-  // Green: woke up. Before the idle bail-out below, so every wake flashes -
-  // including the two ticks in three that go straight back to sleep.
+  // Verde: me he despertado. Antes de la posible vuelta a dormir de abajo, para que
+  // todos los despertares lo muestren.
   ledFlashWake();
 
-  // ---- LOW-BATTERY HIBERNATION: decided before anything is powered ----
+  // ---- HIBERNACION POR BATERIA BAJA: se decide antes de encender nada ----
   //
-  // Measured here, at the top of the wake, for a specific reason: the rail SAGS
-  // under load. A reading taken after a LoRa burst or a sensor slot would be a
-  // measurement of the dip, not of the pack, and would park a healthy node for
-  // hours. At this point in the wake nothing has been switched on since deep sleep
-  // latched it all off, so this is the pack at rest - the fairest number available.
+  // Se mide aqui, al principio del despertar, por un motivo concreto: la tension
+  // CAE con la carga. Una lectura tras una rafaga de LoRa o un turno de sensor
+  // mediria la caida, no la bateria, y dejaria parado horas a un nodo sano. En este
+  // punto no se ha encendido nada desde que el sueno lo enclavo todo apagado, asi
+  // que es la bateria en reposo - el numero mas justo posible.
   //
-  // The divider sits directly across the pack and needs no rail of its own, so
-  // this costs one ADC read.
+  // El divisor esta directamente sobre la bateria y no necesita rail propio, asi
+  // que cuesta una lectura del ADC.
   float packV = supercapVolts();
 
   if (g_hibernating) {
-    // In hibernation the ONLY job is to decide whether charging has brought it
-    // back. No sensors, no radio, no rails - just look and sleep again.
+    // En hibernacion el UNICO trabajo es decidir si la carga ya la ha recuperado.
+    // Sin sensores, sin radio, sin rails: mirar y volver a dormir.
     if (packV >= HIB_EXIT_V) {
       Serial.printf("[HIBERNATE] pack recovered to %.2fV (>= %.2fV) - resuming normal operation\n",
                     packV, (double)HIB_EXIT_V);
       Serial.flush();
       g_hibernating = false;
-      // Falls through into a normal tick from here.
+      // Sigue desde aqui como un despertar normal.
     } else {
       Serial.printf("[HIBERNATE] pack %.2fV, waiting for %.2fV - back to sleep for %lus\n",
                     packV, (double)HIB_EXIT_V, HIB_CHECK_SECONDS);
       Serial.flush();
       enterDeepSleep("still hibernating", HIB_CHECK_SECONDS);
-      return;  // unreachable
+      return;  // no se llega nunca
     }
   } else if (packV <= HIB_ENTER_V && packV >= SUPERCAP_V_SANITY_FLOOR && !isColdBoot()) {
-    // SANITY FLOOR GUARD: an older PCB has no divider and reads ~0.12V, which would
-    // otherwise hibernate every such board permanently on its first wake. A reading
-    // that low means "no divider fitted", not "flat pack" - see the same guard in
-    // transmitStatus().
+    // GUARDA DEL SUELO DE CORDURA: una placa antigua no tiene divisor y lee ~0,12 V,
+    // lo que de otro modo haria hibernar para siempre a cada placa asi en su primer
+    // despertar. Una lectura tan baja significa "no hay divisor", no "bateria
+    // vacia" - ver la misma guarda en transmitStatus().
     //
-    // COLD BOOT EXCLUDED so a node with a flat pack can still be reflashed. Deep
-    // sleep drops the USB port; hibernating immediately on power-up would leave no
-    // window to reprogram it, and a node you cannot reprogram is worse than one
-    // that drains a little faster. The 30s cold-boot window runs first, then loop()
-    // hibernates at the end of it.
+    // ARRANQUE EN FRIO EXCLUIDO para que un nodo con la bateria vacia se pueda
+    // reflashear. El sueno profundo apaga el USB; hibernar nada mas encender no
+    // dejaria ventana para reprogramarlo, y un nodo que no se puede reprogramar es
+    // peor que uno que gasta un poco mas. Primero corre la ventana de 30 s del
+    // arranque en frio, y loop() hiberna al terminarla.
     enterHibernation(packV, true);
-    return;  // unreachable
+    return;  // no se llega nunca
   }
 
   // Los umbrales, en CADA arranque y no solo cuando cambia el magic: viven en
@@ -2349,44 +2304,41 @@ void setup() {
   g_readDue = schedAnySensorDue();
   g_txDue = g_jobDue[JOB_TX];
 
-  // ---- Idle tick: power nothing, go straight back to sleep ----
-  // This decision used to live in loop(), which meant every wake first switched on
-  // all three rails, paid the BMV080's 5s preheat and initialised the radio - only
-  // to discover it had nothing to do. Two ticks in three were pure waste, and the
-  // measured cadence was 76s instead of the configured 30s because of it.
+  // ---- Despertar sin trabajo: no encender nada, volver a dormir ----
+  // Esta decision vivia antes en loop(), lo que significaba que cada despertar
+  // encendia primero los tres rails, pagaba los 5 s de precalentamiento del BMV080 e
+  // iniciaba la radio - para descubrir despues que no tenia nada que hacer.
   //
-  // It matters for more than energy. Bringing up three rails and a laser is a large
-  // simultaneous load step, and doing it three times more often than necessary is
-  // three times the opportunity to brown out on a supply with little headroom.
+  // No es solo energia. Encender tres rails y un laser es un escalon de carga grande
+  // y simultaneo, y hacerlo mas veces de las necesarias son mas ocasiones de que se
+  // caiga una alimentacion con poco margen.
   //
-  // The rails are still off here (deep sleep latched them off and nothing has
-  // driven them since), so there is nothing to undo - just sleep again.
+  // Los rails siguen apagados aqui (el sueno los enclavo apagados y nada los ha
+  // conducido desde entonces), asi que no hay nada que deshacer: solo dormir otra vez.
 #if SLEEP_ENABLED
-  // EVERY schedule must be listed here. Omitting one does not merely skip a tick -
-  // that work never happens at all, because the bail-out sleeps before any rail is
-  // powered. En el planificador por ticks se olvido una de las banderas al anadir
-  // el burst, que habria significado que
-  // have meant the expensive sensor group never ran on a tick that owed nothing
-  // else.
+  // TODOS los trabajos tienen que contar aqui. Olvidar uno no se salta un despertar:
+  // ese trabajo no se hace NUNCA, porque esta salida duerme antes de encender ningun
+  // rail. (En el planificador por ticks se olvido asi una de las banderas al anadir
+  // el grupo caro de sensores.)
   if (!g_readDue && !g_txDue && !isColdBoot()) {
     // Con el planificador por tiempo este caso casi no se da: el nodo despierta
     // porque ALGO vence, no porque haya pasado un tick. Se conserva como red de
     // seguridad - un despertar espurio no debe encender ningun rail - y ahora
     // vuelve a dormir hasta el proximo vencimiento de verdad, no 10 s fijos.
     enterDeepSleep("nada vence - sin encender rails", schedSleepSeconds(g_alarmState));
-    return;  // unreachable: enterDeepSleep does not return
+    return;  // no se llega nunca: enterDeepSleep no vuelve
   }
 #else
-  // Continuous mode initialises everything every time - there is no idle tick to
-  // skip, and bailing out here would leave setup() half-done.
+  // Modo continuo: lo inicializa todo cada vez; no hay despertares que saltarse, y
+  // salir aqui dejaria setup() a medias.
   g_readDue = true;
   g_txDue = true;
 #endif
 
-  // Colour says WHICH kind of work this tick is doing, held until sleep:
-  //   BLUE   a read tick - rails and sensors
-  //   WHITE  a transmit-only tick - radio
-  // A tick that does both starts blue and switches to white at the transmit.
+  // El color dice QUE trabajo hace este despertar, y se mantiene hasta dormir:
+  //   AZUL    lectura - rails y sensores
+  //   BLANCO  solo transmision - radio
+  // Un despertar que hace las dos empieza azul y pasa a blanco al transmitir.
   if (g_readDue) {
     ledReading();
   } else {
@@ -2394,35 +2346,32 @@ void setup() {
   }
   g_bootCount++;
   Serial.printf("Boot #%lu since last power loss\n", (unsigned long)g_bootCount);
-  // (reset reason already printed above, before the idle bail-out)
   Serial.flush();
 
-  // Deep sleep left these pads latched (see kHeldGates). Nothing can drive them
-  // until the hold is released, so this must happen before the pinMode calls
-  // below - otherwise the writes are silently ignored and the rails stay off.
-  // Re-enabled: this was disabled during the reset bisect, which has since found
-  // the real cause (concurrent sensor load, see the sequential slots below). It is
-  // REQUIRED for sleep to work at all - the gates are latched through deep sleep,
-  // so without releasing the hold the pinMode/digitalWrite calls below are
-  // silently ignored and the rails never come back on after the first wake.
+  // El sueno profundo dejo estos pines enclavados (ver kHeldGates). No se pueden
+  // conducir hasta soltar el enclavamiento, asi que esto tiene que ir ANTES de los
+  // pinMode de abajo - si no, las escrituras se ignoran en silencio y los rails se
+  // quedan apagados. Es IMPRESCINDIBLE para que el sueno funcione: sin soltarlos,
+  // los rails no vuelven a encenderse nunca despues del primer despertar.
   for (size_t i = 0; i < sizeof(kHeldGates) / sizeof(kHeldGates[0]); i++) {
     gpio_hold_dis(kHeldGates[i]);
   }
   gpio_deep_sleep_hold_dis();
 
-  // CO sensor power, first of everything: it is the slowest part on the board to
-  // become usable, so every second it is powered earlier is a second of warm-up.
-  // Also in safe mode - it is not the load safe mode exists to shed.
+  // Alimentacion del sensor de CO, lo primero de todo: es la pieza de la placa que
+  // mas tarda en ser utilizable, asi que cada segundo que se encienda antes es un
+  // segundo de calentamiento. Tambien en modo seguro: no es la carga que el modo
+  // seguro existe para quitar.
   pinMode(PIN_SEN0466_EN, OUTPUT);
   digitalWrite(PIN_SEN0466_EN, SEN0466_GATE_ALWAYS_ON ? PIN_SEN0466_EN_ACTIVE : !PIN_SEN0466_EN_ACTIVE);
   Serial.printf("SEN0466 EN: GPIO%d -> %s\n", PIN_SEN0466_EN,
                 digitalRead(PIN_SEN0466_EN) == LOW ? "LOW" : "HIGH");
 
-  // Rails one at a time, with USB given time to enumerate first - see enableRails().
-  // Safe mode after three boots without a good run leaves them off entirely, so a
-  // board that cannot hold its supply still gives back a usable serial port.
-  // Threshold raised from 3: while the failure is being reproduced deliberately,
-  // a 3-boot trigger hijacks every test run before the interesting output appears.
+  // MODO SEGURO: con 12 o mas arranques seguidos sin una vuelta buena, los rails se
+  // quedan apagados, para que una placa que no aguanta su alimentacion siga dando un
+  // puerto serie utilizable. (El umbral se subio desde 3: mientras se reproducia el
+  // fallo a proposito, un disparo a los 3 arranques secuestraba cada prueba antes de
+  // que saliera lo interesante.)
   g_safeMode = (nvsBoots >= 12);
   // Medido ANTES y DESPUES de encender los rails. Si el bus esta igual en los dos
   // momentos, el rail no esta llegando a las pull-up y encenderlo no cambia nada -
@@ -2440,24 +2389,24 @@ void setup() {
   enableRails(g_safeMode);
   i2cReportPullups("DESPUES de encender rails");
 
-  // (The bisect stop that used to sit here is gone - it did its job. The answer
-  // was that the fault is in what comes AFTER: activating the sensors all at once,
-  // not powering the rails. See the sequential slots below.)
   if (g_safeMode) {
     Serial.println("Rails off - skipping sensor and radio init this boot.");
     Serial.flush();
-    return;  // nothing below can work without power
+    return;  // sin alimentacion no puede funcionar nada de lo de abajo
   }
 
-  power.enable3V3Sensors();
+  power.enable3V3Sensors();  // stub: solo imprime, ver PowerManager.h
   // Antes de Wire.begin: si un esclavo quedo colgado sujetando SDA de un reset
   // anterior, el bus esta inservible y Wire no lo detecta - devuelve ACK falsos.
   i2cRecoverBus();
   Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
 
+  // Diagnostico del bus en cada arranque.
   scanI2C("after rails, before sensor init");
   probeBmeChipId("right after scan");
 
+  // ---- ARRANQUE SELECTIVO: solo los sensores que vencen en este despertar ----
+  //
   // SOLO SI EL BMV080 VA A LEERSE. Son cinco segundos, y pagarlos en un
   // despertar que solo viene a por la temperatura retrasa esa temperatura cinco
   // segundos sobre el instante en el que tenia que existir.
@@ -2475,14 +2424,15 @@ void setup() {
   } else {
     bmeReady = false;
   }
-  // begin() tries the configured address then the alternate, so print which one it
-  // settled on - "OK" alone cannot tell 0x76 from 0x77.
+  // begin() prueba la direccion configurada y luego la otra, asi que se imprime en
+  // cual se quedo: un "OK" a secas no distingue 0x76 de 0x77.
   if (bmeReady) {
     Serial.printf("BME690: OK (bound to 0x%02X)\n", bme690.address());
   } else if (bme690.chipIdValid()) {
-    // The driver refused it but the register still reads. 0x61 means the part is
-    // present and healthy and the DRIVER is at fault; anything else means the bus
-    // is corrupting a multi-byte read while still ACKing a bare address probe.
+    // El driver lo rechazo pero el registro se sigue leyendo. 0x61 significa que la
+    // pieza esta y esta sana y el fallo es del DRIVER; cualquier otro valor
+    // significa que el bus corrompe una lectura de varios bytes aunque siga dando ACK
+    // a una prueba de direccion.
     Serial.printf("BME690: NOT FOUND at 0x%02X - chip ID 0x%02X via mode %d (expect 0x61) -> %s\n",
                   bme690.address(), bme690.lastChipId(), bme690.chipIdMode(),
                   bme690.lastChipId() == 0x61 ? "part is FINE, driver init failed"
@@ -2493,8 +2443,9 @@ void setup() {
   }
 
 #if SLEEP_ENABLED && SLEEP_SKIP_SEN0466
-  // Out of the cycle for now: its 210s settle would dominate every wake. Disabled
-  // rather than merely unread, so the readiness gate does not wait on it.
+  // Fuera del ciclo: sus 210 s de estabilizacion dominarian cada despertar. Se
+  // desactiva en vez de simplemente no leerlo. (Hoy SLEEP_SKIP_SEN0466 vale 0, asi
+  // que esta rama no se compila.)
   g_sen0466Enabled = false;
   sen0466Ready = false;
   Serial.println("SEN0466: SKIPPED (210s settle - excluded from the sleeping cycle)");
@@ -2506,13 +2457,12 @@ void setup() {
   Serial.println(sen0466Ready ? "SEN0466: OK" : "SEN0466: NOT FOUND");
 #endif
 
-  // ---- INIT ORDER SWAPPED (diagnostic, 2026-09-04) ----
-  // Original order was bmv080 then cm1106, and the board reset at cm1106.begin()
-  // on every boot where the BMV080 came up - never when it didn't. Swapping tells
-  // us which kind of fault that is:
-  //   reset moves to bmv080.begin()  -> cumulative load, both together exceed the supply
-  //   reset disappears entirely      -> an inrush/settling timing bug in the sequencing
-  // Revert this once the answer is in; it is a probe, not a fix.
+  // ---- ORDEN DE ARRANQUE INTERCAMBIADO (diagnostico del 2026-09-04) ----
+  // El orden original era bmv080 y despues cm1106, y la placa se reiniciaba en
+  // cm1106.begin() en todos los arranques en que el BMV080 arrancaba - nunca cuando
+  // no lo hacia. Intercambiarlos decia que tipo de fallo era (carga acumulada o un
+  // problema de tiempos). La respuesta fue la carga simultanea, y el orden se quedo
+  // asi; los textos "SWAPPED" del log son de esa prueba.
   // El CM1106 hace un ciclo de alimentacion y espera su calentamiento en begin(),
   // asi que tambien cuesta segundos que no hay que pagar si no vence.
   if (g_jobDue[JOB_CM1106]) {
@@ -2554,8 +2504,8 @@ void setup() {
                   "(0x57/0x56/0x55/0x54), last SDK status %d\n",
                   bmv080.lastOpenStatus());
   }
-  // begin() leaves it measuring in order to prove presence; park it straight away
-  // so the laser stays off until a sample is actually wanted.
+  // Laser apagado hasta que de verdad se quiera una medida. (begin() ya no lo deja
+  // midiendo, ver Bmv080Sensor.cpp; esto es una garantia extra.)
   if (bmvReady) {
     bmv080.stopMeasurement();
     g_bmvPhase = BmvPhase::Idle;
@@ -2565,6 +2515,7 @@ void setup() {
   calypso.begin();
   step("calypso.begin returned - radio next");
 
+  // La radio se configura en cada despertar con trabajo, toque enviar o no.
   Serial.println("Configuring RYLR998 (link parameters must match pp1-lora-receiver):");
   radioReady = radio.begin(LORA_MY_ADDR, LORA_NETWORK_ID, LORA_BAND_HZ,
                             {LORA_PARAM_SF, LORA_PARAM_BW, LORA_PARAM_CR, LORA_PARAM_PREAMBLE}, &Serial);
@@ -2581,37 +2532,43 @@ void setup() {
   g_setupDoneMs = millis();
 }
 
-// Powers everything down and sleeps. Rails are switched OFF and their gates
-// latched, so nothing downstream draws during the sleep - that gating, not the
-// MCU's own ~10uA, is where the saving actually comes from.
+// =============================================================================
+// 7. SUENO PROFUNDO
+// =============================================================================
+
+// Lo apaga todo y duerme. Los rails se APAGAN y sus puertas se enclavan, asi que
+// nada de lo que cuelga de ellos consume durante el sueno: es ese corte, y no los
+// ~10 uA del propio microcontrolador, de donde sale el ahorro de verdad.
 static void enterDeepSleep(const char *why, uint32_t seconds) {
 #if !SLEEP_ENABLED
   (void)why;
   return;
 #else
-  // Off before sleeping. A WS2812 latches its last value, so without this it would
-  // stay lit through the entire sleep - burning current and making the indicator
-  // meaningless.
+  // Apagar el LED antes de dormir. Un WS2812 mantiene su ultimo valor, asi que sin
+  // esto seguiria encendido todo el sueno - gastando y dejando el indicador sin
+  // sentido.
   ledOff();
 
   Serial.printf("\n[sleep] %s - sleeping %lus\n", why, (unsigned long)seconds);
 
-  // Quiesce each device before its rail disappears, rather than yanking power
-  // from underneath a laser or a warming heater.
+  // Poner cada aparato en reposo antes de que desaparezca su rail, en vez de
+  // quitarle la corriente con el laser o un calefactor en marcha.
   if (bmvReady) bmv080.stopMeasurement();
   cm1106.sleep();
 
-  // Persist anything a wake needs, while RAM still exists.
+  // Guardar lo que necesite el siguiente despertar, mientras la RAM aun existe.
   g_txPeriodMsPersist = g_txPeriodMs;
 
-  // Rails off. The two gates have OPPOSITE polarity, so each needs the inverse of
-  // its own active level - a single shared offLevel would switch one rail off and
-  // the other ON, powering a rail for the whole sleep.
+  // Rails apagados. Las dos puertas tienen polaridad OPUESTA, asi que cada una
+  // necesita el inverso de su propio nivel activo - un unico "nivel de apagado"
+  // compartido apagaria un rail y ENCENDERIA el otro durante todo el sueno.
+  // (GPIO16, la puerta del SEN0466, no se toca aqui: conserva el nivel que le dio
+  // setup() y se enclava con las demas.)
   digitalWrite(PIN_PCB_EN_A, (PIN_PCB_EN_A_ACTIVE == LOW) ? HIGH : LOW);
   digitalWrite(PIN_PCB_EN_B, (PIN_PCB_EN_B_ACTIVE == LOW) ? HIGH : LOW);
   digitalWrite(PIN_LORA_EN, (PIN_LORA_EN_ACTIVE == LOW) ? HIGH : LOW);
 
-  // Latch those levels for the duration of the sleep - see kHeldGates.
+  // Enclavar esos niveles durante el sueno - ver kHeldGates.
   for (size_t i = 0; i < sizeof(kHeldGates) / sizeof(kHeldGates[0]); i++) {
     gpio_hold_en(kHeldGates[i]);
   }
@@ -2620,7 +2577,7 @@ static void enterDeepSleep(const char *why, uint32_t seconds) {
   Serial.flush();
   delay(SLEEP_USB_DRAIN_MS);
 
-  g_sleepFlag = SLEEP_FLAG_MAGIC;  // so the next boot knows it came from sleep
+  g_sleepFlag = SLEEP_FLAG_MAGIC;  // para que el siguiente arranque sepa que viene del sueno
 
   // EL TIEMPO DEL NODO SE ACUMULA AQUI, Y ESTE ES EL UNICO SITIO.
   //
@@ -2638,19 +2595,19 @@ static void enterDeepSleep(const char *why, uint32_t seconds) {
 
   esp_sleep_enable_timer_wakeup((uint64_t)seconds * 1000000ULL);
   esp_deep_sleep_start();
-  // never returns
+  // no vuelve nunca
 #endif
 }
 
-// A cold-booted node must stay awake long enough to be reflashed. Deep sleep drops
-// the USB-Serial/JTAG, and at a 10s tick the port would otherwise be present for
-// only a second or two at a time - practically impossible to catch. So after a
-// power-on or reset (as opposed to a timer wake) the node refuses to sleep until
-// this window has passed. A timer wake skips it entirely and sleeps as soon as its
-// tick work is done.
-// A cold boot is any start that did not come from our own deep sleep - power-on,
-// or a reset. g_wokeFromTimer is set from the RTC flag, not the wakeup cause,
-// because a chip reset clears the cause (see the flag's declaration).
+// Un nodo arrancado en frio tiene que quedarse despierto lo suficiente para
+// reflashearlo. El sueno profundo apaga el USB-Serial/JTAG, y el puerto solo
+// existiria uno o dos segundos cada vez - casi imposible de pillar. Asi que tras un
+// encendido o un reset (no un despertar del temporizador) el nodo se niega a dormir
+// hasta que pasa esta ventana. Un despertar del temporizador se la salta y duerme en
+// cuanto acaba su trabajo.
+// Arranque en frio = cualquier arranque que no venga de nuestro propio sueno. Se
+// decide con la marca en RTC, no con la causa del despertar, porque un reinicio del
+// chip borra la causa (ver la declaracion de la marca).
 static bool isColdBoot() { return !g_wokeFromTimer; }
 
 static bool coldBootWindowOpen() {
@@ -2666,14 +2623,18 @@ static bool coldBootWindowOpen() {
   return true;
 }
 
-// One pass over every enabled sensor, updating its cached g_* value on a
-// successful read and its g_*St status either way. Called every SAMPLE_GAP_MS.
-// A sensor is "expected" only if it is enabled AND actually present. A sensor
-// that failed to initialise (bmvReady == false) or is switched off by downlink
-// must never be waited on, or the readiness gate below would never open and the
-// node would go permanently silent. The Calypso has no ready-flag of its own, so
-// it counts as expected only once it has EVER produced a reading - an unplugged
-// wind sensor must not hold up every other sensor's data.
+// =============================================================================
+// 8. LECTURA DE SENSORES, DE UNO EN UNO ("SLOTS")
+// =============================================================================
+
+// Que sensores se esperaban y aun no tienen lectura fresca, por nombre. Lo usa
+// readFastSensorsOnce(), que solo se ejecuta en el modo sin sueno (SLEEP_ENABLED=0).
+//
+// Un sensor se "espera" solo si esta activado Y presente. Uno que no arranco
+// (bmvReady == false) o que se silencio por comando no debe esperarse nunca. El
+// Calypso no tiene indicador propio de "listo", asi que solo cuenta como esperado
+// cuando ha dado ALGUNA lectura alguna vez: un anemometro desenchufado no debe
+// retener los datos de los demas sensores.
 static bool calypsoEverSeen = false;
 
 static uint8_t pendingSensors(char *out, size_t outCap) {
@@ -2698,29 +2659,30 @@ static uint8_t pendingSensors(char *out, size_t outCap) {
   return pending;
 }
 
+// Borra todas las marcas de "fresco". Se llama al empezar cada barrido.
 static void clearFreshFlags() {
   g_bmeFresh = g_gasFresh = g_bmvFresh = g_co2Fresh = g_coFresh = g_calFresh = false;
 }
 
-// ---------------- Sequential sensor slots ----------------
-// ONE sensor active at a time, never overlapping. This is the fix for the resets
-// that blocked this project for days, and it is the single most important
-// property of this file - do not "optimise" it back into a single pass.
+// ---------------- Turnos de sensor ("slots") ----------------
+// UN SOLO sensor activo cada vez, sin solaparse nunca. Este es el arreglo de los
+// reinicios que bloquearon el proyecto durante dias, y es la propiedad mas
+// importante de este archivo: no "optimizarlo" volviendo a una sola pasada.
 //
-// The measurements that settled it, on this hardware:
+// Las medidas que lo zanjaron, en este hardware:
 //
-//   all sensors active together      31 resets / 140s
-//   BMV080 disabled, rest together    1 reset  / 140s
-//   sequential slots, everything on   2 resets / 150s   (both were the reflash)
+//   todos los sensores a la vez      31 reinicios / 140 s
+//   BMV080 apagado, el resto a la vez  1 reinicio  / 140 s
+//   turnos, todo encendido            2 reinicios / 150 s   (los dos fueron el reflasheo)
 //
-// The BMV080's laser alone is ~68mA - an order of magnitude more than anything
-// else here - and the old code left it measuring while the BME690, CM1106 and
-// SEN0466 were all read. That overlap is what browned the board out. Staggering
-// the rails and soft-starting the gate both failed because they addressed INRUSH,
-// and the problem was steady-state overlap.
+// El laser del BMV080 solo ya son ~68 mA - un orden de magnitud mas que cualquier
+// otra cosa - y el codigo antiguo lo dejaba midiendo mientras se leian el BME690,
+// el CM1106 y el SEN0466. Ese solape es lo que tumbaba la placa. Escalonar los rails
+// y arrancar la puerta suavemente fallaron porque atacaban la CORRIENTE DE ARRANQUE,
+// y el problema era el solape en regimen permanente.
 //
-// notes/power_budget.md specified this from the beginning: "switched rails so the
-// 68mA BMV080 and 5mA/210s SEN0466 only draw during their windows".
+// notes/power_budget.md lo especificaba desde el principio: "rails conmutados para
+// que el BMV080 de 68 mA y el SEN0466 de 5 mA/210 s solo consuman en sus ventanas".
 enum Slot {
   SLOT_BME690 = 0,
   SLOT_BMV080,
@@ -2730,8 +2692,7 @@ enum Slot {
   SLOT_COUNT
 };
 
-// Names the slot in the log. With one sensor serviced per wake, the log is the
-// only way to see which one a given tick actually touched.
+// Nombre del turno para el log (lo usa readFastSensorsOnce()).
 static const char *slotName(int slot) {
   switch (slot) {
     case SLOT_BME690: return "BME690";
@@ -2743,52 +2704,54 @@ static const char *slotName(int slot) {
   return "?";
 }
 
-// Longest the BMV080's laser may stay on waiting for a frame. Frames normally
-// arrive ~2-4s after the settle. This bounds one slot; BMV080_MEASURE_TIMEOUT_MS
-// is far too long to spend inside a sequential pass.
+// Lo maximo que puede estar encendido el laser del BMV080 esperando un dato. Los
+// datos llegan normalmente 2-4 s despues del precalentamiento. Esto acota un turno;
+// BMV080_MEASURE_TIMEOUT_MS es demasiado largo para gastarlo dentro de una pasada
+// secuencial (y de hecho ya no se usa).
 #define BMV080_SLOT_MS 8000UL
 
-// Gap between ordinary slots - enough for one small load to stop drawing before
-// the next starts.
+// Hueco entre turnos normales: lo justo para que una carga pequena deje de consumir
+// antes de que empiece la siguiente.
 #define SLOT_GAP_MS 1500UL
 
-// How long the sensor rails are held OFF after the BME690's gas heater runs.
-// A gap alone was not enough at 250ms or at 1500ms; only an actual rail cycle let
-// the BMV080 start afterwards. This is that cycle's off-time.
+// Cuanto se mantienen APAGADOS los rails de sensores despues de que funcione el
+// calefactor de gas del BME690. Un simple hueco no bastaba, ni a 250 ms ni a 1500
+// ms: solo un ciclo real del rail dejaba arrancar despues al BMV080. Este es el
+// tiempo apagado de ese ciclo.
 #define HEATER_RECOVERY_OFF_MS 800UL
 
-// Settling time after the sensor rails are cut and before the radio transmits.
-// Long enough for the rails to actually discharge their loads and for whatever
-// bulk capacitance is on the supply to recover before the burst.
+// Espera tras cortar los rails de sensores y antes de que la radio transmita. Lo
+// bastante para que los rails descarguen de verdad sus cargas y la capacidad de la
+// alimentacion se recupere antes de la rafaga.
 #define TX_RAIL_SETTLE_MS 400UL
 
-// Sensor RAILS off - not merely the sensors idled.
+// RAILS DE SENSORES APAGADOS - no solo los sensores en reposo.
 //
-// quiesceAll() stops the BMV080 measuring and drops the CM1106's EN line, but
-// leaves both sensor rails powered, so every part on them keeps drawing its idle
-// current through the transmit. Measured consequence: the board takes a POWERON
-// reset - a true supply collapse - immediately after "Setup complete." on a
-// transmit tick, i.e. exactly at radio.send().
+// quiesceAll() para el BMV080 y baja el EN del CM1106, pero deja los dos rails de
+// sensores alimentados, asi que cada pieza sigue consumiendo su corriente de reposo
+// durante la transmision. Consecuencia medida: la placa sufre un reinicio POWERON -
+// un colapso real de la alimentacion - justo despues de "Setup complete." en un
+// despertar de envio, es decir, exactamente en radio.send().
 //
-// The radio needs neither rail. So the transmit gets a genuinely exclusive slot:
-// 3V3 and 5V off, LoRa rail left up, settle, then send. This is the same principle
-// that fixed the sensor resets, applied to the one load that was still sharing.
+// La radio no necesita ninguno de los dos rails. Asi que la transmision tiene su
+// turno exclusivo: 3V3 y 5V apagados, rail de LoRa encendido, espera, y envio. Es el
+// mismo principio que arreglo los reinicios de los sensores, aplicado a la unica
+// carga que aun compartia.
 //
-// The rails are NOT brought back afterwards - a transmit is the last thing a tick
-// does before sleeping, and enterDeepSleep() switches them off anyway. On a tick
-// that both reads and transmits, the read has already finished by this point.
-// EXPERIMENTAL, defaults OFF. Keeps the 5V rail powered through the transmit.
+// Los rails NO se vuelven a encender despues: transmitir es lo ultimo que hace un
+// despertar antes de dormir, y enterDeepSleep() los apaga igualmente.
 //
-// Cutting both rails for the transmit was the fix for a POWERON reset at
-// radio.send() - a genuine supply collapse - and that is not to be undone
-// lightly. But it was diagnosed when the board ran from SUPERCAPS, whose ESR
-// could not carry the radio's 151mA peak on top of the sensors. The supply has
-// since become a 10Ah lithium pack, which is a far stiffer source.
+// ---- TX_KEEP_5V_RAIL: mantener el rail de 5 V durante la transmision ----
 //
-// This matters because the SEN0466 needs 210s of CONTINUOUS 5V and the node
-// transmits every 25.5s in alarm, so with both rails cut the CO sensor can never
-// warm up - not a tuning problem, an impossibility. Keeping 5V up through the
-// transmit is the only thing that makes CO measurable without a hardware change.
+// Cortar los dos rails para transmitir fue el arreglo de un reinicio POWERON en
+// radio.send() - un colapso real de la alimentacion -, y eso no se deshace a la
+// ligera. Pero se diagnostico cuando la placa iba con SUPERCONDENSADORES, cuya ESR no
+// podia con el pico de 151 mA de la radio encima de los sensores. Desde entonces la
+// fuente es una bateria de litio de 10 Ah, mucho mas firme.
+//
+// Importa porque el SEN0466 necesitaba 210 s de 5 V CONTINUOS y el nodo transmite a
+// menudo en alarma, asi que con los dos rails cortados el sensor de CO no podria
+// calentarse nunca.
 //
 // ACTIVADO POR DEFECTO el 2026-10-07, y la razon ya no es solo el CO.
 //
@@ -2811,6 +2774,8 @@ static const char *slotName(int slot) {
 #define TX_KEEP_5V_RAIL 1
 #endif
 
+// Apaga los rails de sensores antes de transmitir (el de 5 V solo si
+// TX_KEEP_5V_RAIL vale 0) y espera a que se estabilice la alimentacion.
 static void powerDownSensorRails() {
   g_railsUp = false;
   digitalWrite(PIN_PCB_EN_A, (PIN_PCB_EN_A_ACTIVE == LOW) ? HIGH : LOW);
@@ -2824,18 +2789,18 @@ static void powerDownSensorRails() {
   delay(TX_RAIL_SETTLE_MS);
 }
 
-// Everything off. Called between slots and before every transmit, so the radio's
-// ~120mA burst never lands on top of a laser or a warming heater.
+// Todo en reposo. Se llama entre turnos y antes de cada envio, para que la rafaga
+// de ~120 mA de la radio nunca caiga encima de un laser o de un calefactor.
 static void quiesceAll() {
   if (bmvReady && g_bmvPhase != BmvPhase::Idle) {
     bmv080.stopMeasurement();
     g_bmvPhase = BmvPhase::Idle;
   }
-  cm1106.sleep();  // EN low
+  cm1106.sleep();  // EN a nivel bajo
 }
 
-// Runs exactly one sensor's slot. Blocking BY DESIGN: the whole point is that
-// nothing else is drawing while this one is. Each slot bounds its own time.
+// Ejecuta el turno de UN sensor. Bloqueante A PROPOSITO: la idea es que no consuma
+// nada mas mientras este lo hace. Cada turno acota su propio tiempo.
 static void runSlot(int slot) {
   switch (slot) {
     case SLOT_BME690: {
@@ -2858,24 +2823,25 @@ static void runSlot(int slot) {
 
     case SLOT_BMV080: {
       if (!bmvReady || !g_bmvEnabled) break;
-      // Laser on only for this slot, off before the slot ends - on every path.
+      // Laser encendido solo durante este turno y apagado antes de que acabe, por
+      // cualquier camino.
       if (!bmv080.startMeasurement()) {
         Serial.printf("[bmv080] start FAILED - SDK status %d (see bmv080_status_code_t)\n",
                       bmv080.lastStartStatus());
         Serial.flush();
 
-        // NOTE: a GPIO12/GPIO14 sweep used to sit here, from before the board was
-        // described. It has been REMOVED and must not come back in that form:
-        // GPIO12 goes to the Cubic CM1106 and GPIO14 is the analog supercap sense,
-        // so that loop was driving a working sensor's line and fighting an analog
-        // divider. The enable turned out to be GPIO15 (PIN_BMV080_EN), asserted
-        // once with the rail gates.
+        // NOTA: aqui habia un barrido de GPIO12/GPIO14, de antes de que se
+        // describiera la placa. Se QUITO y no debe volver asi: GPIO12 va al CM1106 y
+        // GPIO14 es la medida analogica de la bateria, asi que ese bucle conducia la
+        // linea de un sensor que funciona y peleaba con un divisor analogico. La
+        // habilitacion resulto ser GPIO15 (PIN_BMV080_EN), que se activa una vez con
+        // los rails.
         g_bmvSt = ReadingStatus::NoAck;
         break;
       }
       g_bmvPhase = BmvPhase::Measuring;
       uint32_t t0 = millis();
-      delay(BMV080_SETTLE_MS);  // preheat: frames before this are not meaningful
+      delay(BMV080_SETTLE_MS);  // precalentamiento: los datos de antes no valen
       while (millis() - t0 < BMV080_SLOT_MS) {
         Reading pm = bmv080.read();
         g_bmvSt = pm.status;
@@ -2898,9 +2864,9 @@ static void runSlot(int slot) {
 
     case SLOT_CM1106: {
       if (!g_cm1106Enabled) break;
-      // Single-shot part: it measures on power-up and then repeats that value for
-      // the rest of the boot, so a FRESH number costs an EN power cycle every
-      // time. That is not a workaround for a fault - it is how the part behaves.
+      // Pieza de un solo disparo: mide al encenderse y repite ese valor el resto del
+      // tiempo, asi que un numero NUEVO cuesta un ciclo de alimentacion con EN cada
+      // vez. No es un apano de una averia: es como se comporta la pieza.
       cm1106.powerCycle();
       Reading co2 = cm1106.read();
       g_co2St = co2.status;
@@ -2909,9 +2875,10 @@ static void runSlot(int slot) {
         g_co2 = co2.values[0];
       }
 
-      // Wire bytes, not the parsed ppm. A ppm that never moves is ambiguous;
-      // byte-identical frames are not. Note resp[6] is a counter that increments
-      // every read, so frozenValueRun compares the VALUE bytes, never whole frames.
+      // Los bytes del cable, no los ppm interpretados. Un ppm que no se mueve es
+      // ambiguo; tramas identicas byte a byte no. Ojo: resp[6] es un contador que
+      // sube en cada lectura, asi que frozenValueRun compara los bytes del VALOR,
+      // nunca tramas enteras.
       Serial.print("[cm1106 raw] ");
       if (cm1106.lastRawLen() == 0) {
         Serial.print("(nothing received)");
@@ -2922,7 +2889,7 @@ static void runSlot(int slot) {
       Serial.printf("| status=%s frozenValueRun=%u\n", statusName(co2.status),
                     (unsigned)cm1106.frozenValueRun());
 
-      cm1106.sleep();  // EN back off before the next slot starts
+      cm1106.sleep();  // EN apagado otra vez antes de que empiece el siguiente turno
       break;
     }
 
@@ -2981,7 +2948,8 @@ static void runSlot(int slot) {
       // millis() sirve como reloj del rail porque este sensor cuelga del 5V
       // conmutado y ese rail sube en setup(), un par de segundos despues del
       // arranque: usar millis() sobreestima un poco el tiempo encendido, que es
-      // el lado seguro.
+      // el lado seguro. (OJO: en PRE-ALARMA/ALARMA el nodo no duerme y millis() no
+      // vuelve a cero, asi que esta espera solo actua tras un arranque.)
       //
       // Y esta espera es la que hace que la medida caiga EN SU MINUTO: el nodo
       // desperto 21,5 s antes a proposito, asi que esperar hasta
@@ -3022,7 +2990,7 @@ static void runSlot(int slot) {
 
       if (wind.ok()) {
         g_calFresh = true;
-        calypsoEverSeen = true;  // only now does it join the readiness gate
+        calypsoEverSeen = true;  // solo ahora pasa a contar como sensor esperado
         g_windAngle = wind.values[0];
         g_windSpeed = wind.values[1];
         g_windValid = wind.values[2] > 0.5f;
@@ -3035,11 +3003,13 @@ static void runSlot(int slot) {
   }
 }
 
-// Builds the CSV payload from the cache and transmits it to Module B, then
-// holds a short window open for a CFG downlink.
-// Copies the current cached values into the RTC store. Oldest is dropped when
-// full, and the loss is counted - a batch that silently covered less time than it
-// claims would be worse than one that admits the gap.
+// =============================================================================
+// 9. ALMACEN DE LECTURAS Y ALARMA
+// =============================================================================
+
+// Guarda en el almacen RTC una fila con lo medido en este barrido. Si el almacen
+// esta lleno se descarta la mas antigua y se cuenta la perdida: un lote que cubre
+// menos tiempo del que dice sin avisar seria peor que uno que admite el hueco.
 static void storeCurrentReading() {
   if (g_storeCount >= READING_STORE_MAX) {
     for (uint16_t i = 1; i < READING_STORE_MAX; i++) g_store[i - 1] = g_store[i];
@@ -3066,17 +3036,15 @@ static void storeCurrentReading() {
   r.pm10 = g_bmvFresh ? g_pm10 : SIN_MEDIR;
   r.co2 = g_co2Fresh ? g_co2 : SIN_MEDIR;
 
-  // A SENSOR THAT IS NOT READ MUST NOT PUBLISH A NUMBER.
+  // UN SENSOR QUE NO SE LEE NO DEBE PUBLICAR UN NUMERO.
   //
-  // g_co sits at 0.00 while the SEN0466 is disabled, and 0.00 ppm of CO is a
-  // perfectly plausible reading of clean air - so a node that is NOT MEASURING CO
-  // and a node measuring a healthy zero looked identical on the dashboard. An
-  // operator reading "CO 0.00" would conclude there is no carbon monoxide, when it
-  // means nobody is looking. This is the same failure as C1's frozen co2=663 that
-  // went unexplained for days, except published by design rather than by accident.
+  // g_co se queda en 0.00 mientras el SEN0466 esta desactivado, y 0,00 ppm de CO es
+  // una lectura perfectamente plausible de aire limpio - asi que un nodo que NO
+  // ESTA MIDIENDO CO y uno que mide un cero sano se veian identicos en el panel. Un
+  // operador que leyera "CO 0.00" concluiria que no hay monoxido, cuando significa
+  // que nadie esta mirando. Es el mismo fallo que el co2=663 congelado de C1, que
+  // estuvo dias sin explicacion, solo que publicado a proposito.
   //
-  // -1 is already the payload's sentinel for "not reported" - chargePct, capMv and
-  // alarmState all use it - so Module B and the dashboard need no new vocabulary.
   // El CO ya usaba un centinela, pero era -1 y ademas solo miraba si el sensor
   // estaba habilitado, no si habia leido en ESTE barrido. Ahora las dos cosas.
   const bool coMeasured = sen0466Ready && g_sen0466Enabled && g_coFresh;
@@ -3104,36 +3072,37 @@ static void storeCurrentReading() {
   // g_windValid), asi que el fuego nunca estuvo en juego - lo que mentia era la
   // telemetria que ve el operador.
   r.windValid = (g_windValid && g_calFresh) ? 1 : 0;
-  r.takenS = (uint32_t)(nodeNowMs() / 1000ULL);  // absolute tick; converted to an age at transmit time
+  r.takenS = (uint32_t)(nodeNowMs() / 1000ULL);  // segundo del nodo; al enviar se convierte en antiguedad
   Serial.printf("[store] reading %u/%u kept (tick %lu)\n", (unsigned)g_storeCount,
                 (unsigned)READING_STORE_MAX, (unsigned long)g_wakeCount);
 }
 
-// ---- FIRE THRESHOLDS, from the project's alarma/prealarma spreadsheet ----
+// ---- UMBRALES DE INCENDIO, de la hoja de alarma/prealarma del proyecto ----
 //
-// Transcribed 2026-09-28. Four numbers per magnitude, matching the sheet's four
-// columns: an ON threshold to ENTER each level, an OFF threshold to LEAVE it. The
-// gap between them is hysteresis - without it a reading sitting on a limit would
-// toggle the node in and out of pre-alarm on sensor noise alone, and pre-alarm
-// does not sleep.
+// Transcritos el 2026-09-28. Cuatro numeros por magnitud, como las cuatro columnas
+// de la hoja: un umbral ON para ENTRAR en cada nivel y uno OFF para SALIR. La
+// separacion entre ellos es histeresis: sin ella una lectura justo en el limite
+// haria entrar y salir al nodo de la pre-alarma solo por el ruido del sensor, y en
+// pre-alarma el nodo no duerme.
 //
-// DIRECTION IS PER MAGNITUDE and is not cosmetic. Temperature, particulates, CO
-// and wind trip when they RISE. HUMIDITY TRIPS WHEN IT FALLS - dry air is the fire
-// indicator - so its thresholds descend (25 -> 20 -> 15 -> 10) and the comparison
-// inverts with them. Getting that backwards would leave a node silent in exactly
-// the conditions it exists to detect.
+// LA DIRECCION ES POR MAGNITUD y no es un detalle. Temperatura, particulas, CO y
+// viento disparan al SUBIR. LA HUMEDAD DISPARA AL BAJAR - el aire seco es el indicio
+// de incendio - asi que sus umbrales descienden (25 -> 20 -> 15 -> 10) y la
+// comparacion se invierte con ellos. Equivocarse aqui dejaria mudo al nodo justo en
+// las condiciones que existe para detectar.
 //
-// ONE magnitude crossing is enough to change level (OR, not AND).
+// UNA sola magnitud basta para cambiar de nivel (O, no Y).
 //
-// A table rather than scattered #defines so it can be read straight down against
-// the spreadsheet and checked - the only way this stays honest as numbers change.
+// Una tabla en vez de #defines sueltos para poder leerla de arriba abajo contra la
+// hoja y comprobarla: es la unica forma de que siga siendo fiel cuando cambien los
+// numeros.
 struct AlarmRule {
   const char *name;
   const float *value;
-  uint8_t source;       // which sensor must have read this cycle - see ruleHasData()
-  bool higherIsWorse;
-  float preOff, preOn;
-  float almOff, almOn;
+  uint8_t source;       // que sensor tiene que haber leido en este barrido - ver ruleHasData()
+  bool higherIsWorse;   // true: dispara al subir. false: dispara al bajar (humedad)
+  float preOff, preOn;  // salir / entrar en PRE-ALARMA
+  float almOff, almOn;  // salir / entrar en ALARMA
   bool enabled;
 };
 
@@ -3144,7 +3113,7 @@ struct AlarmRule {
 #define ALARM_SRC_WIND 4
 
 static const AlarmRule kAlarmRules[] = {
-    // name        value         source          higher  preOff    preOn   almOff    almOn  on
+    // nombre      valor         fuente          sube    preOff    preOn   almOff    almOn  activa
     {"temp",      &g_temp,      ALARM_SRC_BME,  true,    45.0f,   50.0f,   55.0f,   60.0f, true},
     {"rh",        &g_hum,       ALARM_SRC_BME,  false,   25.0f,   20.0f,   15.0f,   10.0f, true},
     {"pm1",       &g_pm1,       ALARM_SRC_BMV,  true,    90.0f,  100.0f,  225.0f,  250.0f, true},
@@ -3153,50 +3122,50 @@ static const AlarmRule kAlarmRules[] = {
     {"co",        &g_co,        ALARM_SRC_CO,   true,     6.0f,    8.0f,   15.0f,   20.0f, true},
     {"windSpeed", &g_windSpeed, ALARM_SRC_WIND, true,     2.0f,    5.0f,    8.0f,   10.0f, true},
 
-    // ---- DISABLED, each for a measured reason rather than an oversight ----
+    // ---- DESACTIVADAS, cada una por un motivo medido y no por descuido ----
     //
-    // gas: the sheet gives 15000/7000 ohm, but BME690 gas resistance climbs from
-    // ~6k cold to ~45k as the heater stabilises, and under the sleep cycle EVERY
-    // burst starts cold. Nodes C2 and C3 read 5685 ohm in clean air - below the
-    // sheet's full-alarm figure - while C1 reads 47033. The same sensor in the same
-    // room spans both, so an absolute threshold cannot separate a cold heater from
-    // smoke. Needs a heater-settled reading before any number here means anything.
+    // gas: la hoja da 15000/7000 ohmios, pero la resistencia de gas del BME690 sube
+    // de ~6k en frio a ~45k cuando el calefactor se estabiliza, y con el ciclo de
+    // sueno CADA medida empieza en frio. Los nodos C2 y C3 leen 5685 ohmios en aire
+    // limpio - por debajo de la cifra de alarma de la hoja - mientras C1 lee 47033.
+    // El mismo sensor en la misma sala abarca las dos, asi que un umbral absoluto no
+    // puede separar un calefactor frio del humo. Hace falta una lectura con el
+    // calefactor estabilizado antes de que un numero aqui signifique algo.
     {"gas",  &g_gas,  ALARM_SRC_BME, false, 18000.0f, 15000.0f, 9000.0f, 7000.0f, false},
 
-    // co2: the sheet gives 800/1000 ppm, but all three nodes read 1104-1517 ppm in
-    // clean indoor air, already above full alarm; the sheet's own reference is 555.
-    // Separately the CM1106's reading FREEZES within a boot and only changes across
-    // power cycles, so a trigger on it would be blind to a real fire and liable to
-    // latch on a stale number.
+    // co2: la hoja da 800/1000 ppm, pero los tres nodos leen 1104-1517 ppm en aire
+    // limpio de interior, ya por encima de la alarma; la propia referencia de la hoja
+    // es 555. Ademas la lectura del CM1106 se CONGELA dentro de un arranque y solo
+    // cambia con ciclos de alimentacion, asi que un disparo basado en ella estaria
+    // ciego a un incendio real y podria quedarse enganchado en un valor viejo.
     {"co2",  &g_co2,  ALARM_SRC_CO2, true,   750.0f,  800.0f,  900.0f, 1000.0f, false},
 
-    // pres: all four cells in the sheet are 1031 hPa - no hysteresis, no gap
-    // between levels, no stated direction. The sheet's reference is 970 and the
-    // nodes read 943-950. As written it would never fire or always fire.
+    // pres: las cuatro celdas de la hoja son 1031 hPa - sin histeresis, sin
+    // separacion entre niveles, sin direccion indicada. La referencia de la hoja es
+    // 970 y los nodos leen 943-950. Tal cual esta, o no dispararia nunca o
+    // dispararia siempre.
     {"pres", &g_pres, ALARM_SRC_BME, true,  1031.0f, 1031.0f, 1031.0f, 1031.0f, false},
 };
 
 #define ALARM_RULE_COUNT (sizeof(kAlarmRules) / sizeof(kAlarmRules[0]))
 
-// ---- LIVE THRESHOLDS ----
+// ---- UMBRALES VIVOS ----
 //
-// kAlarmRules above is now the DEFAULTS. The values actually compared against
-// live here, in RTC memory, so Module A can change one over the air without a
-// reflash - which is the whole point of the umbral command.
+// kAlarmRules de arriba son ahora los valores POR DEFECTO. Los valores con los que
+// de verdad se compara viven aqui, en memoria RTC, para que Modulo A pueda cambiar
+// uno por radio sin reflashear - que es la razon de ser del comando de umbral.
 //
-// RTC_NOINIT so a change survives deep sleep: a node that forgot its thresholds
-// on every wake would silently revert to the compiled defaults ten seconds after
-// being configured, and the dashboard would show a value the node was not using.
+// RTC_NOINIT para que un cambio sobreviva al sueno: un nodo que olvidara sus
+// umbrales en cada despertar volveria en silencio a los compilados nada mas
+// configurarlo, y el panel mostraria un valor que el nodo no usa.
 //
-// Order matches kAlarmRules exactly. [0]=preOff [1]=preOn [2]=almOff [3]=almOn.
+// Mismo orden que kAlarmRules. [0]=preOff [1]=preOn [2]=almOff [3]=almOn.
 #define THR_PRE_OFF 0
 #define THR_PRE_ON 1
 #define THR_ALM_OFF 2
 #define THR_ALM_ON 3
 RTC_NOINIT_ATTR float g_thr[ALARM_RULE_COUNT][4];
 
-// Copies the compiled defaults over the live values. Called only when the boot
-// magic changes - see the BOOTCOUNT_MAGIC block.
 // Rango en el que un umbral de esta placa puede estar. Deliberadamente ancho: no
 // es para detectar un valor mal elegido - eso es decision del operador - sino para
 // detectar BASURA. Las magnitudes van de porcentajes de humedad a ohmios de gas,
@@ -3290,6 +3259,8 @@ static void validateThresholds() {
   Serial.flush();
 }
 
+// Copia los valores por defecto de la tabla sobre los vivos. Se llama en la siembra
+// del BOOTCOUNT_MAGIC y cuando validateThresholds() encuentra basura.
 static void seedThresholds() {
   for (size_t i = 0; i < ALARM_RULE_COUNT; i++) {
     g_thr[i][THR_PRE_OFF] = kAlarmRules[i].preOff;
@@ -3299,24 +3270,23 @@ static void seedThresholds() {
   }
 }
 
-// Sets one threshold by its dashboard name, e.g. "temp_pre_on" or
-// "pm25_alarma_off". Returns false if the name matches no rule, so an unknown key
-// is reported rather than silently accepted - a threshold that looks applied but
-// is not is the worst outcome available here.
-// Resolves "temp_pre_on" to the exact cell the alarm logic reads, or nullptr.
+// Traduce un nombre como "temp_pre_on" o "pm25_alarma_off" a la celda exacta que lee
+// la logica de alarma, o nullptr si no corresponde a ninguna regla (asi una clave
+// desconocida se informa en vez de aceptarse en silencio - un umbral que parece
+// aplicado y no lo esta es lo peor que puede pasar aqui).
 //
-// Split out of setThresholdByName so the ACK can READ BACK what was stored
-// instead of echoing the string that arrived - see the call site. One lookup
-// for both directions means the value Module A is told cannot disagree with
-// the value this node compares against.
+// Separada de setThresholdByName para que el ACK pueda RELEER lo que se guardo en
+// vez de devolver el texto que llego - ver donde se llama. Una sola busqueda para
+// las dos direcciones hace que el valor que se le dice a Modulo A no pueda
+// diferir del valor con el que compara este nodo.
 static float *thresholdSlot(const char *key) {
   static const struct { const char *suffix; uint8_t idx; } kSuffix[] = {
       {"_pre_off", THR_PRE_OFF},
       {"_pre_on", THR_PRE_ON},
       {"_alarma_off", THR_ALM_OFF},
       {"_alarma_on", THR_ALM_ON},
-      // The protocol document uses these instead of the spreadsheet's names.
-      // Both are accepted rather than guessing which Module A will send.
+      // El documento del protocolo usa estos en vez de los nombres de la hoja. Se
+      // aceptan los dos en vez de adivinar cual mandara Modulo A.
       {"_alarm_off", THR_ALM_OFF},
       {"_alarm_on", THR_ALM_ON},
   };
@@ -3337,6 +3307,8 @@ static float *thresholdSlot(const char *key) {
   return nullptr;
 }
 
+// Pone un umbral por su nombre. HISTORICO: ya no se llama desde ningun sitio (el CFG
+// usa thresholdSlot() directamente).
 static bool setThresholdByName(const char *key, float value) {
   float *slot = thresholdSlot(key);
   if (!slot) return false;
@@ -3344,14 +3316,14 @@ static bool setThresholdByName(const char *key, float value) {
   return true;
 }
 
-// Did this rule's sensor actually produce a reading this cycle?
+// El sensor de esta regla ha dado una lectura EN ESTE BARRIDO?
 //
-// THIS GUARD IS LOAD-BEARING, not defensive tidiness. The reading globals hold 0.0
-// when a sensor has not read, and humidity trips on LOW values - so an unread
-// BME690 would present rh = 0.0, which is below even the full-alarm threshold of
-// 10, and every node with a dead humidity sensor would sit in permanent fire
-// alarm. A rule whose sensor is absent, disabled or stale is SKIPPED, never
-// evaluated against a zero.
+// ESTA GUARDA ES ESENCIAL, no orden defensivo. Las variables de lectura valen 0.0
+// cuando un sensor no ha leido, y la humedad dispara con valores BAJOS - asi que un
+// BME690 sin leer presentaria rh = 0.0, por debajo incluso del umbral de alarma de
+// 10, y todo nodo con el sensor de humedad muerto estaria en alarma de incendio
+// permanente. Una regla cuyo sensor esta ausente, desactivado o sin dato fresco se
+// SALTA, nunca se evalua contra un cero.
 static bool ruleHasData(uint8_t source) {
   switch (source) {
     case ALARM_SRC_BME:  return bmeReady && g_bmeEnabled && g_bmeFresh;
@@ -3363,21 +3335,23 @@ static bool ruleHasData(uint8_t source) {
   return false;
 }
 
-// Has this rule crossed the ON threshold for the given level? Direction-aware.
+// Ha cruzado esta regla el umbral de ENTRADA del nivel dado? Tiene en cuenta si la
+// magnitud sube o baja con el fuego.
 static bool ruleTripped(const AlarmRule &r, float v, bool fireLevel, size_t idx) {
   const float on = g_thr[idx][fireLevel ? THR_ALM_ON : THR_PRE_ON];
   return r.higherIsWorse ? (v >= on) : (v <= on);
 }
 
-// Has it fallen back past the OFF threshold? The gap between OFF and ON is the
-// hysteresis - a value between them holds whatever state it is already in.
+// Ha vuelto por debajo del umbral de SALIDA? La separacion entre SALIDA y ENTRADA
+// es la histeresis: un valor entre los dos mantiene el estado en el que ya estaba.
 static bool ruleCleared(const AlarmRule &r, float v, bool fireLevel, size_t idx) {
   const float off = g_thr[idx][fireLevel ? THR_ALM_OFF : THR_PRE_OFF];
   return r.higherIsWorse ? (v < off) : (v > off);
 }
 
-// Highest level any single rule is calling for. OR across magnitudes: one is
-// enough. Returns ALARM_NORMAL if nothing is tripped.
+// El nivel mas alto que pide cualquier regla por si sola. O entre magnitudes: basta
+// una. Devuelve ALARM_NORMAL si no hay nada disparado. Solo mira reglas activas y
+// con dato fresco (ruleHasData).
 static AlarmState evaluateRules(const char **whyOut) {
   AlarmState worst = ALARM_NORMAL;
   for (size_t i = 0; i < ALARM_RULE_COUNT; i++) {
@@ -3386,7 +3360,7 @@ static AlarmState evaluateRules(const char **whyOut) {
     const float v = *r.value;
     if (ruleTripped(r, v, true, i)) {
       *whyOut = r.name;
-      return ALARM_FIRE;  // nothing outranks this, stop looking
+      return ALARM_FIRE;  // no hay nada por encima de esto: dejar de buscar
     }
     if (worst == ALARM_NORMAL && ruleTripped(r, v, false, i)) {
       *whyOut = r.name;
@@ -3470,8 +3444,9 @@ static void reportWhyStillRaised(bool fireLevel, const char *rama, int want) {
   Serial.flush();
 }
 
-// Are ALL enabled rules back below the OFF threshold for the level we are in?
-// Every rule must agree before a level clears - one still tripped holds it.
+// Han vuelto TODAS las reglas activas por debajo del umbral de salida del nivel en
+// el que estamos? Todas tienen que estar de acuerdo para bajar: una sola todavia
+// disparada lo mantiene. (Las reglas sin dato fresco se saltan.)
 static bool allRulesCleared(bool fireLevel) {
   for (size_t i = 0; i < ALARM_RULE_COUNT; i++) {
     const AlarmRule &r = kAlarmRules[i];
@@ -3490,28 +3465,34 @@ static const char *alarmStateName(AlarmState st) {
   return "?";
 }
 
-// Runs after every sensor read. Raises immediately on a trip; lowers only after
-// ALARM_CLEAR_CONSECUTIVE consecutive reads with every rule clear, so one dip
-// mid-fire cannot end it. Module A can force-clear via CFG,ALARM=0.
+// LA MAQUINA DE ESTADOS DE LA ALARMA. Se ejecuta tras cada lectura.
 //
-// Raising is instant and lowering is slow, deliberately: the cost of being late to
-// a fire is not symmetric with the cost of staying alert a few reads too long.
+//   - SUBE al momento cuando una regla dispara (NORMAL -> PRE-ALARMA o -> ALARMA).
+//   - Una PRE-ALARMA que sigue disparada al acabar PREALARM_CONFIRM_MS (60 min)
+//     sube a ALARMA.
+//   - BAJA solo tras ALARM_CLEAR_CONSECUTIVE (5) lecturas seguidas con todas las
+//     reglas limpias, y de nivel en nivel (ALARMA -> PRE-ALARMA -> NORMAL), para
+//     que un solo descenso a mitad de un incendio no lo termine.
+//   - Modulo A puede bajarla a mano con CFG,ALARM=0.
+//
+// Subir es instantaneo y bajar es lento, a proposito: el coste de llegar tarde a un
+// incendio no es simetrico con el de seguir alerta unas lecturas de mas.
 static void updateAlarmStateInner() {
 #if FORCE_ALARM_STATE
-  // Frozen for a power measurement - no escalation, no clearing, no reading of
-  // the sensors at all. See FORCE_ALARM_STATE.
+  // Congelado para una medida de consumo: ni sube, ni baja, ni se miran los
+  // sensores. Ver FORCE_ALARM_STATE.
   return;
 #endif
   const char *why = "";
   const AlarmState want = evaluateRules(&why);
 
-  // THE CONFIRMATION WINDOW EXPIRING IS ITSELF AN ESCALATION.
+  // QUE SE ACABE LA VENTANA DE CONFIRMACION ES EN SI UNA SUBIDA.
   //
-  // Checked before the normal comparison, because "still tripped at pre-alarm
-  // level after the whole window" does not raise `want` on its own - the reading has
-  // not got any worse, it has simply not gone away, and that is the whole point.
-  // Without this the node would sit in pre-alarm indefinitely on a real fire that
-  // never quite reached the alarm threshold.
+  // Se comprueba antes de la comparacion normal, porque "sigue disparada a nivel de
+  // pre-alarma despues de toda la ventana" no sube `want` por si solo - la lectura
+  // no ha empeorado, simplemente no se ha ido, y esa es justo la cuestion. Sin esto
+  // el nodo se quedaria en pre-alarma indefinidamente ante un incendio real que
+  // nunca llegara del todo al umbral de alarma.
   if (g_alarmState == ALARM_PREALARM && want >= ALARM_PREALARM &&
       g_prealarmMs >= PREALARM_CONFIRM_MS) {
     g_alarmState = ALARM_FIRE;
@@ -3522,13 +3503,13 @@ static void updateAlarmStateInner() {
     return;
   }
 
-  // Escalation is immediate at any level.
+  // Subir es inmediato en cualquier nivel.
   if (want > g_alarmState) {
     const AlarmState from = (AlarmState)g_alarmState;
     g_alarmState = want;
     g_alarmClearRun = 0;
-    // The window starts at the initial cause, so it restarts only on a genuine
-    // entry into pre-alarm from normal - not on an escalation to full alarm.
+    // La ventana empieza con la causa inicial, asi que solo se reinicia al entrar de
+    // verdad en pre-alarma desde normal - no al subir a alarma.
     if (from == ALARM_NORMAL) g_prealarmMs = 0;
     Serial.printf("\n*** %s: %s *** (was %s) - staying awake, all sensors continuous\n",
                   alarmStateName(want), why, alarmStateName(from));
@@ -3538,14 +3519,14 @@ static void updateAlarmStateInner() {
 
   if (g_alarmState == ALARM_NORMAL) return;
 
-  // Still tripped at the current level - reset the clean-read run.
+  // Sigue disparada en el nivel actual: la cuenta de lecturas limpias vuelve a cero.
   if (want >= g_alarmState) {
     g_alarmClearRun = 0;
     reportWhyStillRaised(g_alarmState == ALARM_FIRE, "una regla sigue disparada", (int)want);
     return;
   }
 
-  // Step down one level at a time, and only after a run of clean reads.
+  // Bajar de nivel en nivel, y solo tras una serie de lecturas limpias.
   const bool leavingFire = (g_alarmState == ALARM_FIRE);
   if (!allRulesCleared(leavingFire)) {
     g_alarmClearRun = 0;
@@ -3561,8 +3542,8 @@ static void updateAlarmStateInner() {
 
   g_alarmClearRun = 0;
   g_alarmState = leavingFire ? ALARM_PREALARM : ALARM_NORMAL;
-  // Dropping back into pre-alarm from alarm gets a fresh window rather than
-  // inheriting an already-expired one, which would re-escalate on the next read.
+  // Al volver de alarma a pre-alarma se empieza una ventana nueva en vez de heredar
+  // una ya agotada, que haria volver a subir en la siguiente lectura.
   g_prealarmMs = 0;
   Serial.printf("\n*** dropped to %s after %d clean reads ***\n",
                 alarmStateName((AlarmState)g_alarmState), ALARM_CLEAR_CONSECUTIVE);
@@ -3609,11 +3590,17 @@ static void updateAlarmState() {
   Serial.flush();
 }
 
-// Sends everything in the store, then empties it. One stored reading emits the
-// EXACT legacy single-reading format, so the default 3/3 configuration needs no
-// change on Module B at all; the batch format only appears once the user actually
-// raises LORA_TRANS above SENSOR_READ. A batch is split across packets when it
-// exceeds the RYLR998's 240-byte limit rather than being truncated.
+// =============================================================================
+// 10. TRANSMISION A MODULO B Y PAQUETE DE ESTADO (STAT)
+// =============================================================================
+
+// Envia todo lo que hay en el almacen y lo vacia.
+//   - Una sola lectura sale con el formato simple de siempre (13 campos).
+//   - Varias salen en LOTE: "B,<cuantas>,<lectura>;<lectura>;..." donde cada lectura
+//     lleva ademas su antiguedad en segundos, para que Modulo B la feche.
+//   - Un lote que no cabe en los 240 bytes del RYLR998 se reparte en varios
+//     paquetes en vez de cortarse.
+// Despues abre la ventana de escucha: el unico momento en que llega un CFG.
 static void transmitStore() {
   if (!radioReady) {
     Serial.printf("TX skipped (radio not initialized): %u stored reading(s) held\n",
@@ -3631,9 +3618,9 @@ static void transmitStore() {
                   (unsigned long)g_storeDropped);
   }
 
-  // Every sensor off before the radio transmits, then the rails they sit on. The
-  // RYLR998 pulls ~120mA on a send and this board cannot supply that on top of the
-  // sensor rails' idle draw - it browns out at radio.send() if they are left up.
+  // Todos los sensores en reposo antes de transmitir, y despues sus rails. El
+  // RYLR998 pide ~120 mA al enviar y esta placa no puede dar eso encima del consumo
+  // de reposo de los rails de sensores: se cae en radio.send() si se dejan encendidos.
   quiesceAll();
   delay(SLOT_GAP_MS);
   powerDownSensorRails();
@@ -3646,6 +3633,7 @@ static void transmitStore() {
     uint16_t first = sent;
 
     if (g_storeCount == 1) {
+      // Una sola lectura: formato simple de 13 campos.
       const StoredReading &r = g_store[0];
       len = snprintf(packet, sizeof(packet),
                      "%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d",
@@ -3653,8 +3641,9 @@ static void transmitStore() {
                      r.coTemp, r.windAngle, r.windSpeed, (int)r.windValid);
       sent = 1;
     } else {
-      // Batch: "B,<count>," then readings separated by ';', each ending in the age
-      // in ticks so the receiver can place them in time without a clock here.
+      // Lote: "B,<cuantas>," y despues las lecturas separadas por ';', cada una
+      // terminada en su antiguedad, para que el receptor las situe en el tiempo sin
+      // que aqui haga falta un reloj.
       len = snprintf(packet, sizeof(packet), "B,%u,", (unsigned)(g_storeCount - first));
       while (sent < g_storeCount) {
         const StoredReading &r = g_store[sent];
@@ -3670,12 +3659,12 @@ static void transmitStore() {
                               r.coTemp, r.windAngle, r.windSpeed, (int)r.windValid,
                               (unsigned long)age);
         if (oneLen < 0) break;
-        if (len + oneLen >= (int)sizeof(packet) - 1) break;  // this packet is full
+        if (len + oneLen >= (int)sizeof(packet) - 1) break;  // este paquete esta lleno
         memcpy(packet + len, one, oneLen + 1);
         len += oneLen;
         sent++;
       }
-      if (sent == first) {  // a single reading could not fit even alone
+      if (sent == first) {  // una sola lectura no cabia ni sola
         Serial.println("[tx] ERROR one reading exceeds the packet size - dropping it");
         sent++;
         continue;
@@ -3685,10 +3674,11 @@ static void transmitStore() {
     if (len < 0) len = 0;
     if (len >= (int)sizeof(packet)) len = (int)sizeof(packet) - 1;
 
-    // LED off across the send itself. The transmit burst is the tightest moment
-    // in the whole cycle, and the indicator must not be one of the loads competing
-    // with it - the same reasoning that quiesces the sensors just above. Yellow is
-    // restored immediately after, so it still reads as "working" to the eye.
+    // LED apagado durante el propio envio. La rafaga de transmision es el momento
+    // mas critico de todo el ciclo, y el indicador no debe ser una de las cargas que
+    // compiten con ella - el mismo razonamiento que pone en reposo a los sensores
+    // justo arriba. Se vuelve a encender en el acto, asi que a la vista sigue
+    // pareciendo "trabajando".
     ledOff();
     bool ok = radio.send(LORA_RX_ADDR, packet, (uint8_t)len);
     ledWorking();
@@ -3696,11 +3686,12 @@ static void transmitStore() {
                   (unsigned)g_storeCount, len, packet, ok ? "sent" : "send FAILED");
   }
 
-  // Sent means done: clear the store and start accumulating again.
+  // Enviado = hecho: vaciar el almacen y empezar a acumular otra vez.
   g_storeCount = 0;
   g_storeDropped = 0;
 
-  // Post-TX listen window - the only moment Module A's CFG can reach this node.
+  // Ventana de escucha tras el envio: el unico momento en que un CFG de Modulo A
+  // puede llegar a este nodo.
   LoRaMessage msg;
   uint32_t t0 = millis();
   while (millis() - t0 < LORA_POST_TX_LISTEN_MS) {
@@ -3708,144 +3699,110 @@ static void transmitStore() {
       handleInboundMessage(msg);
       break;
     }
-    delay(1);  // yields to FreeRTOS so the idle task can feed the task WDT
+    delay(1);  // cede el procesador a FreeRTOS para que la tarea inactiva alimente al perro guardian
   }
 }
 
 
-// One scheduled read: walk every slot once, in turn, with nothing overlapping.
+// ---- Paquete de estado (STAT), transmitStatus() mas abajo ----
 //
-// Note this is deliberately NOT the old "retry until everything is fresh" loop.
-// Each slot now bounds its own time internally, and retrying the whole set would
-// re-fire the BMV080 laser repeatedly - the exact load pattern that caused the
-// resets. A sensor that misses its slot keeps its last known value and is named
-// in the log line as STALE.
-// Sends a compact health packet alongside the telemetry.
+// Se manda un paquete de salud compacto junto con la telemetria.
 //
-// WHY THIS EXISTS: the telemetry payload carries VALUES only. A sensor that dies
-// keeps publishing its last cached value, so the data looks perfectly healthy - it
-// is exactly how node C1's frozen co2=663 went unexplained for days while the read
-// path was dead. With a serial cable that ambiguity is annoying; with the node
-// outside and untethered it is fatal to any test, because there is no other way to
-// find out.
+// POR QUE EXISTE: la telemetria lleva solo VALORES. Un sensor que se muere puede
+// seguir pareciendo sano en los datos - asi es exactamente como el co2=663 congelado
+// del nodo C1 estuvo dias sin explicacion mientras su camino de lectura estaba
+// muerto. Con un cable serie esa ambiguedad es molesta; con el nodo fuera y sin
+// cable es fatal para cualquier prueba, porque no hay otra forma de enterarse.
 //
-// Deliberately a SEPARATE packet rather than extra fields on the telemetry: adding
-// a field would break Module B's 13-field parser, whereas an unrecognised payload
-// is recorded verbatim by the porthole logger as kind=other and ignored safely by
-// everything else.
+// Es un paquete APARTE a proposito, y no campos extra en la telemetria: anadir un
+// campo romperia el interprete de 13 campos de Modulo B, mientras que una trama
+// desconocida se registra tal cual y todo lo demas la ignora sin problema.
 //
-//   STAT,<wake>,<resetReason>,<nvsBoots>,<bme><bmv><co2><co><wind>,<awakeMs>
+//   STAT,<despertar>,<motivoReinicio>,<arranquesFallidos>,<bme><bmv><co2><co><viento>,
+//        <antiguedad>,<mV en el pin>,<% de carga>,<estado de alarma>
 //
-// The five flags are 1 = read OK this cycle, 0 = not. Read them as the answer to
-// "which sensors were actually alive when this packet left".
-// Raw millivolts at the supercap sense pin. NOT the supercap terminal voltage -
-// the divider ratio is unknown, so this is the number at the ADC. Averaged over a
-// few samples because a single ADC reading on this part is noisy.
+// Los cinco indicadores valen 1 = leyo bien, 0 = no. Leerlos como la respuesta a
+// "que sensores estaban vivos de verdad cuando salio este paquete".
+
+// ---- Medida de la bateria ----
 //
-// Reported in the STAT packet so a discharge test can be followed over the radio
-// rather than by sitting next to the node with a meter: the node tells you its own
-// charge state on every status packet.
-// ---- Supercapacitor charge, as a percentage of USABLE ENERGY ----
+// Milivoltios en el pin de medida (GPIO14), promediados en varias muestras porque
+// una sola lectura del ADC de esta pieza es ruidosa. Van en el STAT para poder
+// seguir una descarga por radio en vez de quedarse al lado del nodo con un
+// polimetro.
 //
-// CALIBRATED 2026-09-23 from the resistor values on the updated PCB.
+// ---- Carga, como porcentaje de ENERGIA UTILIZABLE ----
 //
-// The sense point is the junction of a two-resistor divider across the pack:
+// CALIBRADO el 2026-09-23 a partir de las resistencias de la placa actualizada.
 //
-//     Vcap --[ 51.1k ]--+-- GPIO14
-//                       |
-//                    [ 322k ]
-//                       |
-//                      GND
+// El punto de medida es la union de un divisor de dos resistencias sobre el pack:
 //
-// so the pin sees the LOWER leg and the factor back to the terminals is
+//     Vpack --[ 51.1k ]--+-- GPIO14
+//                        |
+//                     [ 322k ]
+//                        |
+//                       GND
 //
-//     ratio = (Rtop + Rbottom) / Rbottom = (51.1 + 322) / 322 = 1.15870
+// asi que el pin ve la rama INFERIOR y el factor hasta los bornes es
 //
-// Sanity check against real readings: a pin reading of 2304 mV - the highest seen
-// on a fully charged pack - maps to 2670 mV at the terminals, which is a 2.7V
-// supercapacitor cell at full charge. It agrees.
+//     factor = (Rarriba + Rabajo) / Rabajo = (51.1 + 322) / 322 = 1.15870
 //
-// NOTE this is the UPDATED PCB. An older board has no divider fitted at all and
-// its pin floats at ~100 mV whatever the pack is doing; that is not a flat battery
-// and not a bug. Check the revision before reading anything into the millivolts.
+// Comprobacion contra lecturas reales: 2304 mV en el pin - lo mas alto visto en un
+// pack cargado - son 2670 mV en los bornes, una celda de supercondensador de 2,7 V
+// cargada. Coincide.
 //
-// KNOWN LIMITATION AT THE TOP OF THE RANGE. This divider barely divides - it
-// scales by 0.863 - so a full 3.8V pack puts 3280 mV on the pin. The ESP32-S3's
-// ADC at the default 11dB attenuation is specified to about 3100 mV and is already
-// losing linearity well before that, so the last stretch of charge reads
-// compressed and eventually clips: above roughly 3.59V at the terminals the pin
-// saturates and the gauge stops climbing, likely topping out near 90% rather than
-// 100%.
+// OJO: es la placa ACTUALIZADA. Una placa antigua no lleva divisor y su pin flota
+// en ~100 mV haga lo que haga el pack; eso no es una bateria vacia ni un fallo.
+// Mirar la revision antes de interpretar los milivoltios.
 //
-// So "not quite reaching 100%" is expected here and is not a charging fault. The
-// bottom and middle of the range, which is where the useful information is, are
-// unaffected. Fixing it properly means a divider with more attenuation - roughly
-// 2:1 would put a full pack near 1.9V, comfortably inside the accurate region.
+// LIMITACION CONOCIDA EN LA PARTE ALTA. Este divisor apenas divide - escala por
+// 0,863 - asi que un pack lleno de 3,8 V pone 3280 mV en el pin. El ADC del ESP32-S3
+// con la atenuacion por defecto de 11 dB esta especificado hasta unos 3100 mV y
+// pierde linealidad bastante antes, asi que el ultimo tramo de la carga se lee
+// comprimido y acaba saturando: por encima de ~3,59 V en bornes el pin satura y el
+// indicador deja de subir, probablemente sobre el 90% en vez del 100%.
+//
+// OJO, IMPORTANTE: todo este bloque se calculo para el pack de
+// SUPERCONDENSADORES. Desde el 2026-09-24 la fuente es una bateria de LITIO (hasta
+// 4,2 V), para la que ni el divisor ni la formula de energia sirven tal cual. Hay que
+// recalcularlo antes de fiarse del porcentaje.
 #define SUPERCAP_DIVIDER_RATIO 1.15870f
 
-// Set to 1 once SUPERCAP_DIVIDER_RATIO above is a MEASURED number.
-//
-// While this is 0 the percentage is reported as -1 ("unknown") rather than as a
-// computed value. That matters: with the placeholder ratio the maths produced a
-// confident-looking 0%, which is both wrong and alarming - a node claiming it is
-// flat when it is fully charged is worse than a node admitting it does not know.
-// The raw millivolts are still sent either way, so a discharge can be followed by
-// its trend before calibration.
+// 1 cuando SUPERCAP_DIVIDER_RATIO es un numero MEDIDO. Con 0 el porcentaje se
+// informa como -1 ("desconocido") en vez de calcularse: con un factor inventado la
+// cuenta daba un 0% muy convincente, que es falso y alarmante. Los milivoltios en
+// crudo se mandan igualmente.
 #define SUPERCAP_CALIBRATED 1
 
-// The pack is rated 3.8V - stated 2026-09-23.
-//
-// WORTH RECORDING HOW THIS WAS BRIEFLY GOT WRONG, because the mistake is easy to
-// repeat: the highest terminal voltage observed during a day's testing was ~2.67V,
-// and that was taken as "fully charged", which put the pack at 2.7V and implied
-// two cells in parallel. It was not full - the caps were being charged from empty
-// all that day and simply never reached the top. A reading is only the top of the
-// range if something says the charge had finished. Nothing did.
+// Tension de pack lleno: 3,8 V (dato del 2026-09-23, de la epoca de los
+// supercondensadores). Se llego a tomar por error 2,7 V como "lleno" porque era lo
+// mas alto visto en un dia de pruebas, cuando en realidad el pack nunca termino de
+// cargarse: una lectura solo es el maximo si algo dice que la carga habia acabado.
 #define SUPERCAP_V_FULL 3.8f
 
-// STILL THE LEAST CERTAIN NUMBER HERE - it decides where the gauge reads zero.
+// Tension de pack VACIO = el umbral de hibernacion, a proposito.
 //
-// Two conflicting pieces of evidence:
-//   - The original constant claimed the regulator gives up at 2.5V, unsourced.
-//   - Observed 2026-09-22: the board brownout-looped with the pin at ~1629 mV,
-//     i.e. ~1.89V at the terminals - so it was still running below 2.5V, though
-//     that was measured while a bench supply was also misbehaving.
-//
-// 1.9V is used because it is the one figure actually observed rather than assumed,
-// but it is probably too low to be the right ANSWER even if it is the right
-// measurement: a 3.8V pack is likely a lithium-ion capacitor, and LICs are damaged
-// by discharge below roughly 2.2V. If these are LICs, the floor should protect the
-// cell, not just the regulator - raising this to ~2.2V costs a little reported
-// capacity and stops the node draining them into damage.
-//
-// Raising it makes the node report empty sooner, which is the safe direction.
-// TIED TO THE HIBERNATION FLOOR, deliberately.
-//
-// This was 1.9V, the voltage at which the board was once seen to brown out. But
-// the node now stops at HIB_ENTER_V to protect the cells, so energy below that is
-// not usable energy - it is energy we have decided not to take. Reporting a
-// percentage against 1.9V would have the node hibernate at a displayed 11%, which
-// reads as a bug.
-//
-// With the two equal, 0% and "hibernating now" are the same point and the gauge
-// means what an operator assumes it means: how much is left before it stops.
+// El nodo se para en HIB_ENTER_V para proteger las celdas, asi que la energia por
+// debajo de eso no es energia utilizable - es energia que se ha decidido no usar. Con
+// los dos iguales, 0% y "hibernando ya" son el mismo punto, y el indicador significa
+// lo que un operador supone: cuanto queda antes de que se pare.
 #define SUPERCAP_V_EMPTY HIB_ENTER_V
 
 
 
 
 
-// Percent of USABLE energy remaining, not percent of voltage.
+// Porcentaje de ENERGIA utilizable restante, no de tension.
 //
-// A supercapacitor stores 0.5*C*V^2, so energy falls with the SQUARE of voltage
-// while the voltage itself falls linearly. Reporting a voltage percentage would
-// say "50%" at 3.1V when only about 35% of the usable energy is left - flattering,
-// and misleading exactly when it matters. This uses the energy form:
+// Un supercondensador almacena 0,5*C*V^2, asi que la energia cae con el CUADRADO de
+// la tension mientras la tension cae de forma lineal. Un porcentaje de tension diria
+// "50%" a 3,1 V cuando solo queda un ~35% de la energia utilizable - halagador, y
+// enganoso justo cuando importa. Se usa la forma de energia:
 //
-//     (V^2 - Vempty^2) / (Vfull^2 - Vempty^2)
+//     (V^2 - Vvacio^2) / (Vlleno^2 - Vvacio^2)
 //
-// so 50% means roughly half the remaining RUNTIME, which is what anyone reading it
-// actually wants to know.
+// asi que 50% significa aproximadamente la mitad del TIEMPO restante.
+// (Para una bateria de litio esta formula no aplica; ver el aviso de arriba.)
 static int supercapPercent(float volts) {
   const float lo = SUPERCAP_V_EMPTY * SUPERCAP_V_EMPTY;
   const float hi = SUPERCAP_V_FULL * SUPERCAP_V_FULL;
@@ -3855,6 +3812,7 @@ static int supercapPercent(float volts) {
   return (int)(e * 100.0f + 0.5f);
 }
 
+// Media de 8 lecturas del ADC en el pin de medida, en milivoltios.
 static int readSupercapMv() {
   const int kSamples = 8;
   uint32_t sum = 0;
@@ -3865,22 +3823,24 @@ static int readSupercapMv() {
   return (int)(sum / kSamples);
 }
 
-// Pack terminal voltage, through the calibrated divider.
+// Tension en los bornes del pack, a traves del divisor calibrado.
 static float supercapVolts() {
   return (readSupercapMv() / 1000.0f) * SUPERCAP_DIVIDER_RATIO;
 }
 
-// ---- Low-battery hibernation ----
+// =============================================================================
+// 11. BATERIA BAJA: HIBERNACION
+// =============================================================================
 //
-// Quiesce, cut everything, and sleep long. Called when the pack has fallen to
-// HIB_ENTER_V. Sensors are told to sleep BEFORE their rail disappears rather than
-// having power yanked mid-measurement - the same courtesy the normal sleep path
-// pays the BMV080 and CM1106.
+// Poner en reposo, cortarlo todo y dormir mucho tiempo. Se llama cuando el pack ha
+// bajado a HIB_ENTER_V. A los sensores se les dice que duerman ANTES de que
+// desaparezca su rail, en vez de quitarles la corriente a media medida - la misma
+// cortesia que el sueno normal tiene con el BMV080 y el CM1106.
 //
-// Sensor sleep() calls are nearly free here because the rail is about to go anyway
-// - an unpowered part draws nothing. They exist so shutdown is orderly, and
-// because two of them (BME690, SEN0466) used to be empty stubs that made "tell the
-// sensors to sleep" quietly mean nothing at all.
+// Los sleep() de los sensores no cuestan casi nada aqui porque el rail se va a ir
+// de todos modos. Existen para que el apagado sea ordenado, y porque dos de ellos
+// (BME690, SEN0466) eran funciones vacias que hacian que "dormir a los sensores" no
+// significara nada.
 static void enterHibernation(float volts, bool announce) {
   Serial.printf("\n[HIBERNATE] pack at %.2fV, below %.2fV - stopping to protect the cells\n",
                 volts, (double)HIB_ENTER_V);
@@ -3894,10 +3854,10 @@ static void enterHibernation(float volts, bool announce) {
   }
 
 #if HIB_ANNOUNCE_ENTRY
-  // The ONE transmit hibernation ever makes, and only on the way in. Silence from
-  // here is deliberate, but silence with no explanation is indistinguishable at
-  // Module A from a dead node - and telling those apart otherwise costs a trip
-  // into a forest. Skipped if the radio was never brought up on this wake.
+  // La UNICA transmision que hace la hibernacion, y solo al entrar. El silencio a
+  // partir de aqui es deliberado, pero un silencio sin explicacion no se distingue en
+  // Modulo A de un nodo muerto - y distinguirlos de otro modo cuesta un viaje al
+  // bosque.
   if (announce) {
     sendHibernationNotice(volts);
   }
@@ -3910,10 +3870,11 @@ static void enterHibernation(float volts, bool announce) {
   enterDeepSleep("hibernating - low battery", HIB_CHECK_SECONDS);
 }
 
+// Manda el paquete STAT descrito arriba.
 static void transmitStatus() {
-  // Flags come from the last READ tick, not from this transmit tick - see
-  // g_lastReadHealth. The trailing age says how many ticks ago that was, so a
-  // stale snapshot is visible rather than silently assumed current.
+  // Los indicadores vienen de la ultima LECTURA, no de este despertar de envio - ver
+  // g_lastReadHealth. La antiguedad dice cuantos despertares hace de eso, para que
+  // un dato viejo se vea en vez de darse por actual.
   uint8_t h = g_lastReadHealth;
   unsigned long ageTicks =
       (g_wakeCount >= g_lastReadWake) ? (unsigned long)(g_wakeCount - g_lastReadWake) : 0UL;
@@ -3921,21 +3882,19 @@ static void transmitStatus() {
   int vmv = readSupercapMv();
   float vcap = (vmv / 1000.0f) * SUPERCAP_DIVIDER_RATIO;
 
-  // NO DIVIDER FITTED -> SAY "UNKNOWN", NEVER "0%".
+  // SIN DIVISOR MONTADO -> DECIR "DESCONOCIDO", NUNCA "0%".
   //
-  // Only the updated PCB has the 51.1k/322k divider. On an older board GPIO14
-  // floats and reads ~100 mV no matter what the pack is doing - and once the
-  // ratio is calibrated, that floats straight through the energy formula and
-  // comes out as a confident 0%.
+  // Solo la placa actualizada lleva el divisor de 51,1k/322k. En una antigua GPIO14
+  // flota y lee ~100 mV haga lo que haga el pack - y con el factor calibrado eso
+  // pasa directo por la formula y sale como un 0% muy convincente.
   //
-  // A node that is plainly alive and transmitting while reporting a flat battery
-  // is worse than one admitting it does not know: it invites someone to replace a
-  // healthy pack, and it would fire a low-battery alarm on every old board.
+  // Un nodo que esta claramente vivo y transmitiendo mientras dice que su bateria
+  // esta vacia es peor que uno que admite que no lo sabe: invita a cambiar un pack
+  // sano, y dispararia una alarma de bateria baja en cada placa antigua.
   //
-  // The node cannot be running at all from a pack this low - the rail gave up
-  // around 1.9V - so a reading under SUPERCAP_V_SANITY_FLOOR means the sense line
-  // is absent, not that the energy is gone. One firmware then behaves correctly
-  // on both PCB revisions instead of needing a per-board build.
+  // El nodo no podria funcionar con un pack tan bajo, asi que una lectura por debajo
+  // de SUPERCAP_V_SANITY_FLOOR significa que falta la linea de medida, no la
+  // energia. Asi un mismo firmware se comporta bien en las dos revisiones de placa.
   int pct;
   if (!SUPERCAP_CALIBRATED || vcap < SUPERCAP_V_SANITY_FLOOR) {
     pct = -1;
@@ -3944,11 +3903,11 @@ static void transmitStatus() {
   }
 
   char msg[96];
-  // Alarm state is APPENDED as a ninth field rather than inserted, so a Module B
-  // running older firmware keeps reading the eight it knows by index and simply
-  // ignores the extra one. Inserting it would have shifted every field after it
-  // and silently corrupted the charge readings - the same class of bug as the
-  // batch-parse corruption that shifted every value by two.
+  // El estado de alarma se ANADE como noveno campo en vez de insertarse, para que un
+  // Modulo B con firmware antiguo siga leyendo los ocho que conoce por posicion y
+  // simplemente ignore el extra. Insertarlo habria desplazado todos los campos de
+  // detras y corrompido en silencio las lecturas de carga - el mismo tipo de fallo
+  // que el del interprete de lotes que desplazaba todos los valores dos posiciones.
   int len = snprintf(msg, sizeof(msg), "STAT,%lu,%d,%lu,%d%d%d%d%d,%lu,%d,%d,%d",
                      (unsigned long)g_wakeCount, (int)esp_reset_reason(),
                      (unsigned long)nvsBoots,
@@ -3973,9 +3932,9 @@ static void transmitStatus() {
   Serial.flush();
 }
 
-// True if a sensor that was expected to work did not read OK this cycle. Drives
-// the red LED - "expected" means enabled AND initialised, so an absent Calypso or
-// a deliberately skipped SEN0466 does not raise a false alarm.
+// True si un sensor que deberia funcionar no leyo bien en este barrido. Enciende el
+// LED rojo. "Deberia" significa activado Y arrancado, para que un Calypso ausente o
+// un SEN0466 saltado a proposito no den una falsa alarma.
 static bool sensorsDegraded() {
   if (bmeReady && g_bmeEnabled && g_bmeSt != ReadingStatus::Ok) return true;
   if (bmvReady && g_bmvEnabled && g_bmvSt != ReadingStatus::Ok) return true;
@@ -3983,48 +3942,36 @@ static bool sensorsDegraded() {
   return false;
 }
 
-// ONE read tick services EVERY sensor, then the node sleeps. Transmit happens on
-// its own tick. This is the requested cycle:
+// RECUPERACION DEL RAIL DE 3V3 TRAS EL CALEFACTOR DEL BME690.
 //
-//   tick 1,2  idle - wave, straight back to sleep, no rail powered
-//   tick 3    wake, read ALL sensors, store, sleep   (sensor_read resets to 0)
-//   tick 4    wake, transmit, sleep                  (lora_trans resets to 0)
-//
-// The slots still run STRICTLY ONE AT A TIME within the tick - that part is not
-// negotiable, it is what took this board from 31 resets in 140s to none.
-//
-// The hard part is the BME690's gas heater at 320C. Reading everything in one
-// wake previously failed in a very specific way: the BME690 is read first, its own
-// gas value came back low (15764 instead of ~45000) whenever the rail sagged, and
-// the next two sensors then could not start:
+// Lo dificil de leer varios sensores en un despertar es el calefactor de gas del
+// BME690 a 320 C. Fallaba de una forma muy concreta: el BME690 se leia primero, su
+// propio gas salia bajo (15764 en vez de ~45000) cuando el rail caia, y los dos
+// sensores siguientes ya no podian arrancar:
 //
 //   gas 52925 -> bmv=OK     co2=OK
 //   gas 15764 -> bmv=NoAck  co2=Timeout
 //
-// Widening the inter-slot gap from 250ms to 1500ms did not help, because the sag
-// happens INSIDE the heater cycle rather than after it. What did help was a full
-// rail power-cycle between the heater and the next sensor - previously achieved by
-// putting them on different ticks. So that recovery is done here instead, inside
-// the tick, right after the heater runs: rails down, settle, rails back up.
+// Ampliar el hueco entre turnos de 250 ms a 1500 ms no sirvio, porque la caida pasa
+// DENTRO del ciclo del calefactor y no despues. Lo que si sirvio fue un ciclo
+// completo de alimentacion del rail entre el calefactor y el siguiente sensor. Asi
+// que esa recuperacion se hace aqui, justo despues de que funcione el calefactor:
+// rail abajo, espera, rail arriba.
 //
-// It costs the BMV080's startup delay once per read tick, which is the price of
-// reading everything in one wake rather than spreading it out.
+// Cuesta la espera de arranque del BMV080 una vez por cada medida de gas.
 static void recoverRailsAfterHeater() {
-  // ONLY THE 3V3 RAIL IS CYCLED. This used to drop both.
+  // SOLO SE CICLA EL RAIL DE 3V3. Antes se bajaban los dos.
   //
-  // The recovery exists for one reason: the BMV080 will not start after the
-  // BME690's heater has run unless its supply is actually cycled. Both of those
-  // parts are on the 3V3 rail (PIN_PCB_EN_A / GPIO10). The 5V rail carries the
-  // SEN0466, the CM1106 and the Calypso, none of which are involved.
+  // La recuperacion existe por un unico motivo: el BMV080 no arranca despues del
+  // calefactor del BME690 si no se le cicla de verdad la alimentacion. Las dos
+  // piezas estan en el rail de 3V3 (PIN_PCB_EN_A / GPIO10). El rail de 5V lleva el
+  // CM1106 y el Calypso, que no tienen nada que ver.
   //
-  // Dropping 5V as well had a cost that was invisible until the timings were
-  // measured: the SEN0466 needs 210s of CONTINUOUS power to stabilise, and an
-  // 800ms outage every burst meant it could never accumulate that - not even in
-  // alarm, where the node never sleeps. The CO sensor was unusable by
-  // construction, and that is why it ended up excluded from the cycle entirely.
-  //
-  // Cycling only the rail that needs cycling is also simply more correct: the
-  // other three sensors were being power-cycled for no reason at all.
+  // Bajar tambien el de 5V tenia un coste invisible hasta medir los tiempos: el
+  // SEN0466 necesitaba 210 s de alimentacion CONTINUA para estabilizarse, y un corte
+  // de 800 ms en cada medida le impedia acumularlos. Ciclar solo el rail que lo
+  // necesita es ademas sencillamente mas correcto: los otros sensores se ciclaban
+  // sin motivo.
   Serial.println("[read] 3V3 rail recovery after the BME690 heater (5V stays up)");
   Serial.flush();
 
@@ -4035,31 +3982,36 @@ static void recoverRailsAfterHeater() {
   digitalWrite(PIN_PCB_EN_A, PIN_PCB_EN_A_ACTIVE);
   delay(PIN_PCB_EN_SETTLE_MS);
 
-  // The BMV080 needs its full startup window after any power cycle or it NoAcks -
-  // that is exactly the failure this recovery exists to prevent, so skipping the
-  // wait here would defeat the point.
+  // El BMV080 necesita su ventana de arranque completa despues de cualquier ciclo de
+  // alimentacion o da NoAck - justo el fallo que esta recuperacion existe para
+  // evitar, asi que saltarse esta espera anularia su sentido.
   delay(BMV080_STARTUP_DELAY_MS);
 }
 
 
-// Brings the CO sensor up once the 5V rail has been continuously powered long
-// enough for it to be meaningful. Called on every pass of a state that does not
-// sleep; a no-op the rest of the time.
+// Arranca el sensor de CO cuando el rail de 5V lleva alimentado de forma continua
+// el tiempo suficiente para que su lectura signifique algo. Se llama en cada vuelta
+// de un estado que no duerme.
 //
-// The warm-up clock restarts whenever the rail drops, because a partially warmed
-// sensor reports confidently and wrongly - the failure mode this whole guard
-// exists to avoid.
+// El reloj de calentamiento vuelve a cero cada vez que cae el rail, porque un
+// sensor a medio calentar informa con seguridad y mal - el fallo que esta guarda
+// existe para evitar.
+//
+// HOY NO HACE NADA: todo su cuerpo esta dentro de
+// "#if SLEEP_SKIP_SEN0466 && SEN0466_RUN_WHEN_AWAKE", y SLEEP_SKIP_SEN0466 vale 0
+// (el SEN0466 se lee como los demas desde que va alimentado de forma permanente).
 static uint32_t g_coWarmStartMs = 0;
 static bool g_coWarmRunning = false;
 
 static void sen0466MaintainWarmup() {
 #if SLEEP_SKIP_SEN0466 && SEN0466_RUN_WHEN_AWAKE
-  if (sen0466Ready && g_sen0466Enabled) return;  // already live
+  if (sen0466Ready && g_sen0466Enabled) return;  // ya esta funcionando
 
-  // g_railsUp tracks the 3V3 rail, which is cut for every transmit by design. The
-  // CO sensor only cares about 5V, so with TX_KEEP_5V_RAIL the warm-up clock must
-  // keep running across a transmit - otherwise it resets every 25.5s and never
-  // completes, which is exactly what the first bench run showed.
+  // g_railsUp sigue al rail de 3V3, que se corta en cada envio por diseno. Al sensor
+  // de CO solo le importa el de 5V, asi que con TX_KEEP_5V_RAIL el reloj de
+  // calentamiento tiene que seguir corriendo durante el envio - si no, se reiniciaria
+  // en cada transmision y no terminaria nunca, que es justo lo que mostro la primera
+  // prueba en banco.
 #if !TX_KEEP_5V_RAIL
   if (!g_railsUp) {
     if (g_coWarmRunning) {
@@ -4086,11 +4038,12 @@ static void sen0466MaintainWarmup() {
   Serial.printf("[co] SEN0466 warmed %lus -> %s\n", (unsigned long)(waited / 1000),
                 sen0466Ready ? "LIVE, CO now measured and alarm-capable"
                              : "begin() FAILED - still not measured");
-  if (!sen0466Ready) g_coWarmRunning = false;  // try again
+  if (!sen0466Ready) g_coWarmRunning = false;  // volver a intentarlo
 #endif
 }
 
-// BURST read - the expensive sensors, on their own slow schedule.
+// Lee TODOS los sensores en una pasada, en turnos. SOLO se usa en el modo sin sueno
+// (SLEEP_ENABLED=0, builds de banco); el firmware normal usa runDueSensorJobs().
 static void readFastSensorsOnce() {
   uint32_t t0 = millis();
   char pending[64];
@@ -4102,15 +4055,15 @@ static void readFastSensorsOnce() {
       break;
     }
 
-    // PER-SLOT TIMING. The power model needs the time each sensor is actually
-    // drawing current, and that is not any of the #defines - those are ceilings
-    // and gaps, not what a slot costs in practice. Measured here, in the real
-    // sequence, because a slot's cost depends on what ran before it: the BMV080
-    // follows a rail cycle, the CM1106 a power-cycle and warm-up.
+    // TIEMPO DE CADA TURNO. El modelo de consumo necesita el tiempo que cada sensor
+    // consume de verdad, y eso no es ninguno de los #define - esos son techos y
+    // huecos, no lo que cuesta un turno en la practica. Se mide aqui, en la
+    // secuencia real, porque el coste de un turno depende de lo que corrio antes: el
+    // BMV080 va tras un ciclo de rail, el CM1106 tras un ciclo de alimentacion.
     //
-    // "active" is the slot itself; "recovery" is the enforced quiet time after
-    // it, which is also time the node is awake and the ESP is drawing its ~35mA.
-    // Both belong in the budget, so both are reported.
+    // "active" es el turno en si; "recovery" es la pausa obligada despues, que
+    // tambien es tiempo con el nodo despierto y el ESP consumiendo sus ~35 mA. Las
+    // dos van en el presupuesto, asi que se informan las dos.
     const uint32_t slotT0 = millis();
     runSlot(slot);
     const uint32_t slotMs = millis() - slotT0;
@@ -4118,8 +4071,8 @@ static void readFastSensorsOnce() {
     const uint32_t recT0 = millis();
     quiesceAll();
 
-    // The heater is the one load big enough to stop its neighbours starting, so it
-    // gets a rail cycle rather than merely a gap.
+    // El calefactor es la unica carga lo bastante grande como para impedir que
+    // arranquen los vecinos, asi que se le da un ciclo de rail y no un simple hueco.
     if (slot == SLOT_BME690 && bmeReady && g_bmeEnabled) {
       recoverRailsAfterHeater();
     } else {
@@ -4133,7 +4086,7 @@ static void readFastSensorsOnce() {
   Serial.printf("[t] TOTAL burst=%lums\n", (unsigned long)(millis() - t0));
   Serial.flush();
 
-  // Snapshot health NOW, while the statuses refer to reads that just happened.
+  // Fotografiar la salud AHORA, mientras los estados se refieren a lecturas recien hechas.
   g_lastReadHealth = (uint8_t)(((g_bmeSt == ReadingStatus::Ok ? 1 : 0) << 4) |
                                ((g_bmvSt == ReadingStatus::Ok ? 1 : 0) << 3) |
                                ((g_co2St == ReadingStatus::Ok ? 1 : 0) << 2) |
@@ -4170,6 +4123,11 @@ static void readFastSensorsOnce() {
 // propio chip y sesga su temperatura y su humedad; reaprovecharlos dejaria una de
 // cada cuatro muestras sesgada hacia arriba, y en un detector con el umbral en
 // 50 C un sesgo periodico es peor que pagar 200 ms de lectura aparte.
+//
+// OJO (revision 2026-10-14): eso es lo que se pretende, pero no lo que pasa hoy. En
+// runDueSensorJobs() el trabajo de T/H/P va ANTES que el de VOC, y el turno del VOC
+// (runSlot SLOT_BME690) tambien escribe g_temp/g_hum/g_pres. Asi que en los minutos
+// en que coinciden, el valor que se guarda es el de la lectura con calefactor.
 static void readBmeFastOnly() {
   if (!bmeReady || !g_bmeEnabled) return;
   Reading env = bme690.readFast();
@@ -4324,25 +4282,37 @@ static bool runDueSensorJobs(uint8_t state) {
   return any;
 }
 
+// =============================================================================
+// 12. loop()
+// =============================================================================
+//
+// En funcionamiento normal cada despertar entra aqui despues de setup(), hace UNA
+// vez el trabajo que le toca y se duerme. Ramas, por orden:
+//   - MODO SEGURO: sensores apagados, un paquete de socorro, y reinicio a los 60 s.
+//   - PRE-ALARMA / ALARMA: no duerme; consulta el calendario en cada vuelta.
+//   - SIN SUENO (SLEEP_ENABLED=0, banco): lee y transmite sin parar.
+//   - NORMAL: el trabajo de este despertar, y a dormir hasta el proximo vencimiento.
 void loop() {
-  // A run that lasts this long counts as healthy, so the NVS counter is cleared and
-  // the next boot starts from zero. Without this every reflash would eventually
-  // trip safe mode. 15s comfortably exceeds the time the board has been surviving.
+  // Una vuelta que dura esto cuenta como sana, asi que se borra la cuenta de NVS y el
+  // siguiente arranque empieza de cero. Sin esto cada reflasheo acabaria disparando
+  // el modo seguro. 15 s supera de sobra lo que la placa aguantaba cuando fallaba.
   static bool markedGood = false;
   if (!markedGood && millis() > 15000) {
     markedGood = true;
     bootGuardMarkGood();
   }
 
-  // Safe mode: sensors stay off, but the node does NOT go silent, and it does NOT
-  // stay here forever.
+  // ---- MODO SEGURO ----
+  // Los sensores siguen apagados, pero el nodo NO se queda callado, y NO se queda
+  // aqui para siempre.
   //
-  // It used to do both. g_safeMode is decided once in setup(); loop() cleared the
-  // NVS counter at 15s and then returned here on every pass, never sleeping and
-  // therefore never rebooting to re-evaluate it. A single unlucky boot latched the
-  // node into safe mode until a human power-cycled it - and with the radio never
-  // initialised, the node could not say so. Node C1 sat like that from 2026-09-11,
-  // powered and awake, while it looked from every angle like a dead board.
+  // Antes hacia las dos cosas. g_safeMode se decide una vez en setup(); loop()
+  // borraba la cuenta de NVS a los 15 s y luego volvia aqui en cada vuelta, sin
+  // dormir y por tanto sin reiniciarse nunca para volver a evaluarlo. Un solo
+  // arranque desafortunado enclavaba el nodo en modo seguro hasta que una persona lo
+  // desenchufaba - y con la radio sin iniciar, el nodo no podia decirlo. El nodo C1
+  // estuvo asi desde el 2026-09-11, encendido y despierto, pareciendo desde
+  // cualquier angulo una placa muerta.
   if (g_safeMode) {
     static uint32_t lastSaid = 0;
     if (millis() - lastSaid > 5000) {
@@ -4352,19 +4322,19 @@ void loop() {
       Serial.flush();
     }
 
-    // Announce it over the radio, once. The whole point is that a node in trouble
-    // must still be heard - a distress packet is far more useful than silence, and
-    // it costs one transmit. Sensors stay off; only the LoRa rail comes up.
+    // Avisarlo por radio, una vez. Un nodo con problemas tiene que poder oirse: un
+    // paquete de socorro es mucho mas util que el silencio, y cuesta una sola
+    // transmision. Los sensores siguen apagados; solo se enciende el rail de LoRa.
     static bool distressSent = false;
     if (!distressSent && millis() > 3000) {
       distressSent = true;
       sendSafeModeDistress();
     }
 
-    // Then reboot back into normal operation. The NVS counter was cleared at 15s
-    // above, so the next boot starts clean; if the underlying fault is still there
-    // it will simply trip safe mode again and send another distress packet, which
-    // is a visible heartbeat rather than a silent latch.
+    // Despues, reiniciar en modo normal. La cuenta de NVS se borro arriba a los 15 s,
+    // asi que el siguiente arranque empieza limpio; si la averia sigue ahi, volvera a
+    // entrar en modo seguro y a mandar otro paquete de socorro, que es un latido
+    // visible en vez de un enclavamiento silencioso.
     if (millis() >= SAFE_MODE_RECOVER_MS) {
       Serial.println("[safe mode] recovery window elapsed - restarting into normal mode");
       Serial.flush();
@@ -4376,22 +4346,22 @@ void loop() {
     return;
   }
 
-  // ---- PRE-ALARM / ALARM: no sleeping, every sensor, continuously ----
+  // ---- PRE-ALARMA / ALARMA: sin dormir ----
   //
-  // The node stays awake and keeps reading until the readings settle or Module A
-  // clears it, and transmits on ALARM_TX_MIN_GAP_MS rather than the normal
-  // schedule - a fire is the one case where latency beats airtime. Each transmit's
-  // listen window is also how a clear arrives.
+  // El nodo se queda despierto y sigue leyendo hasta que las lecturas se calmen o
+  // Modulo A lo baje, y transmite con los periodos de su estado (15 min en
+  // pre-alarma, 3 min en alarma). La ventana de escucha de cada envio es tambien por
+  // donde llega una orden de bajarla.
   //
-  // STAT goes out alongside the readings, which it previously did not: STAT is the
-  // packet that carries the alarm state, so without it Module B could see a node
-  // transmitting hard and still have no idea it was in alarm. That is the whole
-  // path from "this node detected a fire" to "somebody is told".
+  // El STAT sale junto a las lecturas: el STAT es el paquete que lleva el estado de
+  // alarma, asi que sin el Modulo B veria a un nodo transmitiendo sin saber que esta
+  // en alarma. Es todo el camino entre "este nodo ha detectado un incendio" y "a
+  // alguien se le avisa".
   if (g_alarmState >= ALARM_PREALARM) {
 #if FORCE_ALARM_STATE
-    // Repeat the warning on a running board: someone reading the serial half an
-    // hour in should not have to have seen the boot banner to know this is a test
-    // build sitting in a fake alarm.
+    // Repetir el aviso con la placa en marcha: quien lea el puerto serie media hora
+    // despues no deberia tener que haber visto el mensaje de arranque para saber que
+    // esto es un build de prueba con una alarma falsa.
     static uint32_t lastForcedWarn = 0;
     if (millis() - lastForcedWarn > 30000) {
       lastForcedWarn = millis();
@@ -4400,8 +4370,9 @@ void loop() {
       Serial.flush();
     }
 #endif
-    // Accumulate before evaluating, so the window is current when updateAlarmState
-    // tests it. Only pre-alarm is timed; full alarm has nothing left to confirm.
+    // Acumular antes de evaluar, para que la ventana este al dia cuando
+    // updateAlarmState la compruebe. Solo se cronometra la pre-alarma; la alarma
+    // completa no tiene nada que confirmar.
     static uint32_t lastAccumMs = 0;
     const uint32_t nowMs = millis();
     if (lastAccumMs != 0 && g_alarmState == ALARM_PREALARM) {
@@ -4409,8 +4380,8 @@ void loop() {
     }
     lastAccumMs = nowMs;
 
-    // Not sleeping, so the 5V rail stays up and the CO sensor can finally warm
-    // up. Becomes live ~3.5 min in, inside the 60-minute confirmation window.
+    // Sin dormir, el rail de 5V se mantiene y el sensor de CO podria calentarse.
+    // (Hoy esta funcion no hace nada; ver su comentario.)
     sen0466MaintainWarmup();
 
     // MISMO PLANIFICADOR QUE EN NORMAL, otros periodos. Antes esta rama leia TODOS
@@ -4433,13 +4404,13 @@ void loop() {
       schedMarkDone(JOB_TX, g_alarmState);
     }
     delay(SAMPLE_GAP_MS);
-    return;  // never falls through to the sleep path while raised
+    return;  // en estado alto nunca se llega al camino del sueno
   }
 
 #if !SLEEP_ENABLED
-  // ---- CONTINUOUS (bench) ----
-  // Sample every pass, transmit on a timer. No sleeping, so the USB port stays up
-  // and the LED stays watchable for as long as you need.
+  // ---- CONTINUO (banco) ----
+  // Leer en cada vuelta y transmitir con un temporizador. Sin dormir, el puerto USB
+  // se mantiene y el LED se puede mirar el tiempo que haga falta.
   sen0466MaintainWarmup();
   readFastSensorsOnce();
   updateAlarmState();
@@ -4456,27 +4427,24 @@ void loop() {
   return;
 #endif
 
-  // ---- NORMAL: one tick of work, then sleep ----
-  // Both counters were advanced in setup(); this decides what this tick owes.
-  // Decided in setup(), before anything was powered - see the idle-tick bail-out.
+  // ---- NORMAL: el trabajo de este despertar, y a dormir ----
+  // Lo que debe este despertar se decidio en setup(), antes de encender nada - ver
+  // la salida temprana de "nada vence".
   bool readDue = g_readDue;
   bool txDue = g_txDue;
 
-  // ALL OF THIS TICK'S WORK RUNS EXACTLY ONCE, however many times loop() is
-  // entered.
+  // TODO EL TRABAJO DE ESTE DESPERTAR SE HACE UNA SOLA VEZ, entre aqui las veces
+  // que se entre en loop().
   //
-  // loop() runs repeatedly whenever the node is awake without sleeping: throughout
-  // the 30s cold-boot window, and continuously in pre-alarm. The due-flags are
-  // decided once in setup() and do not change within a boot, so without this guard
-  // every pass repeats the whole tick. Measured before the fix: 17 sentinel reads
-  // and SIX IDENTICAL TRANSMITS inside a single cold-boot window - wasted radio
-  // energy and duplicate rows arriving at Module B.
+  // loop() se repite mientras el nodo esta despierto sin dormir: durante toda la
+  // ventana de 30 s del arranque en frio, por ejemplo. Lo que vence se decide una
+  // vez en setup() y no cambia dentro de un arranque, asi que sin esta guarda cada
+  // vuelta repetiria todo el trabajo. Medido antes del arreglo: 17 lecturas y SEIS
+  // TRANSMISIONES IDENTICAS dentro de una sola ventana de arranque en frio - energia
+  // de radio tirada y filas duplicadas llegando a Modulo B.
   //
-  // (The repeated transmits predate the sentinel work; splitting the schedules
-  // simply made them visible.)
-  //
-  // A plain static is the right scope: every tick is a fresh boot out of deep
-  // sleep, so this starts false each tick by construction.
+  // Un static normal es el ambito correcto: cada despertar es un arranque nuevo
+  // desde el sueno, asi que esto empieza en false en cada uno por construccion.
   static bool tickWorkDone = false;
   if (!tickWorkDone) {
     tickWorkDone = true;
@@ -4511,11 +4479,11 @@ void loop() {
     }
   }
 
-  if (g_alarmState >= ALARM_PREALARM) return;  // stay awake - handled above
+  if (g_alarmState >= ALARM_PREALARM) return;  // quedarse despierto - lo atiende la rama de arriba
 
   if (coldBootWindowOpen()) {
     delay(SAMPLE_GAP_MS);
-    return;  // still inside the reflash window - do not sleep yet
+    return;  // todavia dentro de la ventana de reflasheo - no dormir aun
   }
 
   // Duerme hasta el PROXIMO VENCIMIENTO menos su preparacion, no una cantidad
@@ -4524,8 +4492,7 @@ void loop() {
   enterDeepSleep(readDue || txDue ? "trabajo hecho" : "nada vencia",
                  schedSleepSeconds(g_alarmState));
 
-  // Only reachable when SLEEP_ENABLED is 0.
+  // Solo se llega aqui con SLEEP_ENABLED a 0.
   delay(SAMPLE_GAP_MS);
 }
-
 

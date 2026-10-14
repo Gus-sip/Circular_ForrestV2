@@ -2,9 +2,13 @@
 
 #include <Arduino.h>
 
-// Ultra-simple plain-text dashboard: no CSS, no layout, just a <pre> block of
-// label/value lines. Polls /data every 3s via fetch() - same JSON endpoint as
-// before, just rendered as text instead of a tile grid.
+// PANEL WEB LOCAL DE MODULO B (por su propio punto de acceso WiFi).
+//
+// Lo mas simple posible: sin CSS ni maquetacion, solo un bloque <pre> con lineas de
+// "etiqueta: valor". Cada 3 s pide /data con fetch() (el JSON que genera
+// handleData() en main.cpp) y lo muestra como texto. El enlace /history descarga el
+// historico de lecturas en CSV.
+// El texto HTML de abajo es parte del programa y no se ha traducido.
 const char DASHBOARD_HTML[] PROGMEM = R"HTML(<!DOCTYPE html>
 <html>
 <head>

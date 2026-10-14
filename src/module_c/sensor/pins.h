@@ -1,141 +1,151 @@
 #pragma once
 
-// CHIP FOREST bench harness pin map. Board isn't fabbed yet - this mirrors the
-// intended PCB wiring on a bench harness, one always-on 3V3 rail, no power gating.
-// Every value below was confirmed empirically this session (I2C scans, working
-// reads), not assumed from a schematic.
+// =============================================================================
+// MAPA DE PINES DE MODULO C (PLACA CHIP FOREST, ESP32-S3)
+// =============================================================================
+//
+// Este archivo empezo describiendo un banco de pruebas sin placa fabricada (un
+// rail de 3V3 siempre encendido, sin transistores de corte). Hoy describe la placa
+// real. Cada valor de abajo se confirmo en la practica (escaneos I2C, lecturas que
+// funcionan), no se dio por bueno a partir de un esquema.
+//
+// Resumen:
+//   GPIO1/2   I2C (BME690, BMV080, SEN0466)      GPIO10  rail 3V3   (LOW  = on)
+//   GPIO3     CM1106 EN                           GPIO11  rail 5V    (HIGH = on)
+//   GPIO4/5   UART radio LoRa                     GPIO13  rail LoRa  (LOW  = on)
+//   GPIO6/7   UART CM1106                         GPIO14  medida de bateria (analogica)
+//   GPIO8/9   UART Calypso                        GPIO15  BMV080 EN  (LOW  = on)
+//   GPIO12    CM1106 RDY (NO TOCAR)               GPIO16  SEN0466 EN (LOW  = on)
+//                                                 GPIO21  LED de estado
 
-// Shared I2C bus: BME690, SEN0466, BMV080 all share this bus.
+// Bus I2C compartido: BME690, SEN0466 y BMV080 cuelgan todos de el.
 #define PIN_I2C_SDA 1
 #define PIN_I2C_SCL 2
 
-// Cubic CM1106SL-NS CO2 sensor: UART2. Confirmed running fine at 3.3V on this board
-// (an earlier unrelated project's CM1106 unit needed 5V - that doesn't apply here).
-#define PIN_CM1106_TX 6  // ESP TX -> sensor RX
-#define PIN_CM1106_RX 7  // ESP RX <- sensor TX
-#define PIN_CM1106_EN 3  // active high, through a 1k series resistor on the board
+// Sensor de CO2 Cubic CM1106SL-NS: UART2. Cuelga del rail de 5 V conmutado.
+#define PIN_CM1106_TX 6  // TX del ESP -> RX del sensor
+#define PIN_CM1106_RX 7  // RX del ESP <- TX del sensor
+#define PIN_CM1106_EN 3  // activo a nivel alto, con una resistencia de 1k en serie en la placa
 
-// Calypso ULP PRO wind sensor: UART1. Confirmed TTL-UART/NMEA variant (not RS485).
-// 2026-09-01: RX moved 9->8 and TX 8->9. The sensor's TX (green) is physically
-// on GPIO8 - a bench sweep across GPIO5/6/8/9 x baud 4800-115200 got a valid
-// $IIMWV sentence ONLY on RX=GPIO8 @ 38400. Also: this unit needs 5V VCC, not
-// 3.3V (the old "confirmed fine at 3.3V" note was wrong for it - it was silent
-// on 3.3V, streamed the moment it moved to 5V).
-#define PIN_CALYPSO_TX 9  // ESP TX -> sensor RX/yellow (unused - sensor streams unprompted)
-#define PIN_CALYPSO_RX 8  // ESP RX <- sensor TX/green
+// Anemometro Calypso ULP PRO: UART1. Variante TTL-UART/NMEA confirmada (no RS485).
+// 2026-09-01: RX paso de 9 a 8 y TX de 8 a 9. El TX del sensor (cable verde) esta
+// fisicamente en GPIO8: un barrido en banco por GPIO5/6/8/9 y velocidades de 4800 a
+// 115200 solo obtuvo una frase $IIMWV valida con RX=GPIO8 a 38400. Ademas esta
+// unidad necesita 5 V, no 3,3 V: a 3,3 V estaba muda y empezo a emitir en cuanto se
+// paso a 5 V.
+#define PIN_CALYPSO_TX 9  // TX del ESP -> RX/amarillo del sensor (no se usa: el sensor emite solo)
+#define PIN_CALYPSO_RX 8  // RX del ESP <- TX/verde del sensor
 
-// GPIO12 goes to the CUBIC CM1106 (the CO2 sensor - Cubic is the manufacturer),
-// which is what the original "future CM1106 RDY line" note meant.
+// GPIO12 va al CM1106 de CUBIC (el sensor de CO2; Cubic es el fabricante), que es
+// lo que queria decir la nota original de "futura linea RDY del CM1106".
 //
-// DO NOT DRIVE IT. It was briefly driven low while hunting the BMV080 enable,
-// before the board was described - the CM1106 works, and driving a line into a
-// working sensor is a good way to stop it working.
+// NO CONDUCIRLO. Se puso a nivel bajo un momento mientras se buscaba la
+// habilitacion del BMV080, antes de que se describiera la placa. El CM1106
+// funciona, y forzar una linea contra un sensor que funciona es una buena manera
+// de dejar de tenerlo.
 #define PIN_CM1106_RDY 12
 
-// BMV080 enable line, added to the board after this file was first written.
+// Habilitacion del BMV080. Tiene que estar a nivel BAJO para que el sensor funcione.
 //
-// Must be driven LOW for the sensor to run. Left undriven the BMV080 opens over
-// I2C perfectly - it answers at its strap address and bmv080_open() succeeds - but
-// refuses to start its laser, returning SDK status 114
-// (E_BMV080_ERROR_OPERATION_MODE_CHANNELS_OUT_OF_SYNC), whose Bosch hint is
-// "check that power provided to BMV080 is sufficient & stable". That hint points
-// at the supply, which is exactly what an unasserted enable line looks like from
-// the sensor's side.
+// Sin conducir, el BMV080 abre perfectamente por I2C - contesta en su direccion y
+// bmv080_open() tiene exito - pero se niega a encender el laser y devuelve el
+// estado 114 del SDK (E_BMV080_ERROR_OPERATION_MODE_CHANNELS_OUT_OF_SYNC), cuya
+// pista de Bosch es "comprobar que la alimentacion del BMV080 es suficiente y
+// estable". Esa pista apunta a la alimentacion, que es exactamente lo que parece
+// una habilitacion sin activar vista desde el sensor.
 //
-// Driven with the rail gates, before any sensor is opened, so it is settled by the
-// time the SDK talks to the part.
-// BMV080 enable. Must be driven LOW for the sensor to run.
-//
-// Moved 12 -> 14 -> 15 as the board was described; 12 turned out to be the CM1106
-// and 14 the supercap sense. Asserted with the rail gates, before any sensor is
-// opened, so it is settled by the time the SDK talks to the part.
+// Paso de 12 a 14 y a 15 conforme se describio la placa; el 12 resulto ser el
+// CM1106 y el 14 la medida de bateria. Se activa junto con los rails, antes de abrir
+// ningun sensor, para que este estable cuando el SDK hable con la pieza.
 #define PIN_BMV080_EN 15
 #define PIN_BMV080_EN_ACTIVE LOW
 
-// Supercapacitor voltage sense - AN ANALOG INPUT, NEVER AN OUTPUT.
+// Medida de la tension de la bateria - ENTRADA ANALOGICA, NUNCA UNA SALIDA.
 //
-// This must never be driven. It briefly was during the BMV080 enable hunt, when
-// GPIO14 was mistaken for a second enable candidate and held LOW as an output -
-// that fights whatever divider feeds it and is capable of damaging it. Kept
-// explicit here so nobody repeats it.
+// No se debe conducir nunca. Durante la busqueda de la habilitacion del BMV080 se
+// confundio GPIO14 con otra candidata y se mantuvo a nivel bajo como salida: eso
+// pelea contra el divisor que la alimenta y puede danarlo. Se deja escrito aqui
+// para que nadie lo repita.
 //
-// GPIO14 is ADC2_CH3 on the ESP32-S3. ADC2 is unavailable while WiFi is active,
-// which is fine for Module C (no WiFi) but would matter on Module B.
+// GPIO14 es ADC2_CH3 en el ESP32-S3. El ADC2 no esta disponible con el WiFi activo,
+// lo que no importa en Modulo C (sin WiFi) pero si en Modulo B.
 //
-// The divider ratio is NOT yet known, so readings are reported as raw millivolts
-// at the pin rather than as a supercap voltage. Confirm the divider before
-// treating the number as a real terminal voltage.
+// El nombre viene de la epoca de los supercondensadores. La conversion de la
+// tension del pin a porcentaje de carga esta en chip_forest_lora_tx.cpp
+// (SUPERCAP_*). OJO: desde el 2026-09-24 la fuente es una bateria de litio, y esa
+// conversion se calculo para supercondensadores.
 #define PIN_SUPERCAP_SENSE 14
 
-// ---------- Module C PCB enable lines (GPIO10/11) ----------
-// The real PCB (as opposed to the bench harness this file originally described)
-// gates BOTH sensor supply rails behind these: each drives a high-side switching
-// transistor that closes the circuit into the 5V rail and the 3V3 rail
-// respectively (confirmed 2026-09-04). LOW = transistor on = rail up, the same
-// convention as Module B's LORA_EN_PIN. They were unused by every other pin
-// above, so nothing on this board contends for them.
+// ---------- Habilitaciones de los rails de sensores (GPIO10/11) ----------
+// La placa real conecta los DOS rails de alimentacion de sensores a traves de
+// estos pines: cada uno maneja un transistor que cierra el circuito hacia el rail
+// de 5 V y el de 3V3 respectivamente (confirmado 2026-09-04).
 //
-// These MUST be asserted at the very top of setup(), before Wire.begin() and
-// every sensor begin(): with them deasserted the sensors have no power at all,
-// so an I2C scan or a UART probe would find nothing and look like dead hardware.
-// The Calypso wind sensor and the CM1106 both need the 5V rail specifically.
+// Hay que activarlos al principio de setup(), antes de Wire.begin() y de cualquier
+// begin() de sensor: desactivados, los sensores no tienen corriente, y un escaneo
+// I2C o una prueba por UART no encontraria nada y pareceria hardware muerto. El
+// Calypso y el CM1106 necesitan precisamente el rail de 5 V.
 //
-// THE TWO GATES HAVE OPPOSITE POLARITY. Established 2026-09-08 by sweeping all
-// four GPIO10/11 combinations and reading the CM1106 (the only connected 5V device)
-// in each:
+// LAS DOS PUERTAS TIENEN POLARIDAD OPUESTA. Se establecio el 2026-09-08 probando
+// las cuatro combinaciones de GPIO10/11 y leyendo el CM1106 (el unico aparato de
+// 5 V conectado) en cada una:
 //
-//     GPIO10=LOW  GPIO11=LOW   -> silent
-//     GPIO10=LOW  GPIO11=HIGH  -> answers      <- 5V rail up
-//     GPIO10=HIGH GPIO11=LOW   -> silent
-//     GPIO10=HIGH GPIO11=HIGH  -> answers      <- 5V rail up
+//     GPIO10=LOW  GPIO11=LOW   -> mudo
+//     GPIO10=LOW  GPIO11=HIGH  -> contesta     <- rail de 5 V encendido
+//     GPIO10=HIGH GPIO11=LOW   -> mudo
+//     GPIO10=HIGH GPIO11=HIGH  -> contesta     <- rail de 5 V encendido
 //
-// So GPIO11 gates the 5V rail and is ACTIVE-HIGH, while GPIO10 (3V3) is active-low
-// as originally assumed - the 3V3 sensors have always worked with it LOW.
+// Asi que GPIO11 maneja el rail de 5 V y es ACTIVO A NIVEL ALTO, mientras que GPIO10
+// (3V3) es activo a nivel bajo, como se supuso al principio: los sensores de 3V3
+// siempre han funcionado con el a LOW.
 //
-// This was masked for days by the floating-ground fault: with no solid reference,
-// driving GPIO11 "LOW" was not a true low at the transistor, so the 5V rail stayed
-// up by accident. Repairing the ground made LOW a real low and switched the 5V rail
-// properly OFF, which read as the CM1106 dying. It had not; it was unpowered.
-//
-// Anything on the 5V rail - CM1106 and the Calypso wind sensor - depends on this.
-#define PIN_PCB_EN_A 10          // 3V3 sensor rail
+// Esto estuvo oculto durante dias por la averia de la masa flotante: sin una
+// referencia firme, poner GPIO11 "a LOW" no era un nivel bajo real en el transistor,
+// y el rail de 5 V seguia encendido por casualidad. Al reparar la masa, LOW paso a
+// ser un nivel bajo de verdad y apago el rail de 5 V como debia, lo que parecio que
+// el CM1106 se moria. No se moria: estaba sin corriente.
+#define PIN_PCB_EN_A 10          // rail de sensores de 3V3
 #define PIN_PCB_EN_A_ACTIVE LOW
-#define PIN_PCB_EN_B 11          // 5V sensor rail
+#define PIN_PCB_EN_B 11          // rail de sensores de 5V
 #define PIN_PCB_EN_B_ACTIVE HIGH
 #define PIN_PCB_EN_SETTLE_MS 300
 
-// Retained so older sketches still compile, but it is only correct for gate A.
-// Prefer the per-gate macros above.
+// Se conserva para que compilen programas antiguos, pero solo es correcto para la
+// puerta A. Mejor usar las macros por puerta de arriba.
 #define PIN_PCB_EN_ACTIVE PIN_PCB_EN_A_ACTIVE
 
-// ---------- RYLR998 LoRa power gate (GPIO13) ----------
-// Third rail gate, separate from the two above: a P-FET on the LoRa supply,
-// LOW = on. Same pin and same convention as Module B's LORA_EN_PIN (Q4 gate,
-// found by pin-scan 2026-08-19) - this PCB reuses that design. Module C's
-// firmware never drove it, which is why the RYLR998 was silent to a bare AT at
-// every baud: the module simply had no power. Confirmed by the user 2026-09-04.
-// The radio's UART is RXD=GPIO5 (ESP TX) / TXD=GPIO4 (ESP RX) - nets are named
-// from the MCU's point of view, so that crossover is correct as written.
+// ---------- Puerta de alimentacion de la radio LoRa RYLR998 (GPIO13) ----------
+// Tercera puerta, aparte de las dos anteriores: un transistor P-FET en la
+// alimentacion de la radio, LOW = encendido. Mismo pin y misma convencion que el
+// LORA_EN_PIN de Modulo B (puerta Q4, encontrada probando pines el 2026-08-19): esta
+// placa reutiliza ese diseno. El firmware de Modulo C no la conducia, y por eso el
+// RYLR998 no contestaba a un AT a ninguna velocidad: no tenia corriente.
+// Confirmado por el usuario el 2026-09-04.
+// El UART de la radio es RXD=GPIO5 (TX del ESP) / TXD=GPIO4 (RX del ESP): las
+// pistas se nombran desde el punto de vista del microcontrolador, asi que el cruce
+// es correcto tal como esta.
 #define PIN_LORA_EN 13
 #define PIN_LORA_EN_ACTIVE LOW
 #define PIN_LORA_EN_SETTLE_MS 200
 
-// ---------- SEN0466 CO sensor power gate (GPIO16) ----------
-// Fourth gate, added to the board 2026-10-14. Until then the SEN0466 was wired
-// straight to the supply, bypassing every rail switch, which is why no rail could
-// ever release its hung I2C bus. With the gate fitted and GPIO16 left undriven the
-// sensor has NO power and drops off the bus entirely ("SEN0466: NOT FOUND", no ACK
-// at 0x74) - that is the symptom of forgetting this pin, not a dead sensor.
+// ---------- Puerta de alimentacion del sensor de CO SEN0466 (GPIO16) ----------
+// Cuarta puerta, anadida a la placa el 2026-10-14. Hasta entonces el SEN0466 iba
+// conectado directamente a la alimentacion, saltandose todos los transistores, y
+// por eso ningun rail podia liberar el bus I2C cuando el sensor lo dejaba colgado.
+// Con la puerta montada y GPIO16 sin conducir, el sensor NO tiene corriente y
+// desaparece del bus ("SEN0466: NOT FOUND", sin ACK en 0x74): ese es el sintoma de
+// olvidar este pin, no de un sensor muerto.
 #define PIN_SEN0466_EN 16
 #define PIN_SEN0466_EN_ACTIVE LOW
 
-// ---------- Status LED (GPIO21) ----------
-// Addressable WS2812 on the module, driven with neopixelWrite(). Confirmed 21 by
-// sweeping every safe GPIO - it is NOT the esp32s3 variant's PIN_NEOPIXEL 48, and
-// not the GPIO38 some boards use.
+// ---------- LED de estado (GPIO21) ----------
+// LED direccionable WS2812 en el modulo. Se confirmo el 21 probando todos los GPIO
+// seguros: NO es el PIN_NEOPIXEL 48 de la variante esp32s3, ni el GPIO38 que usan
+// algunas placas. Se maneja con Adafruit_NeoPixel en orden NEO_RGB (ver ledWrite()
+// en chip_forest_lora_tx.cpp).
 //
-// Never drive it via RGB_BUILTIN: the variant defines that as
-// SOC_GPIO_PIN_COUNT + PIN_NEOPIXEL = 97, a sentinel digitalWrite() special-cases.
-// neopixelWrite() wants a real GPIO, so 97 addresses a pin that does not exist and
-// lights nothing, silently.
+// No usar nunca RGB_BUILTIN: la variante lo define como
+// SOC_GPIO_PIN_COUNT + PIN_NEOPIXEL = 97, un valor especial que digitalWrite()
+// trata aparte. Las funciones de pixel quieren un GPIO real, asi que 97 apunta a un
+// pin que no existe y no enciende nada, sin dar ningun error.
 #define PIN_STATUS_LED 21

@@ -1,5 +1,7 @@
 #include "Sen0466Sensor.h"
 
+// Arranca el sensor en modo PASIVO (solo mide cuando se le pregunta, que es el
+// modo de menor consumo que ofrece) y activa la compensacion por temperatura.
 bool Sen0466Sensor::begin() {
   if (!_sensor.begin()) return false;
   _sensor.changeAcquireMode(_sensor.PASSIVITY);
@@ -8,6 +10,7 @@ bool Sen0466Sensor::begin() {
   return true;
 }
 
+// Pide la concentracion de CO y la temperatura interna.
 Reading Sen0466Sensor::read() {
   Reading r;
   r.status = ReadingStatus::Ok;
@@ -17,15 +20,14 @@ Reading Sen0466Sensor::read() {
   return r;
 }
 
-// HONEST NOTE: this does very little, and that is the truth rather than an
-// oversight. The DFRobot library exposes no sleep or standby command for this
-// part - PASSIVITY is the lowest-power mode it offers, and begin() already selects
-// it, so all this can do is re-assert it in case something changed the mode.
+// NOTA HONESTA: esto hace muy poco, y es la verdad, no un descuido. La libreria
+// de DFRobot no ofrece ningun comando de reposo para esta pieza: PASIVO es el modo
+// de menor consumo que tiene, y begin() ya lo selecciona, asi que lo unico que
+// puede hacer esto es volver a fijarlo por si algo lo cambio.
 //
-// The real saving on the way into hibernation is the 3V3 rail being switched off,
-// which removes the sensor's supply entirely. This call exists so the shutdown is
-// orderly and so "tell the SEN0466 to sleep" is not silently a no-op, which is
-// what it was before.
+// El ahorro de verdad es quitarle la alimentacion (su puerta en GPIO16). Esta
+// funcion existe para que el apagado sea ordenado y para que "dormir el SEN0466"
+// no sea, sin decirlo, una funcion vacia - que es lo que era antes.
 void Sen0466Sensor::sleep() {
   _sensor.changeAcquireMode(_sensor.PASSIVITY);
 }

@@ -2,30 +2,30 @@
 #include <stdlib.h>
 #include <string.h>
 
-// Splits a single comma-separated record into exactly kFieldCount fields.
+// Parte un registro separado por comas en EXACTAMENTE kFieldCount campos.
 //
-// Returns false if there are too few OR TOO MANY - the "too many" case is the one
-// that matters. The previous version stopped scanning once it had 13 fields and
-// then checked `fieldIdx != kFieldCount`, which by construction could never fail.
-// Anything with MORE than 13 fields was silently accepted using only its first 13,
-// so a batch payload "B,2,<record>;<record>;" parsed as a single reading with the
-// header shifted into the data:
+// Devuelve false si hay de menos O DE MAS - y el caso "de mas" es el que importa.
+// La version anterior dejaba de mirar al tener 13 campos y luego comprobaba
+// `fieldIdx != kFieldCount`, que por construccion no podia fallar nunca. Cualquier
+// cosa con MAS de 13 campos se aceptaba en silencio usando solo los 13 primeros, asi
+// que un lote "B,2,<registro>;<registro>;" se interpretaba como una sola lectura con
+// la cabecera metida en los datos:
 //
-//   "B"   -> temp = 0.0      (atof of a letter)
-//   "2"   -> rh   = 2.0      (the batch count)
-//   42.4  -> pres            (actually the temperature)
-//   11.3  -> gas             (actually the humidity)
+//   "B"   -> temp = 0.0      (atof de una letra)
+//   "2"   -> rh   = 2.0      (el numero de registros del lote)
+//   42.4  -> pres            (en realidad la temperatura)
+//   11.3  -> gas             (en realidad la humedad)
 //
-// which is exactly the corruption seen in ThingsBoard - every field displaced by
-// two, with 0.0 and 2.0 appearing from nowhere. The second reading of each batch
-// was discarded entirely.
+// que es exactamente la corrupcion que se vio en ThingsBoard: todos los campos
+// desplazados dos posiciones, con 0.0 y 2.0 apareciendo de la nada. La segunda
+// lectura de cada lote se perdia por completo.
 static bool splitRecord(char *buf, uint8_t len, char **fields, uint8_t want) {
   uint8_t fieldIdx = 0;
   fields[fieldIdx++] = buf;
 
   for (uint8_t i = 0; i < len; i++) {
     if (buf[i] == ',') {
-      if (fieldIdx >= want) return false;  // MORE fields than expected - not this shape
+      if (fieldIdx >= want) return false;  // MAS campos de los esperados: no es esta forma
       buf[i] = '\0';
       fields[fieldIdx++] = buf + i + 1;
     }
@@ -33,6 +33,7 @@ static bool splitRecord(char *buf, uint8_t len, char **fields, uint8_t want) {
   return fieldIdx == want;
 }
 
+// Copia los 13 campos de texto, en su orden fijo, a la estructura de lectura.
 static void fillSnapshot(char **fields, SensorSnapshot &out) {
   out.temp = atof(fields[0]);
   out.hum = atof(fields[1]);
@@ -49,11 +50,12 @@ static void fillSnapshot(char **fields, SensorSnapshot &out) {
   out.windValid = (fields[12][0] == '1');
 }
 
+// Una lectura suelta: exactamente 13 campos.
 bool TelemetryParser::parse(const char *payload, uint8_t len, SensorSnapshot &out) {
   if (len == 0 || len > 200) return false;
 
-  // A batch is a different shape and must not be squeezed into this one - see
-  // parseBatch(). Rejecting it here is what stops the field-shift corruption.
+  // Un lote tiene otra forma y no se debe meter a la fuerza en esta - ver
+  // parseBatch(). Rechazarlo aqui es lo que evita la corrupcion por desplazamiento.
   if (len >= 2 && payload[0] == 'B' && payload[1] == ',') return false;
 
   char buf[241];
@@ -67,6 +69,8 @@ bool TelemetryParser::parse(const char *payload, uint8_t len, SensorSnapshot &ou
   return true;
 }
 
+// Un lote: "B,<cuantas>,<registro>;<registro>;...". Devuelve cuantos registros se
+// pudieron leer, y la antiguedad de cada uno en ageTicksOut.
 uint8_t TelemetryParser::parseBatch(const char *payload, uint8_t len, SensorSnapshot *out,
                                     uint8_t maxOut, uint16_t *ageTicksOut) {
   if (len < 4 || len > 240) return 0;
@@ -76,10 +80,10 @@ uint8_t TelemetryParser::parseBatch(const char *payload, uint8_t len, SensorSnap
   memcpy(buf, payload, len);
   buf[len] = '\0';
 
-  // Skip the "B,<count>," header. The count is deliberately NOT trusted as the
-  // number of records - the records themselves are counted while parsing, so a
-  // truncated or malformed packet yields the records that are actually present
-  // rather than a promised number that isn't.
+  // Saltar la cabecera "B,<cuantas>,". El numero NO se toma como cuantos registros
+  // hay, a proposito: los registros se cuentan mientras se leen, asi que un paquete
+  // cortado o mal formado devuelve los registros que de verdad estan, no un numero
+  // prometido que no se cumple.
   char *p = strchr(buf, ',');
   if (!p) return 0;
   p = strchr(p + 1, ',');
@@ -93,8 +97,9 @@ uint8_t TelemetryParser::parseBatch(const char *payload, uint8_t len, SensorSnap
 
     uint8_t recLen = (uint8_t)strlen(p);
     if (recLen > 0) {
-      // A batch record carries ONE extra trailing field beyond a plain reading:
-      // its age in ticks at the moment of transmit.
+      // Un registro de lote lleva UN campo mas al final que una lectura suelta: su
+      // antiguedad en el momento del envio. Hoy son SEGUNDOS reales medidos por el
+      // nodo (antes eran ticks; el nombre ageTicksOut viene de entonces).
       char *fields[kBatchFieldCount] = {};
       if (splitRecord(p, recLen, fields, kBatchFieldCount)) {
         fillSnapshot(fields, out[n]);

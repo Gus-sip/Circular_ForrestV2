@@ -2,18 +2,24 @@
 
 #include <stdint.h>
 
-// A failed sensor and a sensor that measured zero must be distinguishable at the
-// call site - hence an explicit status rather than a sentinel float.
+// =============================================================================
+// RESULTADO DE UNA LECTURA DE SENSOR
+// =============================================================================
+//
+// Un sensor que FALLA y un sensor que MIDE CERO tienen que poder distinguirse en
+// quien los llama. Por eso cada lectura lleva un estado explicito, en vez de un
+// valor "especial" escondido en el numero.
 enum class ReadingStatus : uint8_t {
-  NotInitialized,  // begin() never succeeded
-  NotReady,        // sensor is fine but has nothing new this cycle
-  Timeout,         // request sent, no (or incomplete) response in time
-  NoAck,           // bus-level failure - device didn't respond at all
-  InvalidFrame,    // response received but failed checksum/format validation
+  NotInitialized,  // begin() nunca tuvo exito
+  NotReady,        // el sensor esta bien pero no tiene nada nuevo en este ciclo
+  Timeout,         // se pidio el dato y no llego respuesta (o llego incompleta) a tiempo
+  NoAck,           // fallo del bus: el dispositivo no contesto en absoluto
+  InvalidFrame,    // llego respuesta pero no paso la comprobacion de checksum/formato
   Ok
 };
 
-// values[]/count meaning is per-sensor; documented in each driver's header.
+// Que significa cada posicion de values[] y cuantas hay (count) depende del
+// sensor; esta documentado en la cabecera de cada driver.
 struct Reading {
   ReadingStatus status = ReadingStatus::NotInitialized;
   float values[4] = {0, 0, 0, 0};

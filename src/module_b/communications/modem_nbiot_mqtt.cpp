@@ -1,3 +1,16 @@
+// =============================================================================
+// MODEM NB-IoT + MQTT (Quectel BC660K-GL) - IMPLEMENTACION
+// =============================================================================
+//
+// Ver la descripcion general en modem_nbiot_mqtt.h. Orden de este archivo:
+//   1. Arranque, tick() y configuracion en marcha.
+//   2. Anillo de lecturas pendientes.
+//   3. Motor de comandos AT: enviar, leer lineas, avisos asincronos (URC).
+//   4. Ordenes recibidas de ThingsBoard (RPC) y su reenvio a los nodos.
+//   5. Maquina de estados: encendido, configuracion, registro, conexion MQTT,
+//      espera, publicacion, respuestas y error/recuperacion.
+//   6. Construccion del JSON de telemetria para la pasarela.
+
 #include "modem_nbiot_mqtt.h"
 
 #include <stdio.h>
@@ -14,16 +27,20 @@ ModemNBIoTMqtt::ModemNBIoTMqtt(HardwareSerial &serial, uint8_t rxPin, uint8_t tx
       _pwrkeyPin(pwrkeyPin),
       _baud(baud) {}
 
+// Pines en su estado de reposo: modem sin alimentacion y canal cerrado.
 void ModemNBIoTMqtt::begin() {
   pinMode(_enPin, OUTPUT);
   digitalWrite(_enPin, NBIOT_DISABLE);
   pinMode(_channelPin, OUTPUT);
   digitalWrite(_channelPin, !NBIOT_CHANNEL_ACTIVE);
   pinMode(_pwrkeyPin, OUTPUT);
-  digitalWrite(_pwrkeyPin, !NBIOT_PWRKEY_ACTIVE);  // idle until POWERING pulses it
+  digitalWrite(_pwrkeyPin, !NBIOT_PWRKEY_ACTIVE);  // en reposo hasta que POWERING lo pulse
   setState(State::OFF);
 }
 
+// Una vuelta de trabajo: leer lo que haya llegado del modem, vigilar el plazo del
+// comando en curso, avanzar el estado actual y vigilar los plazos de las ordenes a
+// los nodos.
 void ModemNBIoTMqtt::tick() {
   pumpSerial();
   checkCommandTimeout();
@@ -44,7 +61,7 @@ void ModemNBIoTMqtt::tick() {
   tickNodeCommandTimeout();
 }
 
-// ---------- Runtime config, settable from Module A ----------
+// ---------- Configuracion en marcha, ajustable desde Modulo A ----------
 
 uint32_t ModemNBIoTMqtt::setBatchSeconds(uint32_t seconds) {
   if (seconds < MQTT_BATCH_SECONDS_MIN) seconds = MQTT_BATCH_SECONDS_MIN;
@@ -62,6 +79,9 @@ uint16_t ModemNBIoTMqtt::setBatchReadings(uint16_t readings) {
   return readings;
 }
 
+// ---------- Anillo de lecturas pendientes de subir ----------
+
+// Mete una lectura al final del anillo. Si esta lleno, se descarta la mas antigua.
 void ModemNBIoTMqtt::enqueue(const SensorSnapshot &snap) {
   if (_ringCount == 0) _oldestPendingMs = snap.lastHeardMs ? snap.lastHeardMs : millis();
 
@@ -77,10 +97,12 @@ void ModemNBIoTMqtt::enqueue(const SensorSnapshot &snap) {
   _ringCount++;
 }
 
+// La lectura numero i contando desde la mas antigua.
 const SensorSnapshot &ModemNBIoTMqtt::ringPeek(uint8_t i) const {
   return _ring[(_ringHead + i) % NBIOT_RING_CAPACITY];
 }
 
+// Quita del anillo las lecturas que acaba de publicar la ultima publicacion.
 void ModemNBIoTMqtt::popSentReadings() {
   uint8_t n = _lastPublishCount;
   if (n > _ringCount) n = _ringCount;
@@ -89,8 +111,11 @@ void ModemNBIoTMqtt::popSentReadings() {
   if (_ringCount > 0) _oldestPendingMs = ringPeek(0).lastHeardMs;
 }
 
-// ---------- The one command path ----------
+// ---------- El unico camino de los comandos AT ----------
 
+// Manda un comando AT y lo deja "en curso". No espera: la respuesta la recogen
+// pumpSerial()/handleLine() en ticks posteriores, y el estado la consulta con
+// consumeOutcome().
 void ModemNBIoTMqtt::issueCommand(const char *cmd, uint32_t timeoutMs, CmdKind kind, const uint8_t *sendPayload,
                                    size_t sendPayloadLen) {
   _cmd = PendingCmd{};
@@ -107,15 +132,15 @@ void ModemNBIoTMqtt::issueCommand(const char *cmd, uint32_t timeoutMs, CmdKind k
   _serial.print("\r\n");
 }
 
+// Lee los bytes que haya mandado el modem y los junta en lineas.
 void ModemNBIoTMqtt::pumpSerial() {
   while (_serial.available()) {
     char c = (char)_serial.read();
 
-    // AT+QMTPUB answers with a bare '>' (no CRLF) asking for the raw JSON
-    // payload - caught here, before line buffering, since it isn't a line
-    // at all. Terminated with Ctrl+Z (0x1A), not a length header the way
-    // AT+QISEND was - see modem_nbiot_mqtt.h for why (sidesteps escaping
-    // JSON's own quotes into the command line entirely).
+    // AT+QMTPUB contesta con un '>' suelto (sin fin de linea) pidiendo el JSON en
+    // crudo; se atrapa aqui, antes de juntar lineas, porque no es una linea. El
+    // contenido se termina con Ctrl+Z (0x1A), no con una cabecera de longitud, lo
+    // que evita tener que escapar las comillas del JSON en la linea de comando.
     if (_cmd.active && _cmd.kind == CmdKind::QMTPUB && _cmd.awaitingPrompt && c == '>') {
       Serial.print("[nbiot-mqtt] payload (");
       Serial.print((unsigned)_cmd.sendPayloadLen);
@@ -131,9 +156,10 @@ void ModemNBIoTMqtt::pumpSerial() {
 
     if (c == '\n') {
       if (_lineOverflowed) {
-        // Say so. The previous code restarted the buffer mid-line and let the
-        // REMAINDER be handled as a complete line, which turned an oversized
-        // message into a plausible-looking fragment and hid the real fault.
+        // Decirlo. El codigo anterior volvia a empezar el buffer a mitad de linea y
+        // trataba el RESTO como una linea completa, lo que convertia un mensaje
+        // demasiado largo en un fragmento con apariencia razonable y escondia el
+        // fallo real.
         Serial.printf("[nbiot-mqtt] URC LONGER THAN %u BYTES - DISCARDED. A command "
                       "may have been lost; raise kLineBufLen\n",
                       (unsigned)kLineBufLen);
@@ -147,33 +173,36 @@ void ModemNBIoTMqtt::pumpSerial() {
       if (_lineLen < sizeof(_lineBuf) - 1) {
         _lineBuf[_lineLen++] = c;
       } else {
-        // Drop the REST of this line rather than starting a new one inside it.
-        // A partial line is never valid input, and pretending otherwise is what
-        // fed JSON tails to the parser.
+        // Descartar el RESTO de esta linea en vez de empezar una nueva dentro de
+        // ella. Una linea a medias nunca es una entrada valida, y fingir lo contrario
+        // es lo que pasaba colas de JSON al interprete.
         _lineOverflowed = true;
       }
     }
   }
 }
 
+// Decide que es cada linea: un aviso espontaneo, o parte de la respuesta del
+// comando en curso (OK, ERROR, el aviso asincrono de un QMT*, o una linea de datos).
 void ModemNBIoTMqtt::handleLine(const char *line, size_t len) {
-  // A DOWNLINK IS UNSOLICITED BY DEFINITION, SO IT IS TAKEN BEFORE ANYTHING ELSE.
+  // UNA ORDEN ENTRANTE ES ESPONTANEA POR DEFINICION, ASI QUE SE ATIENDE ANTES QUE
+  // NADA.
   //
-  // This used to sit below the command dispatch, which meant a +QMTRECV landing
-  // while a command was in flight was only rescued for the four commands whose
-  // real result arrives as an async URC (QMTOPEN/QMTCONN/QMTPUB/QMTSUB). During
-  // any other command - AT+CSQ, AT+QMTCFG, a QMTPUB still waiting for its OK -
-  // it fell through to the bottom of this function and was stored as the
-  // command's informational response line, i.e. silently discarded.
+  // Antes estaba debajo del reparto por comando, asi que un +QMTRECV que llegaba con
+  // un comando en curso solo se salvaba para los cuatro comandos cuyo resultado real
+  // llega como aviso asincrono (QMTOPEN/QMTCONN/QMTPUB/QMTSUB). Con cualquier otro
+  // comando - AT+CSQ, AT+QMTCFG, un QMTPUB que aun esperaba su OK - caia al final de
+  // esta funcion y se guardaba como linea de datos del comando, es decir, se perdia
+  // en silencio.
   //
-  // Observed live on 2026-10-05: a command was delivered the instant we
-  // subscribed (the persistent session working as intended - the broker had it
-  // queued) and was swallowed by the AT+QMTSUB exchange itself. It appeared in
-  // the log as "<- +QMTRECV: ..." rather than "downlink on ...", which is the
-  // tell: the "<- " prefix means a command consumed it.
+  // Visto en vivo el 2026-10-05: una orden se entrego en el instante de suscribirse
+  // (la sesion persistente funcionando como debe - el servidor la tenia en cola) y se
+  // la trago el propio intercambio de AT+QMTSUB. Aparecia en el log como
+  // "<- +QMTRECV: ..." en vez de "downlink on ...", que es la pista: el prefijo "<- "
+  // significa que un comando se la quedo.
   //
-  // The modem interleaves URCs with command responses whenever it feels like
-  // it, so there is no state in which ignoring one is correct.
+  // El modem intercala avisos con respuestas de comandos cuando le parece, asi que no
+  // hay ningun estado en el que ignorar uno sea correcto.
   if (strncmp(line, "+QMTRECV", 8) == 0) {
     handleUrc(line, len);
     return;
@@ -189,7 +218,7 @@ void ModemNBIoTMqtt::handleLine(const char *line, size_t len) {
   if (strcmp(line, "OK") == 0) {
     if (_cmd.kind == CmdKind::QMTOPEN || _cmd.kind == CmdKind::QMTCONN || _cmd.kind == CmdKind::QMTPUB ||
         _cmd.kind == CmdKind::QMTSUB) {
-      _cmd.sawOk = true;  // ack received - the real result is the async URC below
+      _cmd.sawOk = true;  // confirmacion recibida: el resultado real es el aviso asincrono de abajo
       return;
     }
     completeCommand(CmdOutcome::OK);
@@ -207,7 +236,7 @@ void ModemNBIoTMqtt::handleLine(const char *line, size_t len) {
       completeCommand(result == 0 ? CmdOutcome::OK : CmdOutcome::ERR);
       return;
     }
-    handleUrc(line, len);  // interleaved unrelated URC - this command is still pending
+    handleUrc(line, len);  // aviso ajeno intercalado: este comando sigue pendiente
     return;
   }
   if (_cmd.kind == CmdKind::QMTCONN && _cmd.sawOk) {
@@ -238,12 +267,13 @@ void ModemNBIoTMqtt::handleLine(const char *line, size_t len) {
     return;
   }
 
-  // Any other line while a plain command is active is its informational
-  // response body (e.g. "+CPIN: READY" or "+CEREG: 1,5" ahead of OK).
+  // Cualquier otra linea con un comando simple en curso es su linea de datos (p. ej.
+  // "+CPIN: READY" o "+CEREG: 1,5" antes del OK).
   strncpy(_cmd.infoLine, line, sizeof(_cmd.infoLine) - 1);
   _cmd.hasInfoLine = true;
 }
 
+// Avisos espontaneos del modem: sesion MQTT caida, orden entrante, arranque.
 void ModemNBIoTMqtt::handleUrc(const char *line, size_t len) {
   (void)len;
 
@@ -258,9 +288,9 @@ void ModemNBIoTMqtt::handleUrc(const char *line, size_t len) {
     return;
   }
 
-  // Inbound MQTT message - the downlink path from Module A. Arrives as an
-  // unsolicited URC at any time, including in the middle of another command's
-  // response, which is why it's handled here rather than in a command branch.
+  // Mensaje MQTT entrante - el camino de las ordenes desde Modulo A. Llega como aviso
+  // espontaneo en cualquier momento, incluso en mitad de la respuesta de otro
+  // comando, y por eso se atiende aqui y no en una rama de comando.
   NbiotProtocol::MqttMessage inbound;
   if (NbiotProtocol::parseQmtrecv(line, inbound)) {
     _downlinksReceived++;
@@ -277,11 +307,12 @@ void ModemNBIoTMqtt::handleUrc(const char *line, size_t len) {
   Serial.printf("[nbiot-mqtt] urc: %s\n", line);
 }
 
-// ---------- Downlink: Module A -> Module B (-> Module C) ----------
+// ---------- Ordenes entrantes: Modulo A -> Modulo B (-> Modulo C) ----------
 
+// Reparte una orden entrante segun su topic.
 void ModemNBIoTMqtt::handleInboundMqtt(const NbiotProtocol::MqttMessage &msg) {
-  // The gateway's own RPC topic carries the request id in the topic itself:
-  //   v1/devices/me/rpc/request/<id>
+  // El topic de RPC propio de la pasarela lleva el id de la peticion en el propio
+  // topic:  v1/devices/me/rpc/request/<id>
   if (strncmp(msg.topic, "v1/devices/me/rpc/request/", 26) == 0) {
     handleOwnRpc(msg);
     return;
@@ -293,10 +324,11 @@ void ModemNBIoTMqtt::handleInboundMqtt(const NbiotProtocol::MqttMessage &msg) {
   Serial.printf("[nbiot-mqtt] downlink on an unhandled topic, ignored: %s\n", msg.topic);
 }
 
-// RPC aimed at the gateway device itself = reconfigure Module B.
+// RPC dirigido al propio dispositivo pasarela = reconfigurar Modulo B, o la orden
+// configurarModuloC del protocolo A->C.
 //   {"method":"cfg","params":{"UPLINK":300,"BATCH":6}}
 void ModemNBIoTMqtt::handleOwnRpc(const NbiotProtocol::MqttMessage &msg) {
-  const char *idStr = msg.topic + 26;  // past "v1/devices/me/rpc/request/"
+  const char *idStr = msg.topic + 26;  // lo que va detras de "v1/devices/me/rpc/request/"
 
   char method[24] = {0};
   NbiotProtocol::jsonString(msg.payload, "method", method, sizeof(method));
@@ -307,16 +339,16 @@ void ModemNBIoTMqtt::handleOwnRpc(const NbiotProtocol::MqttMessage &msg) {
   char params[160] = {0};
   char reply[224];
 
-  // ---- configurarModuloC: the agreed A -> C protocol ----
+  // ---- configurarModuloC: el protocolo A -> C acordado ----
   //
-  // Module A addresses the GATEWAY and names the target node inside params, rather
-  // than using the gateway-RPC topic. The reply is sent IMMEDIATELY - "enviado" -
-  // and the real outcome follows later as a commandLog record.
+  // Modulo A se dirige a la PASARELA y nombra el nodo de destino dentro de params, en
+  // vez de usar el topic de RPC de pasarela. La respuesta se manda EN EL ACTO -
+  // "enviado" - y el resultado real llega despues como un registro commandLog.
   //
-  // That immediate ack is the point of the design, not a shortcut. A node is
-  // asleep between uplink windows and can be minutes from hearing anything; an RPC
-  // held open that long times out in ThingsBoard and reports a failure for a
-  // command that was in fact delivered and applied.
+  // Esa respuesta inmediata es la idea del diseno, no un atajo. Un nodo duerme entre
+  // ventanas de subida y puede estar a minutos de oir nada; un RPC abierto tanto
+  // tiempo expira en ThingsBoard e informa de un fallo para una orden que en realidad
+  // se entrego y se aplico.
   if (strcmp(method, "configurarModuloC") == 0) {
     handleConfigurarModuloC(msg, idStr);
     return;
@@ -341,12 +373,13 @@ void ModemNBIoTMqtt::handleOwnRpc(const NbiotProtocol::MqttMessage &msg) {
     return;
   }
 
-  // Echo back the post-clamp values so a clamped request is visible.
+  // Devolver los valores tras el recorte, para que un recorte sea visible.
   snprintf(reply, sizeof(reply), "{\"applied\":{%s}}", applied);
   queueRpcReply(topic, reply);
 }
 
-// Applies {"UPLINK":300,"BATCH":6} to this module's own runtime config.
+// Aplica {"UPLINK":300,"BATCH":6} a la configuracion en marcha de este modulo:
+// UPLINK = segundos entre subidas, BATCH = lecturas por lote.
 bool ModemNBIoTMqtt::applyOwnConfig(const char *params, char *applied, size_t cap) {
   const char *cur = params;
   char key[24], value[24];
@@ -374,8 +407,9 @@ bool ModemNBIoTMqtt::applyOwnConfig(const char *params, char *applied, size_t ca
   return any;
 }
 
-// RPC aimed at a child device = relay to that node over LoRa.
+// RPC dirigido a un dispositivo hijo = reenviarlo a ese nodo por LoRa.
 //   {"device":"NodoC-1","data":{"id":42,"method":"cfg","params":{"INTERVAL":300}}}
+// Se guarda en la cola; main.cpp lo entrega en la siguiente ventana del nodo.
 void ModemNBIoTMqtt::handleGatewayRpc(const NbiotProtocol::MqttMessage &msg) {
   char device[24] = {0};
   char data[224] = {0};
@@ -398,16 +432,16 @@ void ModemNBIoTMqtt::handleGatewayRpc(const NbiotProtocol::MqttMessage &msg) {
   char method[24] = {0};
   NbiotProtocol::jsonString(data, "method", method, sizeof(method));
 
-  // BOTH method names are accepted on BOTH topics.
+  // Se aceptan LOS DOS nombres de metodo en LOS DOS topics.
   //
-  // Which topic a command arrives on depends entirely on which ThingsBoard device
-  // Module A addresses: the gateway CON-1 lands on v1/devices/me/rpc/request/<id>,
-  // a child device lands here on v1/gateway/rpc. The protocol document specifies
-  // configurarModuloC and describes the gateway path, but a dashboard built per
-  // node will naturally address the node - and rejecting it for the sake of a name
-  // would be a refusal on a technicality, when the intent is unambiguous.
+  // Por que topic llega una orden depende solo de a que dispositivo de ThingsBoard
+  // se dirija Modulo A: la pasarela CON-1 llega a v1/devices/me/rpc/request/<id>, un
+  // dispositivo hijo llega aqui por v1/gateway/rpc. El documento del protocolo
+  // especifica configurarModuloC y describe el camino de la pasarela, pero un panel
+  // construido por nodo se dirigira naturalmente al nodo - y rechazarlo por el nombre
+  // seria negarse por un tecnicismo cuando la intencion no tiene dudas.
   //
-  // Both carry the same thing: a target node and a set of keys to apply.
+  // Los dos llevan lo mismo: un nodo de destino y unas claves que aplicar.
   if (strcmp(method, "cfg") != 0 && strcmp(method, "configurarModuloC") != 0) {
     replyErr("unknown method, expected 'configurarModuloC' or 'cfg'");
     return;
@@ -425,10 +459,10 @@ void ModemNBIoTMqtt::handleGatewayRpc(const NbiotProtocol::MqttMessage &msg) {
     return;
   }
 
-  // Translate the params object into the "CFG,K=V,..." string Module C's
-  // applyConfigCommand() already parses. Keys aren't validated here - Module C
-  // ignores what it doesn't recognize and ACKs only what it applied, so the
-  // node stays the authority on its own config vocabulary.
+  // Traducir el objeto params a la cadena "CFG,K=V,..." que ya entiende
+  // applyConfigCommand() de Modulo C. Las claves no se validan aqui: Modulo C ignora
+  // lo que no reconoce y solo confirma lo que aplico, asi que el nodo sigue siendo
+  // la autoridad sobre su propio vocabulario de configuracion.
   const char *cur = params;
   char key[24], value[24];
   size_t pos = 0;
@@ -462,6 +496,7 @@ void ModemNBIoTMqtt::handleGatewayRpc(const NbiotProtocol::MqttMessage &msg) {
                 nc.cfg);
 }
 
+// main.cpp acaba de mandar la orden de este nodo por LoRa: queda esperando su ACK.
 void ModemNBIoTMqtt::onNodeCommandDelivered(const char *device) {
   const int i = deliverableIndexFor(device);
   if (i < 0) return;
@@ -477,6 +512,8 @@ void ModemNBIoTMqtt::onNodeCommandDelivered(const char *device) {
   }
 }
 
+// El nodo contesto NACK: entendio la orden pero no aplico nada. Se informa como
+// "error" y se libera el hueco.
 void ModemNBIoTMqtt::onNodeCommandNack(const char *device, const char *reason) {
   int i = awaitingAckIndexFor(device);
   if (i < 0) i = undeliveredIndexFor(device);
@@ -495,24 +532,24 @@ void ModemNBIoTMqtt::onNodeCommandNack(const char *device, const char *reason) {
   nc = NodeCommand{};
 }
 
+// El nodo contesto ACK: se informa de lo que aplico y se libera el hueco.
 void ModemNBIoTMqtt::onNodeCommandAck(const char *device, const char *ackPayload) {
-  // Match the ACK to the command awaiting one FROM THAT NODE. With several
-  // commands in flight to different nodes, clearing the wrong one would report
-  // the wrong requestId as confirmed - a command would appear to have succeeded
-  // while another silently timed out.
+  // Emparejar el ACK con la orden que lo espera DE ESE NODO. Con varias ordenes en
+  // curso a nodos distintos, liberar la equivocada daria por confirmado el requestId
+  // equivocado: una orden pareceria haber funcionado mientras otra expiraba en
+  // silencio.
   int i = awaitingAckIndexFor(device);
-  if (i < 0) i = undeliveredIndexFor(device);  // ACK beat our delivery bookkeeping
+  if (i < 0) i = undeliveredIndexFor(device);  // el ACK llego antes de apuntar la entrega
   if (i < 0) return;
   NodeCommand &_nodeCmd = _nodeCmds[i];
 
-  // "ACK,INTERVAL=300,BMV080=0" -> report the applied (post-clamp) values back
-  // as the RPC result, so a clamp on the node is visible in ThingsBoard.
+  // "ACK,INTERVAL=300,BMV080=0" -> devolver los valores aplicados (tras el recorte)
+  // como resultado del RPC, para que un recorte en el nodo se vea en ThingsBoard.
   const char *body = strncmp(ackPayload, "ACK,", 4) == 0 ? ackPayload + 4 : ackPayload;
   if (_nodeCmd.viaCommandLog) {
-    // Carries WHAT was applied, not just that something was. The node ACKs only
-    // the keys it actually took, so this is the difference between Module A
-    // believing a threshold changed and being able to show the value the node is
-    // really using.
+    // Lleva QUE se aplico, no solo que se aplico algo. El nodo solo confirma las
+    // claves que de verdad tomo, asi que es la diferencia entre que Modulo A crea que
+    // un umbral cambio y poder mostrar el valor que el nodo usa realmente.
     publishCommandLogApplied(_nodeCmd.rpcId, "confirmado", body, _nodeCmd.device);
   } else {
     char reply[224];
@@ -525,16 +562,18 @@ void ModemNBIoTMqtt::onNodeCommandAck(const char *device, const char *ackPayload
   _nodeCmd = NodeCommand{};
 }
 
+// Ordenes que llevan demasiado tiempo en cola (DOWNLINK_QUEUE_TIMEOUT_MS) sin
+// confirmacion: se informan como timeout y se liberan.
 void ModemNBIoTMqtt::tickNodeCommandTimeout() {
-  // Every slot is timed independently: one node being unreachable must not keep
-  // another node's command alive past its own deadline.
+  // Cada hueco se cronometra por separado: un nodo inalcanzable no debe mantener viva
+  // la orden de otro nodo mas alla de su propio plazo.
   for (uint8_t qi = 0; qi < kNodeCmdQueue; qi++) {
     NodeCommand &_nodeCmd = _nodeCmds[qi];
     if (!_nodeCmd.pending) continue;
     if (millis() - _nodeCmd.queuedMs < DOWNLINK_QUEUE_TIMEOUT_MS) continue;
 
-  // Built once, above the branch, because the serial line at the end of this
-  // loop reports it as well - whichever protocol the command arrived on.
+  // Se construye una vez, antes de la bifurcacion, porque la linea de log del final
+  // tambien lo usa - llegue la orden por el protocolo que llegue.
   char why[72];
   if (_nodeCmd.awaitingAck) {
     snprintf(why, sizeof(why), "delivered %u time(s), no ACK", (unsigned)_nodeCmd.attempts);
@@ -543,20 +582,19 @@ void ModemNBIoTMqtt::tickNodeCommandTimeout() {
   }
 
   if (_nodeCmd.viaCommandLog) {
-    // SAY WHICH HALF FAILED. This used to publish a bare "timeout", throwing away
-    // the one fact the operator needs: whether the command was ever put on the
-    // air. Module B already knows - awaitingAck means the node uplinked, the
-    // downlink went out in its listen window, and it then said nothing; without
-    // it, the node never transmitted at all.
+    // DECIR QUE MITAD FALLO. Antes se publicaba un "timeout" a secas, tirando el unico
+    // dato que necesita el operador: si la orden llego a salir al aire. Modulo B ya lo
+    // sabe - awaitingAck significa que el nodo hizo su subida, la orden salio en su
+    // ventana de escucha y luego no dijo nada; sin el, el nodo no transmitio nunca.
     //
-    // The two call for opposite responses. "Delivered, no ACK" is a node that is
-    // alive and refusing or crashing - look at the node. "Never delivered" is a
-    // node that is not transmitting - look at the radio, the power or the siting.
-    // A single word for both sends you to the wrong half, and this is a tower in
-    // a forest, not a board on a desk.
+    // Piden respuestas opuestas. "Entregada, sin ACK" es un nodo vivo que rechaza o
+    // se cuelga - mirar el nodo. "Nunca entregada" es un nodo que no transmite -
+    // mirar la radio, la alimentacion o la ubicacion. Una sola palabra para las dos
+    // te manda a la mitad equivocada, y esto es una torre en un bosque, no una placa
+    // en una mesa.
     //
-    // Carried in `detail`, which the protocol document leaves free, so the four
-    // documented status values are unchanged.
+    // Va en `detail`, que el documento del protocolo deja libre, asi que los cuatro
+    // valores de status documentados no cambian.
     publishCommandLogApplied(_nodeCmd.rpcId, "timeout", why, _nodeCmd.device);
   } else {
     char reply[224];
@@ -570,28 +608,31 @@ void ModemNBIoTMqtt::tickNodeCommandTimeout() {
   }
 }
 
-static size_t appendI64(char *out, int64_t v);  // defined below, near the payload builder
+static size_t appendI64(char *out, int64_t v);  // definida mas abajo, junto al constructor del JSON
 
-// The outcome half of the agreed protocol. The RPC itself was answered "enviado"
-// when it arrived; this is what actually says whether the node did the thing.
+// ---- Resultado de una orden (commandLog / seguimientoCmd) ----
 //
-// Published as TELEMETRY, not as an RPC response, because the RPC was closed
-// minutes ago - a node can be a whole uplink window away from hearing a command,
-// and holding an RPC open that long is what made commands look like failures when
-// they were merely slow.
-// Turns the node's ACK body - "temp_pre_off=48,temp_pre_on=50" - into JSON
-// fields: ,"temp_pre_off":48,"temp_pre_on":50
+// La mitad del resultado del protocolo acordado. El RPC en si se contesto "enviado"
+// al llegar; esto es lo que dice de verdad si el nodo hizo lo que se le pidio.
 //
-// WHY AS SEPARATE KEYS AND NOT JUST THE STRING: Module A needs to know the
-// threshold the node is now using, and `detail` carries that only as text it
-// would have to parse. As telemetry keys each one is a value a dashboard can
-// bind to, plot and compare against what it asked for. The names are the node's
-// own vocabulary - magnitude plus suffix, exactly the spreadsheet's names - so
-// nothing new is invented here.
+// Se publica como TELEMETRIA, no como respuesta RPC, porque el RPC se cerro hace
+// minutos - un nodo puede estar a toda una ventana de subida de oir una orden, y
+// mantener un RPC abierto tanto tiempo es lo que hacia parecer fallos a ordenes que
+// solo eran lentas.
 //
-// Numbers go out bare so they are stored as numbers; anything that does not
-// parse cleanly as one is quoted instead of being emitted as broken JSON. These
-// pairs come off the radio, so they are not assumed to be well formed.
+// appendKvAsJson: convierte el cuerpo del ACK del nodo - "temp_pre_off=48,temp_pre_on=50"
+// - en campos JSON:  ,"temp_pre_off":48,"temp_pre_on":50
+//
+// POR QUE COMO CLAVES SUELTAS Y NO SOLO EL TEXTO: Modulo A necesita saber el umbral
+// que el nodo usa ahora, y `detail` solo lo lleva como texto que habria que
+// interpretar. Como claves de telemetria cada uno es un valor que un panel puede
+// enlazar, graficar y comparar con lo que pidio. Los nombres son el vocabulario del
+// propio nodo - magnitud mas sufijo, los nombres de la hoja de umbrales - asi que aqui
+// no se inventa nada.
+//
+// Los numeros salen sin comillas para que se guarden como numeros; lo que no se pueda
+// leer limpiamente como numero va entre comillas en vez de emitir JSON roto. Estas
+// parejas llegan por radio, asi que no se dan por bien formadas.
 static size_t appendKvAsJson(char *out, size_t cap, const char *kv) {
   size_t pos = 0;
   const char *p = kv;
@@ -606,7 +647,7 @@ static size_t appendKvAsJson(char *out, size_t cap, const char *kv) {
       const size_t klen = (size_t)(eq - p);
       const size_t vlen = (size_t)(end - eq - 1);
 
-      // Numeric, by inspection rather than by trusting strtod's tail.
+      // Es numerico? Se mira caracter a caracter en vez de fiarse del resto de strtod.
       bool numeric = vlen > 0;
       bool dot = false;
       for (size_t i = 0; i < vlen && numeric; i++) {
@@ -638,6 +679,8 @@ void ModemNBIoTMqtt::publishCommandLog(long requestId, const char *status) {
   publishCommandLogApplied(requestId, status, nullptr, nullptr);
 }
 
+// Publica el resultado de una orden en tres sitios: la telemetria de la pasarela, la
+// telemetria del nodo y los atributos del nodo.
 void ModemNBIoTMqtt::publishCommandLogApplied(long requestId, const char *status,
                                               const char *detail, const char *device) {
   // EL OBJETO SE CONSTRUYE UNA VEZ Y LOS TRES ENVIOS SE COMPONEN DE EL.
@@ -740,11 +783,15 @@ void ModemNBIoTMqtt::publishCommandLogApplied(long requestId, const char *status
                 (device && *device) ? " (gateway + nodo + atributos)" : "");
 }
 
-// {"method":"configurarModuloC",
-//  "params":{"moduloC_id":"NodoC-1","action":"frecuencia","value":"freq_alarma"}}
+// ---- configurarModuloC: el protocolo A -> C ----
+//   {"method":"configurarModuloC",
+//    "params":{"moduloC_id":"NodoC-1","action":"frecuencia","value":"freq_alarma"}}
 //
-// Answers the RPC immediately with "enviado", then queues the command for the
-// node's next uplink window. The outcome arrives later as commandLog.
+// Contesta el RPC en el acto con "enviado" y deja la orden en cola para la siguiente
+// ventana de subida del nodo. El resultado llega despues como commandLog.
+//
+// Acciones: umbrales_de1variable (alias umbral), NxT_lectura, NxT_enviodatos,
+// NxTglobalenviodatos (a todos los nodos), y frecuencia (antigua, aun aceptada).
 void ModemNBIoTMqtt::handleConfigurarModuloC(const NbiotProtocol::MqttMessage &msg,
                                              const char *idStr) {
   const long requestId = strtol(idStr, nullptr, 10);
@@ -759,8 +806,8 @@ void ModemNBIoTMqtt::handleConfigurarModuloC(const NbiotProtocol::MqttMessage &m
   char reply[224];
 
   auto refuse = [&](const char *err) {
-    // A refusal is answered on the RPC itself, not as commandLog: nothing was
-    // ever queued, so there is no outcome to report later.
+    // Un rechazo se contesta en el propio RPC, no como commandLog: no se llego a
+    // encolar nada, asi que no habra resultado que informar despues.
     snprintf(reply, sizeof(reply), "{\"status\":\"error\",\"error\":\"%s\"}", err);
     queueRpcReply(respTopic, reply);
     Serial.printf("[nbiot-mqtt] configurarModuloC %ld rechazado: %s\n", requestId, err);
@@ -790,20 +837,19 @@ void ModemNBIoTMqtt::handleConfigurarModuloC(const NbiotProtocol::MqttMessage &m
   const uint8_t nodeCount = (uint8_t)(sizeof(NBIOT_NODE_NAMES) / sizeof(NBIOT_NODE_NAMES[0]));
   const uint8_t slotsNeeded = isGlobal ? nodeCount : 1;
 
-  // Los huecos que este comando puede REUTILIZAR por sustituir a otro igual no
-  // cuentan como ocupados: si no, seis ordenes repetidas seguirian llenando la
-  // cola aunque solo una vaya a sobrevivir.
-  // La comprobacion de huecos NO puede ir aqui: necesita saber QUE ajuste toca el
-  // comando, y eso sale del CFG, que todavia no se ha construido. Va justo antes
-  // de encolar.
+  // La comprobacion de huecos libres NO puede ir aqui: necesita saber QUE ajuste
+  // toca el comando, y eso sale del CFG, que todavia no se ha construido. Va justo
+  // antes de encolar.
 
-  // ---- action -> the CFG vocabulary Module C already parses ----
+  // ---- accion -> el vocabulario CFG que ya entiende Modulo C ----
   char cfg[128] = {0};
   if (strcmp(action, "frecuencia") == 0) {
-    // The three named rates. THESE SECONDS ARE A CHOICE, NOT FROM THE SPEC, which
-    // names the presets without giving values - they are the sane mapping onto
-    // CFG,INTERVAL and are the obvious thing to revise once the real numbers are
-    // agreed. freq_alarma is the LORA_TX_PERIOD_MIN_MS floor.
+    // Los tres ritmos con nombre. ESTOS SEGUNDOS SON UNA ELECCION, NO DE LA
+    // ESPECIFICACION, que nombra los ajustes sin dar valores: son la traduccion
+    // razonable a CFG,INTERVAL, y lo evidente es revisarlos cuando se acuerden los
+    // numeros reales. freq_alarma es el suelo LORA_TX_PERIOD_MIN_MS.
+    // (OJO: CFG,INTERVAL ajusta un periodo heredado; en el nodo actual el envio lo
+    // marca el calendario, ver LORA_TX_PERIOD_MS en el firmware de Modulo C.)
     unsigned secs = 0;
     if (strcmp(value, "freq_normal") == 0) secs = 300;
     else if (strcmp(value, "freq_prealarma") == 0) secs = 60;
@@ -815,22 +861,22 @@ void ModemNBIoTMqtt::handleConfigurarModuloC(const NbiotProtocol::MqttMessage &m
     snprintf(cfg, sizeof(cfg), "CFG,INTERVAL=%u", secs);
 
   } else if (strcmp(action, "umbral") == 0 || strcmp(action, "umbrales_de1variable") == 0) {
-    // THE MAGNITUDE AND THE THRESHOLD ARRIVE IN SEPARATE FIELDS, and have to be
-    // recombined before the node will recognise anything. Observed live on
-    // 2026-10-05, and not what the protocol document shows:
+    // LA MAGNITUD Y EL UMBRAL LLEGAN EN CAMPOS SEPARADOS, y hay que juntarlos antes
+    // de que el nodo reconozca nada. Visto en vivo el 2026-10-05, y no es lo que
+    // muestra el documento del protocolo:
     //
     //   {"action":"umbrales_de1variable","variable":"temp",
     //    "umbral_pre_off":48,"umbral_pre_on":50,
     //    "umbral_alarm_off":55,"umbral_alarm_on":60}
     //
-    // The node addresses a threshold as <magnitude><suffix> - temp_pre_on - so a
-    // key of "umbral_pre_on" matches no rule and is silently ignored. Every
-    // threshold in the command would be dropped and the node would NACK the lot,
-    // which reads like a firmware fault and is really a naming mismatch.
+    // El nodo nombra un umbral como <magnitud><sufijo> - temp_pre_on - asi que una
+    // clave "umbral_pre_on" no coincide con ninguna regla y se ignora en silencio.
+    // Todos los umbrales de la orden se perderian y el nodo los rechazaria con NACK,
+    // lo que parece un fallo de firmware y es en realidad un desacuerdo de nombres.
     //
-    // So "umbral_" is rewritten to "<variable>_". A key that already carries its
-    // magnitude (temp_pre_on, as the dashboard's own table uses) passes through
-    // untouched - both forms work.
+    // Asi que "umbral_" se reescribe como "<variable>_". Una clave que ya lleva su
+    // magnitud (temp_pre_on, como en la propia tabla del panel) pasa sin tocar - las
+    // dos formas funcionan.
     char variable[24] = {0};
     NbiotProtocol::jsonString(params, "variable", variable, sizeof(variable));
 
@@ -841,7 +887,7 @@ void ModemNBIoTMqtt::handleConfigurarModuloC(const NbiotProtocol::MqttMessage &m
     while (NbiotProtocol::jsonNextPair(cur, k, sizeof(k), v, sizeof(v))) {
       if (strcmp(k, "moduloC_id") == 0 || strcmp(k, "action") == 0 ||
           strcmp(k, "variable") == 0 || strcmp(k, "value") == 0) {
-        continue;  // routing, not a threshold
+        continue;  // son de enrutado, no umbrales
       }
 
       int n;
@@ -859,9 +905,10 @@ void ModemNBIoTMqtt::handleConfigurarModuloC(const NbiotProtocol::MqttMessage &m
       refuse("umbral with no threshold keys");
       return;
     }
+    // (strncmp con longitud 0 siempre da 0: la condicion equivale a !variable[0].)
     if (strncmp(params, "", 0) == 0 && !variable[0]) {
-      // Not fatal - keys may already carry their magnitude - but worth saying,
-      // because if they do not, the node will refuse every one of them.
+      // No es fatal - las claves pueden llevar ya su magnitud - pero conviene
+      // decirlo, porque si no la llevan el nodo las rechazara todas.
       Serial.println("[nbiot-mqtt] umbral without a \"variable\" field - keys must "
                      "already name their magnitude");
     }
@@ -869,7 +916,7 @@ void ModemNBIoTMqtt::handleConfigurarModuloC(const NbiotProtocol::MqttMessage &m
   } else if (strcmp(action, "NxT_lectura") == 0) {
     // "Cada sensor se lee cada N x su periodo minimo de lectura. N >= 1."
     // La N viaja en crudo: multiplica el NODO, que es quien conoce sus periodos
-    // base y quien puede validar y ACKear los ticks que de verdad aplico.
+    // base y quien puede validar y confirmar lo que de verdad aplico.
     if (!value[0]) {
       refuse("NxT_lectura sin value");
       return;
@@ -966,9 +1013,9 @@ void ModemNBIoTMqtt::handleConfigurarModuloC(const NbiotProtocol::MqttMessage &m
     nc.pending = true;
   }
 
-  // ANSWER NOW. The node may be minutes from its next uplink window, and an RPC
-  // held open that long times out in ThingsBoard and reports a failure for a
-  // command that was delivered and applied.
+  // CONTESTAR YA. El nodo puede estar a minutos de su siguiente ventana de subida, y
+  // un RPC abierto tanto tiempo expira en ThingsBoard e informa de un fallo para una
+  // orden que se entrego y se aplico.
   snprintf(reply, sizeof(reply), "{\"status\":\"enviado\",\"requestId\":%ld}", requestId);
   queueRpcReply(respTopic, reply);
 
@@ -982,10 +1029,11 @@ void ModemNBIoTMqtt::handleConfigurarModuloC(const NbiotProtocol::MqttMessage &m
   }
 }
 
+// Pone un mensaje en la cola de publicaciones (respuestas RPC y commandLog).
 void ModemNBIoTMqtt::queueRpcReply(const char *topic, const char *payload) {
   if (_rpcReplyCount >= kRpcReplyQueue) {
-    // Full. The OLDEST goes, not the newest: a newer record supersedes an older
-    // one for the same command, and the newest is the one still worth sending.
+    // Llena. Se va la MAS ANTIGUA, no la mas nueva: un registro nuevo sustituye a uno
+    // viejo de la misma orden, y el mas nuevo es el que aun merece la pena mandar.
     Serial.println("[nbiot-mqtt] rpc reply queue full - dropping the oldest");
     popRpcReply();
   }
@@ -998,6 +1046,8 @@ void ModemNBIoTMqtt::queueRpcReply(const char *topic, const char *payload) {
   _rpcReplyCount++;
 }
 
+// ---- Resultado del comando AT en curso ----
+
 void ModemNBIoTMqtt::completeCommand(CmdOutcome outcome) {
   _cmd.active = false;
   _cmd.outcome = outcome;
@@ -1007,19 +1057,20 @@ void ModemNBIoTMqtt::checkCommandTimeout() {
   if (_cmd.active && millis() - _cmd.sentAtMs > _cmd.timeoutMs) completeCommand(CmdOutcome::TIMEOUT);
 }
 
+// Devuelve el resultado del ultimo comando una sola vez (y lo borra).
 ModemNBIoTMqtt::CmdOutcome ModemNBIoTMqtt::consumeOutcome() {
   CmdOutcome o = _cmd.outcome;
   _cmd.outcome = CmdOutcome::NONE;
   return o;
 }
 
-// ---------- State machine ----------
+// ---------- Maquina de estados ----------
 
 void ModemNBIoTMqtt::setState(State s) {
-  // Trace every transition. The OLED shows only the CURRENT state name, so a
-  // fast POWERING -> WAIT_AT -> ERROR -> OFF loop looks like a single stuck
-  // state on the screen - which is exactly how "NBIoT: WAIT_AT" got read as
-  // "connected to the NB-IoT band". On serial the cycling is unmistakable.
+  // Apuntar cada transicion. La OLED solo muestra el nombre del estado ACTUAL, asi que
+  // un bucle rapido POWERING -> WAIT_AT -> ERROR -> OFF parece en pantalla un unico
+  // estado atascado - que es exactamente como "NBIoT: WAIT_AT" se leyo como
+  // "conectado a la banda NB-IoT". Por el puerto serie el ciclo no tiene duda.
   if (_state != s) {
     Serial.printf("[nbiot-mqtt] state %s -> %s\n", stateName(), stateNameOf(s));
     Serial.flush();
@@ -1034,7 +1085,7 @@ void ModemNBIoTMqtt::setState(State s) {
       _lastCeregPollMs = 0;
       break;
     case State::IDLE:
-      _lastCsqPollMs = 0;  // poll once shortly after entering IDLE
+      _lastCsqPollMs = 0;  // una consulta poco despues de entrar en IDLE
       break;
     case State::PUBLISHING:
       _publishInFlight = false;
@@ -1047,9 +1098,9 @@ void ModemNBIoTMqtt::setState(State s) {
   }
 }
 
-// Stop driving the modem UART entirely. Ending the peripheral is not enough on
-// its own - the pin must also be taken out of output mode, or it keeps its last
-// level and continues to feed the unpowered module.
+// Dejar de conducir el UART del modem por completo. Cerrar el periferico no basta:
+// el pin tambien tiene que dejar de ser salida, o conserva su ultimo nivel y sigue
+// alimentando al modulo sin corriente.
 void ModemNBIoTMqtt::releaseUart() {
   if (_uartStarted) {
     _serial.end();
@@ -1063,14 +1114,15 @@ void ModemNBIoTMqtt::startUart() {
   if (_uartStarted) return;
   _serial.begin(_baud, SERIAL_8N1, _rxPin, _txPin);
   _uartStarted = true;
-  while (_serial.available()) _serial.read();  // drop power-up line noise
+  while (_serial.available()) _serial.read();  // tirar el ruido del encendido
 }
 
+// Dar alimentacion al modem.
 void ModemNBIoTMqtt::enterPowering() {
-  // UART DOWN FIRST, and the TX line released, before power is touched. See the
-  // block comment above: a driven TX pin back-powers the module while VIN is off
-  // and prevents a genuine cold start. The UART is reopened in tickPowering()
-  // once the rail has come up and settled.
+  // PRIMERO EL UART ABAJO, con la linea TX liberada, antes de tocar la alimentacion:
+  // un pin TX conducido alimenta el modulo mientras VIN esta apagado e impide un
+  // arranque en frio de verdad. El UART se vuelve a abrir en tickPowering() cuando el
+  // rail ha subido y se ha asentado.
   releaseUart();
 
   digitalWrite(_channelPin, NBIOT_CHANNEL_ACTIVE);
@@ -1088,8 +1140,8 @@ void ModemNBIoTMqtt::enterError(const char *reason) {
 }
 
 void ModemNBIoTMqtt::powerDown() {
-  // Release TX before cutting VIN - otherwise the module is still being fed
-  // through it and this is not a power cycle at all.
+  // Soltar TX antes de cortar VIN: si no, el modulo se sigue alimentando por el y esto
+  // no seria un apagado en absoluto.
   releaseUart();
   digitalWrite(_enPin, NBIOT_DISABLE);
   digitalWrite(_channelPin, !NBIOT_CHANNEL_ACTIVE);
@@ -1099,12 +1151,15 @@ void ModemNBIoTMqtt::powerDown() {
   _powerCycleSettleUntilMs = millis() + NBIOT_POWER_OFF_SETTLE_MS;
 }
 
+// Ultimo recurso: apagar el modem y volver a empezar desde OFF.
 void ModemNBIoTMqtt::powerCycle() {
   setLastError("power cycling modem (last resort)");
   powerDown();
   setState(State::OFF);
 }
 
+// Recuperacion escalonada: reintentar en el mismo nivel unas pocas veces y, si no,
+// bajar un nivel (publicar -> reconectar MQTT -> registrarse -> apagar y encender).
 void ModemNBIoTMqtt::handleFailureAtLevel(RecoveryLevel level, const char *reason) {
   setLastError(reason);
   _consecutiveFailures++;
@@ -1117,7 +1172,7 @@ void ModemNBIoTMqtt::handleFailureAtLevel(RecoveryLevel level, const char *reaso
         return;
       }
       _publishRetries = 0;
-      _mqttConnected = false;  // force a fresh QMTOPEN/QMTCONN, not just another publish attempt
+      _mqttConnected = false;  // forzar un QMTOPEN/QMTCONN nuevo, no solo otro intento de publicar
       _mqttConnectSub = MqttConnectSub::CLOSE_FIRST;
       applyBackoffAndSetState(State::MQTT_CONNECT);
       return;
@@ -1150,6 +1205,7 @@ void ModemNBIoTMqtt::applyBackoffAndSetState(State s) {
   setState(s);
 }
 
+// Espera creciente: base x 2^intento, con un techo.
 uint32_t ModemNBIoTMqtt::computeBackoff(uint32_t attempt) const {
   if (attempt > 10) attempt = 10;
   uint32_t v = (uint32_t)NBIOT_BACKOFF_BASE_MS << attempt;
@@ -1160,11 +1216,11 @@ uint32_t ModemNBIoTMqtt::computeBackoff(uint32_t attempt) const {
 void ModemNBIoTMqtt::setLastError(const char *msg) {
   strncpy(_lastError, msg, sizeof(_lastError) - 1);
   _lastError[sizeof(_lastError) - 1] = '\0';
-  // Also PRINT it. This only stored the string before, which is why a modem that
-  // never answered produced a serial log containing nothing but "-> AT" - the
-  // give-up, the power cycle and the reason were all invisible, and the only
-  // place the error surfaced was a getter nothing was calling. A silent recovery
-  // loop is indistinguishable from a hung one.
+  // Tambien IMPRIMIRLO. Antes solo se guardaba el texto, y por eso un modem que no
+  // contestaba nunca producia un log con nada mas que "-> AT": el abandono, el
+  // apagado y el motivo eran invisibles, y el unico sitio donde aparecia el error era
+  // una funcion de consulta que nadie llamaba. Un bucle de recuperacion silencioso no
+  // se distingue de uno colgado.
   Serial.printf("[nbiot-mqtt] ERROR: %s\n", msg);
   Serial.flush();
 }
@@ -1191,21 +1247,24 @@ uint32_t ModemNBIoTMqtt::attachedUptimeMs() const {
   return _attached ? (millis() - _attachedSinceMs) : 0;
 }
 
+// ---- OFF: esperar a que se descargue tras un apagado y volver a encender ----
 void ModemNBIoTMqtt::tickOff() {
   if (millis() < _powerCycleSettleUntilMs) return;
   enterPowering();
 }
 
+// ---- POWERING: pulso de PWRKEY y espera al arranque ----
 void ModemNBIoTMqtt::tickPowering() {
-  // Non-blocking PWRKEY pulse: settle after VIN/channel go live, pulse
-  // PWRKEY low for NBIOT_PWRKEY_PULSE_MS, release, then wait for a boot URC
-  // or a flat timeout before moving on - WAIT_AT's own AT retries are the
-  // real synchronization point, same philosophy as the original class, this
-  // is just a head start. Hardware-confirmed sequence, see modem_nbiot_mqtt.h.
-  // VIN and the channel gate must be stable BEFORE PWRKEY is pulsed - pulsing
-  // into a rail that is still coming up can be ignored entirely by the module.
-  // Raised 300 -> 2000 (2026-09-11) along with the WAIT_AT ceiling; both were
-  // part of the same too-aggressive power-on race.
+  // Pulso de PWRKEY sin bloquear: esperar a que VIN y el canal se asienten, poner
+  // PWRKEY a bajo NBIOT_PWRKEY_PULSE_MS, soltarlo, y esperar un aviso de arranque o un
+  // plazo fijo antes de seguir. Los reintentos de AT de WAIT_AT son el verdadero
+  // punto de sincronizacion; esto es solo una ventaja de salida.
+  // VIN y la puerta del canal tienen que estar estables ANTES de pulsar PWRKEY: el
+  // modulo puede ignorar del todo un pulso sobre un rail que aun esta subiendo.
+  // Subido de 300 a 2000 (2026-09-11) junto con el techo de WAIT_AT; los dos formaban
+  // parte de la misma carrera de encendido demasiado agresiva.
+  // (Nota: segun Config.h, PWRKEY no esta cableado en esta placa; el pulso es
+  // inofensivo.)
   static const uint32_t kPowerSettleMs = 2000;
   uint32_t elapsed = millis() - _stateEnteredMs;
 
@@ -1222,13 +1281,14 @@ void ModemNBIoTMqtt::tickPowering() {
   }
 
   if (_sawBootUrc || elapsed > NBIOT_TIMEOUT_POWERING_MS) {
-    // Only now, with the module powered and settled, is it safe to drive TX.
+    // Solo ahora, con el modulo alimentado y asentado, es seguro conducir TX.
     startUart();
     _lastAtPingMs = 0;
     setState(State::WAIT_AT);
   }
 }
 
+// ---- WAIT_AT: preguntar "AT" hasta que conteste ----
 void ModemNBIoTMqtt::tickWaitAt() {
   if (millis() - _stateEnteredMs > NBIOT_TIMEOUT_WAIT_AT_MS) {
     enterError("modem never responded to AT");
@@ -1249,6 +1309,9 @@ void ModemNBIoTMqtt::tickWaitAt() {
   }
 }
 
+// ---- CONFIG: la secuencia de configuracion, un comando por paso ----
+//   ATE0 -> CMEE=2 -> CTZU=1 -> QSCLK=0 -> CFUN=1 -> CPIN? -> CFUN=0 ->
+//   QCGDEFCONT (APN) -> CFUN=1 -> ATTACHING
 void ModemNBIoTMqtt::tickConfig() {
   if (millis() - _stateEnteredMs > NBIOT_TIMEOUT_CONFIG_MS) {
     enterError("CONFIG timed out");
@@ -1258,8 +1321,8 @@ void ModemNBIoTMqtt::tickConfig() {
 
   if (_cmd.outcome != CmdOutcome::NONE) {
     CmdOutcome outcome = consumeOutcome();
-    // CTZU and QSCLK are best-effort (see their cases below) - every other
-    // step is required, an ERROR/timeout there is fatal.
+    // CTZU y QSCLK son "si se puede" (ver sus casos abajo); todos los demas pasos
+    // son obligatorios, y un ERROR o un plazo agotado en ellos es fatal.
     if (outcome != CmdOutcome::OK && _configStep != ConfigStep::QSCLK &&
         _configStep != ConfigStep::CTZU) {
       enterError("a CONFIG step returned ERROR/timeout");
@@ -1274,48 +1337,46 @@ void ModemNBIoTMqtt::tickConfig() {
       issueCommand("ATE0", NBIOT_AT_CMD_TIMEOUT_MS);
       break;
     case ConfigStep::CMEE:
-      issueCommand("AT+CMEE=2", NBIOT_AT_CMD_TIMEOUT_MS);  // verbose errors - "ue not power on" etc, not bare ERROR
+      issueCommand("AT+CMEE=2", NBIOT_AT_CMD_TIMEOUT_MS);  // errores con texto ("ue not power on"...), no un ERROR a secas
       break;
     case ConfigStep::CTZU:
-      // Auto network time-zone/clock update, so AT+CCLK? later returns real
-      // network time to timestamp each uplink reading. Set before CFUN=1 so
-      // the sync happens during attach. Best-effort: if the module rejects
-      // it, per-reading "ts" is just skipped (see buildGatewayPayload).
+      // Actualizacion automatica de zona y hora desde la red, para que AT+CCLK? de
+      // despues devuelva la hora real con la que fechar cada lectura. Antes de CFUN=1
+      // para que se sincronice durante el registro. Si se puede: si el modulo lo
+      // rechaza, simplemente no se pone "ts" por lectura (ver buildGatewayPayload).
       issueCommand("AT+CTZU=1", NBIOT_AT_CMD_TIMEOUT_MS);
       break;
     case ConfigStep::QSCLK:
-      // BENCH SETTING, NOT A DESIGN DECISION - the hub runs off solar +
-      // supercapacitors and a modem that never sleeps is real, ongoing
-      // power draw. This disables sleep permanently only because getting a
-      // clean bring-up read on the QMTPUB path mattered more than power
-      // budget today. The real design is: leave sleep enabled, wake the
-      // modem explicitly before publishing, confirm it's actually awake,
-      // then publish - that's a separate iteration, not done here.
+      // AJUSTE DE BANCO, NO UNA DECISION DE DISENO: la pasarela funciona con energia
+      // solar y un modem que no duerme nunca es un consumo real y continuo. Esto
+      // desactiva el sueno para siempre solo porque obtener una puesta en marcha
+      // limpia del camino de QMTPUB importaba mas que el consumo. El diseno real es:
+      // dejar el sueno activo, despertar el modem explicitamente antes de publicar,
+      // confirmar que esta despierto y publicar - eso es otra iteracion, no esta hecha.
       //
-      // Without this, the modem can autonomously enter deep sleep mid-
-      // command (confirmed 2026-08-19: an AT+QMTPUB sent while it was
-      // asleep never got a '>' prompt at all - just a
-      // "+QNBIOTEVENT: EXIT DEEPSLEEP" once it later woke on its own, with
-      // the publish itself lost, no error/timeout). Best-effort - if
-      // unsupported, proceed anyway rather than blocking bring-up on it.
+      // Sin esto el modem puede entrar solo en sueno profundo en mitad de un comando
+      // (confirmado el 2026-08-19: un AT+QMTPUB mandado mientras dormia no recibio
+      // nunca el '>' - solo un "+QNBIOTEVENT: EXIT DEEPSLEEP" cuando desperto por su
+      // cuenta, con la publicacion perdida y sin error ni timeout). Si no se admite,
+      // se sigue igualmente en vez de bloquear la puesta en marcha.
       issueCommand("AT+QSCLK=0", NBIOT_AT_CMD_TIMEOUT_MS);
       break;
     case ConfigStep::CFUN_ON_1:
-      // MUST come before AT+CPIN? - this module does not auto-enable its
-      // radio/protocol stack on boot (confirmed 2026-08-19: AT+CPIN? fails
-      // "+CME ERROR: ue not power on" without this first).
+      // TIENE que ir antes de AT+CPIN?: este modulo no activa solo su radio al
+      // arrancar (confirmado el 2026-08-19: AT+CPIN? falla con
+      // "+CME ERROR: ue not power on" sin esto antes).
       issueCommand("AT+CFUN=1", NBIOT_AT_CMD_TIMEOUT_MS);
       break;
     case ConfigStep::CPIN:
-      issueCommand("AT+CPIN?", NBIOT_AT_CMD_TIMEOUT_MS);
+      issueCommand("AT+CPIN?", NBIOT_AT_CMD_TIMEOUT_MS);  // SIM lista?
       break;
     case ConfigStep::CFUN_OFF:
-      issueCommand("AT+CFUN=0", NBIOT_AT_CMD_TIMEOUT_MS);
+      issueCommand("AT+CFUN=0", NBIOT_AT_CMD_TIMEOUT_MS);  // el APN solo se acepta con la radio apagada
       break;
     case ConfigStep::QCGDEFCONT: {
-      // Let CFUN=0's SIM-interface transition settle first (it briefly
-      // reports NOT READY) - confirmed 2026-08-19 this needs ~3s or
-      // AT+QCGDEFCONT races it. Non-blocking: just re-polled until due.
+      // Dejar que se asiente la transicion de la SIM tras CFUN=0 (dice NOT READY un
+      // momento): confirmado el 2026-08-19 que necesita ~3 s, o AT+QCGDEFCONT llega
+      // antes de tiempo. Sin bloquear: se vuelve a mirar hasta que toca.
       if (millis() - _configStepEnteredMs < 3000) return;
       char cmd[64];
       snprintf(cmd, sizeof(cmd), "AT+QCGDEFCONT=\"IP\",\"%s\"", NBIOT_APN);
@@ -1331,6 +1392,8 @@ void ModemNBIoTMqtt::tickConfig() {
   }
 }
 
+// ---- ATTACHING: esperar al registro en la red, y leer cobertura y hora ----
+//   AT+CEREG? (hasta registrado) -> AT+CGPADDR -> AT+CSQ -> AT+CCLK? -> MQTT_CONNECT
 void ModemNBIoTMqtt::tickAttaching() {
   if (millis() < _backoffUntilMs) return;
 
@@ -1357,7 +1420,7 @@ void ModemNBIoTMqtt::tickAttaching() {
     NbiotProtocol::CeregState st;
     if (!NbiotProtocol::parseCereg(_cmd.infoLine, st) || !NbiotProtocol::cieregIsAttached(st)) {
       _attached = false;
-      return;  // not attached yet - keep polling, the timeout above is the backstop
+      return;  // aun no registrado: seguir preguntando; el plazo de arriba es la red de seguridad
     }
 
     _attached = true;
@@ -1376,11 +1439,11 @@ void ModemNBIoTMqtt::tickAttaching() {
   if (_cmd.outcome == CmdOutcome::NONE) return;
 
   if (!_csqCheckedAfterAttach) {
-    consumeOutcome();  // whatever CGPADDR said, CEREG already confirmed attachment - not worth failing over
-    // One AT+CSQ right here, not gated behind MQTT_CONNECT succeeding -
-    // otherwise the signal reading (and anything displaying it, e.g. the
-    // OLED's bars) never updates while Module A/the broker is unreachable,
-    // even though the modem is genuinely attached with a real signal.
+    consumeOutcome();  // diga lo que diga CGPADDR, CEREG ya confirmo el registro: no merece fallar por ello
+    // Un AT+CSQ justo aqui, sin esperar a que MQTT_CONNECT funcione: si no, la
+    // lectura de cobertura (y lo que la muestra, como las barras de la OLED) no se
+    // actualizaria nunca mientras Modulo A o el servidor fueran inalcanzables, aunque
+    // el modem este registrado con senal real.
     issueCommand("AT+CSQ", NBIOT_AT_CMD_TIMEOUT_MS);
     _csqCheckedAfterAttach = true;
     return;
@@ -1392,10 +1455,9 @@ void ModemNBIoTMqtt::tickAttaching() {
       int dbm;
       if (NbiotProtocol::parseCsq(_cmd.infoLine, dbm)) _rssiDbm = dbm;
     }
-    // One AT+CCLK? per attach to seed the epoch<->millis() offset used to
-    // timestamp each reading in the MQTT uplink. Best-effort: a failure (or
-    // an implausible clock) just leaves _haveNetTime false and the uplink
-    // omits "ts".
+    // Un AT+CCLK? por registro, para fijar la relacion epoca<->millis() con la que se
+    // fecha cada lectura en la subida MQTT. Si se puede: un fallo (o un reloj
+    // increible) deja _haveNetTime a false y la subida va sin "ts".
     issueCommand("AT+CCLK?", NBIOT_AT_CMD_TIMEOUT_MS);
     _cclkChecked = true;
     return;
@@ -1419,10 +1481,15 @@ void ModemNBIoTMqtt::tickAttaching() {
   setState(State::MQTT_CONNECT);
 }
 
+// "Ahora" en ms de epoca: la hora de red de la ultima sincronizacion mas el millis()
+// transcurrido desde entonces.
 int64_t ModemNBIoTMqtt::netNowMs() const {
   return _netEpochMsAtSync + (int64_t)(int32_t)(millis() - _netSyncLocalMs);
 }
 
+// ---- MQTT_CONNECT: abrir la sesion con ThingsBoard, paso a paso ----
+//   QMTCLOSE -> keepalive -> sesion persistente -> QMTOPEN -> QMTCONN ->
+//   suscripciones (RPC propio y RPC de pasarela) -> anunciar cada nodo -> IDLE
 void ModemNBIoTMqtt::tickMqttConnect() {
   if (millis() < _backoffUntilMs) return;
   if (millis() - _stateEnteredMs > NBIOT_TIMEOUT_SOCKET_MS) {
@@ -1433,14 +1500,12 @@ void ModemNBIoTMqtt::tickMqttConnect() {
 
   switch (_mqttConnectSub) {
     case MqttConnectSub::CLOSE_FIRST: {
-      // Defensive close before every (re)connect attempt - MQTT client
-      // state lives on the modem, not the ESP32, and survives an ESP32
-      // reflash/reset. A leftover session from an earlier attempt left
-      // client_idx 0 stuck; AT+QMTOPEN then failed outright with
-      // "+CME ERROR: operation not allowed" until this was added
-      // (2026-08-19) - same class of bug this project already hit once
-      // with AT+QICLOSE/QIOPEN on the plain-socket path. Best-effort: an
-      // ERROR here just means there was nothing to close.
+      // Cierre defensivo antes de cada intento de (re)conexion: el estado del cliente
+      // MQTT vive en el modem, no en el ESP32, y sobrevive a un reflasheo o reinicio
+      // del ESP32. Una sesion sobrante de un intento anterior dejaba bloqueado el
+      // client_idx 0, y AT+QMTOPEN fallaba sin mas con
+      // "+CME ERROR: operation not allowed" hasta que se anadio esto (2026-08-19). Si
+      // se puede: un ERROR aqui solo significa que no habia nada que cerrar.
       if (_cmd.outcome != CmdOutcome::NONE) {
         consumeOutcome();
         _mqttConnectSub = MqttConnectSub::KEEPALIVE_CFG;
@@ -1454,7 +1519,7 @@ void ModemNBIoTMqtt::tickMqttConnect() {
 
     case MqttConnectSub::KEEPALIVE_CFG: {
       if (_cmd.outcome != CmdOutcome::NONE) {
-        consumeOutcome();  // best-effort - proceed even if QMTCFG was rejected
+        consumeOutcome();  // si se puede: seguir aunque se rechace el QMTCFG
         _mqttConnectSub = MqttConnectSub::SESSION_CFG;
         return;
       }
@@ -1465,22 +1530,22 @@ void ModemNBIoTMqtt::tickMqttConnect() {
     }
 
         case MqttConnectSub::SESSION_CFG: {
-      // PERSISTENT SESSION - setCleanSession(false) in the protocol document.
+      // SESION PERSISTENTE - setCleanSession(false) en el documento del protocolo.
       //
-      // clean_session = 0 tells the broker to KEEP this client's session across a
-      // disconnect: its subscriptions survive, and QoS 1 messages published while
-      // it is briefly away are QUEUED rather than discarded.
+      // clean_session = 0 le dice al servidor que CONSERVE la sesion de este cliente
+      // a traves de una desconexion: sus suscripciones sobreviven, y los mensajes QoS 1
+      // publicados mientras esta fuera un momento se ponen EN COLA en vez de tirarse.
       //
-      // That matters here more than it would on a wired link. This module sends no
-      // PINGREQ - see MQTT_KEEPALIVE_S - so the connection is kept warm only by its
-      // own telemetry, and an NB-IoT link that drops between publishes is not
-      // noticed until the next send. With a clean session every command sent in
-      // that gap is thrown away by the broker and nobody is told. With a persistent
-      // session it is waiting when the link comes back.
+      // Aqui importa mas que en un enlace con cable. Este modulo no manda PINGREQ - ver
+      // MQTT_KEEPALIVE_S - asi que la conexion solo la mantiene viva su propia
+      // telemetria, y un enlace NB-IoT que se cae entre publicaciones no se nota hasta
+      // el siguiente envio. Con sesion limpia, el servidor tiraria todas las ordenes
+      // mandadas en ese hueco sin avisar a nadie. Con sesion persistente, estan
+      // esperando cuando vuelve el enlace.
       //
-      // Best-effort: a modem that rejects the setting still gets a working uplink,
-      // and refusing to connect over it would trade a fragile downlink for no link
-      // at all.
+      // Si se puede: un modem que rechace el ajuste sigue teniendo una subida que
+      // funciona, y negarse a conectar por ello cambiaria una bajada fragil por no
+      // tener enlace en absoluto.
       if (_cmd.outcome != CmdOutcome::NONE) {
         if (consumeOutcome() != CmdOutcome::OK) {
           Serial.println("[nbiot-mqtt] persistent session REJECTED - commands sent while "
@@ -1501,10 +1566,10 @@ void ModemNBIoTMqtt::tickMqttConnect() {
           handleFailureAtLevel(RecoveryLevel::MQTT_CONNECT, "QMTOPEN failed");
           return;
         }
-        // CRITICAL: chain straight into QMTCONN with no delay/backoff - the
-        // broker closes the socket ~5-6s after QMTOPEN if CONNECT doesn't
-        // follow (+QMTSTAT: <idx>,7). The only latency here is however long
-        // until the next tick(), which is effectively immediate.
+        // CRITICO: encadenar directamente con QMTCONN, sin pausa ni espera - el
+        // servidor cierra el socket ~5-6 s despues de QMTOPEN si no llega el CONNECT
+        // (+QMTSTAT: <idx>,7). La unica demora es la del siguiente tick(), que en la
+        // practica es inmediata.
         _mqttConnectSub = MqttConnectSub::CONN;
         return;
       }
@@ -1523,26 +1588,26 @@ void ModemNBIoTMqtt::tickMqttConnect() {
         _mqttConnected = true;
         _mqttConnectRetries = 0;
         _consecutiveFailures = 0;
-        _mqttConnectSub = MqttConnectSub::SUB_DEVICE;  // bring downlink up before going IDLE
+        _mqttConnectSub = MqttConnectSub::SUB_DEVICE;  // activar la bajada de ordenes antes de IDLE
         return;
       }
-      // ThingsBoard access-token auth: token as username, no password.
-      // (2026-08-19: tried an explicit "" password param here on a
-      // hunch after a CONNACK 5 "not authorized" with a confirmed-correct
-      // token - that was rejected outright with "+CME ERROR: Incorrect
-      // parameters", so this 3-arg form is the correct syntax. The real
-      // cause of the CONNACK 5 was very likely a stale session left open
-      // on the modem from an earlier test flash - see the CLOSE_FIRST sub-
-      // state above, added for exactly this.)
+      // Autenticacion de ThingsBoard por token de acceso: el token va como usuario,
+      // sin contrasena. (2026-08-19: se probo a poner una contrasena "" explicita tras
+      // un CONNACK 5 "no autorizado" con un token correcto, y el modem lo rechazo con
+      // "+CME ERROR: Incorrect parameters", asi que esta forma de 3 argumentos es la
+      // correcta. La causa real del CONNACK 5 fue muy probablemente una sesion vieja
+      // abierta en el modem desde un flasheo anterior - ver CLOSE_FIRST arriba.)
+      // OJO: issueCommand() imprime el comando por el puerto serie, asi que el token
+      // aparece en el log de depuracion.
       char cmd[128];
       snprintf(cmd, sizeof(cmd), "AT+QMTCONN=%d,\"%s\",\"%s\"", MQTT_CLIENT_IDX, MQTT_CLIENT_ID, MQTT_ACCESS_TOKEN);
       issueCommand(cmd, NBIOT_TIMEOUT_SOCKET_MS, CmdKind::QMTCONN);
       return;
     }
 
-    // Both subscribes are best-effort: losing downlink costs remote control,
-    // but telemetry is this module's actual job and must not be blocked by a
-    // rejected SUBSCRIBE. Failures are logged and we continue to IDLE.
+    // Las dos suscripciones son "si se puede": perder la bajada cuesta el control
+    // remoto, pero la telemetria es el trabajo real de este modulo y no debe
+    // bloquearla un SUBSCRIBE rechazado. Los fallos se apuntan y se sigue hacia IDLE.
     case MqttConnectSub::SUB_DEVICE: {
       if (_cmd.outcome != CmdOutcome::NONE) {
         if (consumeOutcome() != CmdOutcome::OK)
@@ -1575,19 +1640,19 @@ void ModemNBIoTMqtt::tickMqttConnect() {
     }
 
     case MqttConnectSub::ANNOUNCE: {
-      // One v1/gateway/connect per node, one per pass through this state.
+      // Un v1/gateway/connect por nodo, uno por cada pasada por este estado.
       //
-      // WITHOUT THIS, RPC TO A NODE NEVER ARRIVES. ThingsBoard only routes a
-      // command to a gateway's child device once the gateway has said that device
-      // is connected through it. Telemetry needs no such announcement, so the
-      // nodes showed up populated and healthy while every command to them was
-      // dropped server-side - the failure looked like a firmware bug at this end
-      // for two sessions.
+      // SIN ESTO, UN RPC A UN NODO NO LLEGA NUNCA. ThingsBoard solo encamina una orden
+      // a un dispositivo hijo de una pasarela cuando la pasarela ha dicho que ese
+      // dispositivo esta conectado a traves de ella. La telemetria no necesita ese
+      // anuncio, asi que los nodos aparecian con datos y sanos mientras todas las
+      // ordenes a ellos se tiraban en el servidor - y durante dos sesiones parecio un
+      // fallo de firmware en este extremo.
       //
-      // Re-sent on every MQTT connect, because the announcement is scoped to the
-      // session: a reconnect silently un-registers every node otherwise.
+      // Se repite en cada conexion MQTT, porque el anuncio va ligado a la sesion: si
+      // no, una reconexion des-registra en silencio todos los nodos.
       if (_cmd.outcome != CmdOutcome::NONE) {
-        consumeOutcome();  // a failed announce is not fatal - telemetry still flows
+        consumeOutcome();  // un anuncio fallido no es fatal: la telemetria sigue fluyendo
         _announceIdx++;
       }
 
@@ -1610,6 +1675,7 @@ void ModemNBIoTMqtt::tickMqttConnect() {
   }
 }
 
+// ---- IDLE: esperar; reconectar si la sesion cayo, contestar, o publicar si toca ----
 void ModemNBIoTMqtt::tickIdle() {
   if (_cmd.active) return;
 
@@ -1619,22 +1685,22 @@ void ModemNBIoTMqtt::tickIdle() {
     if (NbiotProtocol::parseCsq(_cmd.infoLine, dbm)) _rssiDbm = dbm;
   }
 
-  // A DEAD SESSION MUST BE REBUILT HERE, not left for the next publish.
+  // UNA SESION MUERTA SE RECONSTRUYE AQUI, no se deja para la siguiente publicacion.
   //
-  // handleUrc() clears _mqttConnected when +QMTSTAT arrives and says it will
-  // reconnect "on next publish". But a publish only happens when LoRa data
-  // arrives, and IDLE is precisely the state where none is arriving. A node that
-  // goes hours between readings - or is simply switched off - means no publish,
-  // therefore no reconnect, EVER: the state machine sits here polling CSQ with a
-  // dead session and the OLED reading "MQTT: caido" indefinitely.
+  // handleUrc() pone _mqttConnected a false cuando llega +QMTSTAT y dice que se
+  // reconectara "en la siguiente publicacion". Pero solo se publica cuando llegan
+  // datos por LoRa, e IDLE es justo el estado en el que no llegan. Un nodo que pasa
+  // horas sin lecturas - o que simplemente esta apagado - significa que no se publica,
+  // y por tanto que no se reconecta NUNCA: la maquina de estados se queda aqui
+  // preguntando CSQ con una sesion muerta y la OLED diciendo "MQTT: caido" para siempre.
   //
-  // Observed 2026-09-14: Module B idle for days, cellular fine (CSQ 31/31,
-  // registered), MQTT dead on screen and never retried, because nothing was
-  // transmitting to trigger a publish.
+  // Visto el 2026-09-14: Modulo B en IDLE durante dias, la red movil bien (CSQ 31/31,
+  // registrado), MQTT caido en pantalla y sin reintentarse nunca, porque nada
+  // transmitia para provocar una publicacion.
   //
-  // Gated on the shared backoff so a broker that is genuinely down is retried
-  // steadily rather than hammered - MQTT_CONNECT failures feed that same backoff
-  // through handleFailureAtLevel().
+  // Va condicionado a la espera creciente compartida, para que un servidor caido de
+  // verdad se reintente con calma en vez de machacarse: los fallos de MQTT_CONNECT
+  // alimentan esa misma espera a traves de handleFailureAtLevel().
   if (!_mqttConnected && millis() >= _backoffUntilMs) {
     Serial.println("[nbiot-mqtt] idle with a dead MQTT session - reconnecting now "
                    "(not waiting for a publish)");
@@ -1644,17 +1710,17 @@ void ModemNBIoTMqtt::tickIdle() {
     return;
   }
 
-  // An RPC response goes out ahead of the telemetry batch - it's what someone
-  // is actively waiting on in the ThingsBoard UI, and the batch loses nothing
-  // by waiting one more pass.
+  // Una respuesta RPC sale antes que el lote de telemetria: es lo que alguien esta
+  // esperando en la pantalla de ThingsBoard, y el lote no pierde nada por esperar una
+  // vuelta mas.
   if (rpcReplyPending() && _mqttConnected) {
     setState(State::RPC_REPLY);
     return;
   }
 
-  // _flushRequested short-circuits the batch window - see requestFlush(). It is
-  // cleared on a successful publish, not here, so a flush that fails to go out is
-  // retried rather than quietly forgotten.
+  // _flushRequested se salta la espera del lote - ver requestFlush(). Se borra cuando
+  // la publicacion sale bien, no aqui, para que una publicacion urgente que falla se
+  // reintente en vez de olvidarse sin decir nada.
   bool batchDue = _ringCount > 0 && (_flushRequested ||
                                       _ringCount >= _batchReadingsTarget ||
                                       (millis() - _oldestPendingMs) >= _batchSecondsTarget * 1000UL);
@@ -1663,20 +1729,21 @@ void ModemNBIoTMqtt::tickIdle() {
     return;
   }
 
+  // Mientras tanto, refrescar la cobertura para el panel cada cierto tiempo.
   if (millis() - _lastCsqPollMs >= NBIOT_CSQ_POLL_INTERVAL_MS) {
     issueCommand("AT+CSQ", NBIOT_AT_CMD_TIMEOUT_MS);
     _lastCsqPollMs = millis();
   }
 }
 
+// ---- PUBLISHING: subir el anillo a v1/gateway/telemetry, por trozos ----
 void ModemNBIoTMqtt::tickPublishing() {
   if (millis() < _backoffUntilMs) return;
 
   if (!_mqttConnected) {
-    // Lazy reconnect: never attempt to publish over a session already
-    // known dead. IDLE's own batchDue check routes straight back here once
-    // MQTT_CONNECT succeeds - see project memory "project_thingsboard_mqtt_plan"
-    // for why this beats a proactive keepalive ping cadence.
+    // Reconexion perezosa: no intentar nunca publicar sobre una sesion que ya se sabe
+    // muerta. La comprobacion batchDue de IDLE vuelve aqui en cuanto MQTT_CONNECT
+    // funciona.
     _mqttReconnects++;
     _mqttConnectSub = MqttConnectSub::KEEPALIVE_CFG;
     setState(State::MQTT_CONNECT);
@@ -1688,7 +1755,7 @@ void ModemNBIoTMqtt::tickPublishing() {
   if (!_publishInFlight) {
     _publishPayloadLen = buildGatewayPayload(_publishPayload, sizeof(_publishPayload), MQTT_PUB_CHUNK_READINGS);
     if (_publishPayloadLen == 0) {
-      setState(State::IDLE);  // nothing to publish - shouldn't happen, batchDue implies a non-empty ring
+      setState(State::IDLE);  // nada que publicar - no deberia pasar, batchDue implica anillo no vacio
       return;
     }
     char header[48];
@@ -1709,17 +1776,18 @@ void ModemNBIoTMqtt::tickPublishing() {
   }
 }
 
-// Publishes one queued RPC response, then straight back to IDLE. Deliberately
-// simpler than PUBLISHING: no retries, no chunking, no ring to pop. If it
-// fails, the reply is dropped and ThingsBoard times the RPC out on its own -
-// retrying a stale command result is worse than not answering.
+// ---- RPC_REPLY: publicar las respuestas en cola ----
+// Publica una respuesta RPC en cola y vuelve directamente a IDLE. A proposito mas
+// simple que PUBLISHING: sin reintentos, sin trozos, sin anillo que vaciar. Si falla,
+// la respuesta se tira y ThingsBoard deja expirar el RPC por su cuenta: reintentar el
+// resultado viejo de una orden es peor que no contestar.
 void ModemNBIoTMqtt::tickRpcReply() {
   if (!rpcReplyPending()) {
     setState(State::IDLE);
     return;
   }
   if (!_mqttConnected) {
-    popRpcReply();  // can't answer; let ThingsBoard time it out
+    popRpcReply();  // no se puede contestar; que ThingsBoard lo deje expirar
     setState(State::IDLE);
     return;
   }
@@ -1745,50 +1813,51 @@ void ModemNBIoTMqtt::tickRpcReply() {
   if (outcome != CmdOutcome::OK) Serial.println("[nbiot-mqtt] rpc reply publish failed - dropped");
   _rpcReplyInFlight = false;
   popRpcReply();
-  // Straight back out if more are waiting - IDLE re-enters this state anyway,
-  // but saying so keeps the queue draining in one pass rather than one per tick.
+  // Seguir directamente si hay mas esperando - IDLE volveria a entrar aqui de todos
+  // modos, pero asi la cola se vacia de una pasada en vez de una por tick.
   setState(rpcReplyPending() ? State::RPC_REPLY : State::IDLE);
 }
 
+// ---- ERROR: esperar, apagar el modem de verdad y volver a empezar ----
 void ModemNBIoTMqtt::tickError() {
   if (millis() < _backoffUntilMs) return;
 
-  // A RETRY MUST ACTUALLY REMOVE POWER, and this did not.
+  // UN REINTENTO TIENE QUE QUITAR LA ALIMENTACION DE VERDAD, y esto no lo hacia.
   //
-  // The loop was ERROR -> OFF -> enterPowering() -> POWERING -> WAIT_AT -> ERROR.
-  // enterPowering() only ASSERTS the EN and channel gates - which were already
-  // asserted, because nothing on this path ever dropped them - and then pulses
-  // PWRKEY. powerCycle(), the one function that actually cuts VIN, is reachable
-  // only from RecoveryLevel::POWER and was never on this path, so
-  // _powerCycleSettleUntilMs stayed 0 and tickOff() fell straight through.
+  // El bucle era ERROR -> OFF -> enterPowering() -> POWERING -> WAIT_AT -> ERROR.
+  // enterPowering() solo ACTIVA las puertas EN y del canal - que ya estaban activas,
+  // porque nada en este camino las bajaba - y luego pulsa PWRKEY. powerCycle(), la
+  // unica funcion que de verdad corta VIN, no estaba en este camino, asi que
+  // _powerCycleSettleUntilMs seguia a 0 y tickOff() pasaba de largo.
   //
-  // PWRKEY ON A QUECTEL MODULE TOGGLES. A pulse at a powered-off module turns it
-  // on; the same pulse at a RUNNING module turns it OFF. So every "retry" was
-  // pulsing PWRKEY at a module whose power state was unknown and, after the
-  // first attempt, probably on - meaning the retry was as likely to switch the
-  // modem off as to start it. That also explains why the fault sometimes cleared
-  // "by itself" after several cycles, and why it hit both boards identically:
-  // it is parity, not hardware.
+  // EN UN MODULO QUECTEL, PWRKEY CONMUTA. Un pulso a un modulo apagado lo enciende; el
+  // mismo pulso a un modulo FUNCIONANDO lo APAGA. Asi que cada "reintento" pulsaba
+  // PWRKEY sobre un modulo cuyo estado no se conocia y que, tras el primer intento,
+  // probablemente estaba encendido - de modo que el reintento tenia tantas
+  // posibilidades de apagar el modem como de arrancarlo. Eso explica tambien por que
+  // el fallo a veces se arreglaba "solo" tras varios ciclos, y por que afectaba igual
+  // a las dos placas: es paridad, no hardware.
   //
-  // Dropping VIN first makes the PWRKEY pulse unambiguous - the module is known
-  // to be off, so a pulse can only mean "turn on". NBIOT_POWER_OFF_SETTLE_MS
-  // (4s) then gives the rail time to actually fall before it comes back up;
-  // tickOff() waits on the timer powerDown() arms.
+  // Cortar VIN primero hace que el pulso de PWRKEY no sea ambiguo: se sabe que el
+  // modulo esta apagado, asi que un pulso solo puede significar "enciende".
+  // NBIOT_POWER_OFF_SETTLE_MS (4 s) da tiempo a que el rail baje de verdad antes de
+  // volver a subir; tickOff() espera al temporizador que arma powerDown().
   powerDown();
   setState(State::OFF);
 }
 
+// Publicacion correcta: quitar del anillo lo publicado y seguir si queda algo.
 void ModemNBIoTMqtt::onPublishSucceeded() {
   _packetsSent++;
-  _flushRequested = false;  // only once it has actually left
+  _flushRequested = false;  // solo una vez que ha salido de verdad
   _consecutiveFailures = 0;
   _publishRetries = 0;
   popSentReadings();
-  // One batch is drained as several MQTT_PUB_CHUNK_READINGS-sized QMTPUBs -
-  // stay in PUBLISHING until the ring is empty, only then back to IDLE. The
-  // session is already open, so the next chunk goes out on the following
-  // tick with no reconnect. Arrival rate (~1 reading/15s) is far below drain
-  // rate (a chunk per tick), so this always terminates.
+  // Un lote se vacia en varias QMTPUB de MQTT_PUB_CHUNK_READINGS lecturas: se queda
+  // en PUBLISHING hasta que el anillo esta vacio, y solo entonces vuelve a IDLE. La
+  // sesion ya esta abierta, asi que el siguiente trozo sale en el tick siguiente sin
+  // reconectar. Llegan lecturas mucho mas despacio de lo que se vacian (un trozo por
+  // tick), asi que esto siempre termina.
   if (_ringCount > 0) {
     _publishInFlight = false;
     return;
@@ -1801,11 +1870,11 @@ void ModemNBIoTMqtt::onPublishFailed() {
   handleFailureAtLevel(RecoveryLevel::PUBLISH, "publish failed");
 }
 
-// Writes the decimal digits of a non-negative int64 into out (no NUL), and
-// returns the count. Avoids relying on %lld being compiled into this
-// toolchain's snprintf (nano newlib often omits it).
+// Escribe en out las cifras decimales de un int64 no negativo (sin '\0') y devuelve
+// cuantas son. Evita depender de que %lld este compilado en el snprintf de este
+// compilador (la nano newlib a menudo no lo trae).
 static size_t appendI64(char *out, int64_t v) {
-  if (v < 0) v = 0;  // epoch ms is always positive here - defensive only
+  if (v < 0) v = 0;  // aqui la epoca en ms siempre es positiva - solo por precaucion
   char tmp[24];
   size_t n = 0;
   uint64_t u = (uint64_t)v;
@@ -1817,21 +1886,23 @@ static size_t appendI64(char *out, int64_t v) {
   return n;
 }
 
-// Builds one ThingsBoard Gateway API telemetry payload from up to maxReadings
-// of the oldest pending ring entries:
-//   {"<node>":[<rec>,<rec>,...], "<otherNode>":[...]}
-// Ring entries are grouped by resolved node name (see Config.h's
-// nbiotResolveNodeName) rather than assuming a single node.
+// ---------- El JSON de telemetria para la API de pasarela de ThingsBoard ----------
 //
-// Two record shapes, and the choice is not free-form - ThingsBoard's gateway
-// parser only accepts a "values" wrapper when it's paired with a "ts":
-//   _haveNetTime : {"ts":<epoch_ms>,"values":{<keys>}}  - real per-reading time
-//   otherwise    : {<keys>}                             - server stamps on receipt
-// Each reading's ts is its LoRa-receive moment: netNowMs() rebased through the
-// reading's own lastHeardMs (a millis() value), so a 2-min batch of 15s-spaced
-// readings lands in ThingsBoard as a real 15s-resolution trend, not 8 points
-// at one instant. The flat fallback (no clock from the network) still stores
-// fine, just at batch-arrival resolution.
+// Construye un mensaje de telemetria de pasarela con hasta maxReadings de las
+// lecturas pendientes mas antiguas del anillo:
+//   {"<nodo>":[<registro>,<registro>,...], "<otroNodo>":[...]}
+// Las lecturas se agrupan por nombre de nodo (ver nbiotResolveNodeName en Config.h)
+// en vez de suponer un solo nodo.
+//
+// Dos formas de registro, y la eleccion no es libre - el interprete de pasarela de
+// ThingsBoard solo acepta el envoltorio "values" si va con un "ts":
+//   _haveNetTime : {"ts":<epoca_ms>,"values":{<claves>}}  - hora real de cada lectura
+//   si no        : {<claves>}                             - el servidor pone la hora al recibir
+// El ts de cada lectura es el momento en que se TOMO: netNowMs() trasladado a traves
+// del lastHeardMs de la propia lectura (un valor de millis() ya corregido por su
+// antiguedad), asi que un lote de lecturas espaciadas llega a ThingsBoard como una
+// serie real, no como varios puntos en el mismo instante. Sin reloj de red se guarda
+// igual, solo que con la resolucion de la llegada del lote.
 size_t ModemNBIoTMqtt::buildGatewayPayload(uint8_t *out, size_t cap, uint8_t maxReadings) {
   char *buf = reinterpret_cast<char *>(out);
   size_t pos = 0;
@@ -1886,7 +1957,7 @@ size_t ModemNBIoTMqtt::buildGatewayPayload(uint8_t *out, size_t cap, uint8_t max
       // una medida de -999 ppm. Se OMITE la clave, que es lo que de verdad
       // ocurrio, y ThingsBoard lo trata bien - no registra punto para esa serie en
       // ese instante.
-      char keys[500];  // +3 keys for chargePct/capMv/alarmState
+      char keys[500];  // +3 claves para chargePct/capMv/alarmState
       int kn = 0;
       keys[kn++] = '{';
       keys[kn] = '\0';

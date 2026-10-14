@@ -3,65 +3,72 @@
 #include "ISensor.h"
 #include <7Semi_BME690.h>
 
-// I2C, shared bus (SDA/SCL from pins.h). SDO floats on this board revision, so the
-// address isn't fixed in hardware - primaryAddr is tried first, then the other of
-// {0x76, 0x77} as a fallback, since either is a legitimate strap state.
+// =============================================================================
+// BME690 (Bosch) - TEMPERATURA, HUMEDAD, PRESION Y GAS (VOC)
+// =============================================================================
 //
-// values[]: [0]=temperature C, [1]=humidity %, [2]=pressure hPa, [3]=gas resistance ohm.
+// Bus I2C compartido (SDA/SCL de pins.h). En esta revision de placa el pin SDO
+// queda al aire, asi que la direccion no esta fijada en hardware: se prueba
+// primero primaryAddr y despues la otra de {0x76, 0x77}, porque las dos son
+// estados legitimos.
+//
+// values[]: [0] = temperatura C, [1] = humedad %, [2] = presion hPa,
+//           [3] = resistencia de gas en ohmios.
 class Bme690Sensor : public ISensor {
 public:
   explicit Bme690Sensor(uint8_t primaryAddr) : _addr(primaryAddr) {}
 
   bool begin() override;
 
-  // Full read: temperature, humidity, pressure AND gas resistance. Runs the gas
-  // heater at 320C, which takes ~10.8s per notes/power_budget.md and must not be
-  // truncated. For the periodic burst, not for frequent sampling.
+  // Lectura COMPLETA: temperatura, humedad, presion Y resistencia de gas. Enciende
+  // el calefactor de gas a 320 C. Para el trabajo de gas (VOC) del calendario, no
+  // para lecturas frecuentes.
+  // (Una hoja de calculo antigua daba ~10,8 s para esta lectura; medido en el banco
+  // el 2026-10-06, la llamada vuelve en ~37 ms porque el calefactor trabaja dentro
+  // del sensor y no bloquea al ESP32.)
   Reading read() override;
 
-  // Fast read: temperature, humidity and pressure only, with the GAS HEATER OFF.
+  // Lectura RAPIDA: solo temperatura, humedad y presion, con el calefactor de gas
+  // APAGADO. Es la del trabajo de T/H/P, el mas frecuente del calendario. El
+  // calefactor es, con diferencia, la parte cara de una medida del BME690: sin el,
+  // el consumo baja de ~3,1 mA a casi nada.
   //
-  // This is what makes a 10s sentinel cadence affordable. The heater is the
-  // expensive part of a BME690 measurement by an order of magnitude - without it
-  // a forced measurement is a couple of hundred milliseconds instead of 10.8
-  // seconds, and the current drops from ~3.1mA to negligible.
-  //
-  // values[]: [0]=temperature, [1]=humidity, [2]=pressure, [3]=0 (no gas reading).
-  // count is 3, so a caller cannot mistake the absent gas value for a real one.
+  // values[]: [0] = temperatura, [1] = humedad, [2] = presion, [3] = 0 (sin gas).
+  // count vale 3, para que nadie confunda el gas ausente con uno real.
   Reading readFast();
 
-  // Which address begin() settled on. It tries the configured one then the
-  // alternate, so the caller cannot otherwise know which is live - and that
-  // matters when a sensor reports OK at init but returns nothing afterwards.
+  // En que direccion se quedo begin(). Prueba la configurada y luego la otra, asi
+  // que quien llama no puede saber de otro modo cual esta viva - y eso importa
+  // cuando un sensor arranca bien pero despues no devuelve nada.
   uint8_t address() const { return _addr; }
-  // Was an empty stub, which made "put the sensor to sleep" a no-op. The heater
-  // IS the BME690's power consumption - everything else is negligible - so
-  // sleeping it means turning the heater off and leaving it off.
+  // Antes era una funcion vacia, y "dormir el sensor" no hacia nada. El calefactor
+  // ES el consumo del BME690 (el resto es despreciable), asi que dormirlo es
+  // apagar el calefactor y dejarlo apagado.
   void sleep() override;
   const char *name() const override { return "BME690"; }
 
-  // Raw value of the chip-ID register (0xD0) read directly when begin() fails,
-  // bypassing the Bosch driver. begin() collapses five different failures into one
-  // `false`; this is what distinguishes them. Expect 0x61 on a healthy part.
-  // Only meaningful when chipIdValid() is true.
+  // Valor crudo del registro de identificacion del chip (0xD0), leido directamente
+  // cuando begin() falla, sin pasar por el driver de Bosch. begin() resume cinco
+  // fallos distintos en un solo `false`; esto es lo que los distingue. En una pieza
+  // sana vale 0x61. Solo tiene sentido si chipIdValid() es true.
   uint8_t lastChipId() const { return _chipId; }
   bool chipIdValid() const { return _chipIdValid; }
-  // Which access pattern answered: 0 = repeated start (what the Bosch driver
-  // uses), 1 = stop-separated, -1 = neither.
+  // Que forma de acceso contesto: 0 = inicio repetido (la que usa el driver de
+  // Bosch), 1 = separada por STOP, -1 = ninguna.
   int chipIdMode() const { return _chipIdMode; }
 
 private:
   void primeAndMark();
-  // Switches the gas heater on or off, remembering the current state so the
-  // Bosch config write is only issued when it actually changes - it is an I2C
-  // transaction, and the sentinel path runs every 10 seconds.
+  // Enciende o apaga el calefactor de gas, recordando el estado actual para que la
+  // escritura de configuracion (una transaccion I2C) solo se haga cuando cambia de
+  // verdad.
   bool setHeater(bool on);
 
   uint8_t _addr;
-  bool _primed = false;  // a discarded first measurement has been taken - see the .cpp
+  bool _primed = false;  // historico: ver primeAndMark() en el .cpp
   uint8_t _chipId = 0;
   bool _chipIdValid = false;
   int _chipIdMode = -1;
-  bool _heaterOn = true;  // begin() leaves the library's default profile enabled
+  bool _heaterOn = true;  // begin() deja activo el perfil por defecto de la libreria
   BME69X_7Semi _sensor;
 };

@@ -2,20 +2,24 @@
 
 #include <stdint.h>
 
-// Latest-known sensor readings plus link quality and freshness. This struct is
-// the only thing the web layer knows about - it has no idea LoRa or a parser
-// exist, it just reads whatever snapshot it's handed.
+// =============================================================================
+// UNA LECTURA DE UN NODO, TAL COMO LA GUARDA MODULO B
+// =============================================================================
+//
+// Las ultimas lecturas conocidas mas la calidad del enlace y su frescura. Esta
+// estructura es lo unico que conoce la parte web: no sabe que existen LoRa ni el
+// interprete, solo lee la lectura que se le da.
 struct SensorSnapshot {
-  bool hasData = false;     // false until the very first valid packet arrives
-  uint32_t lastHeardMs = 0;  // millis() timestamp of the last valid packet
-  uint16_t senderAddr = 0;  // LoRa AT+ADDRESS of the node that sent this reading
-  int16_t rssi = 0;
-  int8_t snr = 0;
+  bool hasData = false;     // false hasta que llega el primer paquete valido
+  uint32_t lastHeardMs = 0;  // millis() del momento en que se TOMO la lectura (ya corregido por su antiguedad)
+  uint16_t senderAddr = 0;  // direccion LoRa AT+ADDRESS del nodo que la envio
+  int16_t rssi = 0;         // intensidad de la senal recibida (dBm)
+  int8_t snr = 0;           // relacion senal/ruido (dB)
 
-  float temp = 0;    // BME690, deg C
+  float temp = 0;    // BME690, grados C
   float hum = 0;      // BME690, %
   float pres = 0;      // BME690, hPa
-  float gas = 0;        // BME690, ohm
+  float gas = 0;        // BME690, ohmios
 
   float pm1 = 0;    // BMV080, ug/m3
   float pm25 = 0;
@@ -24,27 +28,26 @@ struct SensorSnapshot {
   float co2 = 0;   // CM1106, ppm
 
   float co = 0;      // SEN0466, ppm
-  float coTemp = 0;   // SEN0466 onboard temp, deg C
+  float coTemp = 0;   // SEN0466, temperatura interna, grados C
 
-  float windAngle = 0;  // Calypso, deg
+  float windAngle = 0;  // Calypso, grados
   float windSpeed = 0;   // Calypso
   bool windValid = false;
 
-  // Node health, carried in the node's separate STAT packet rather than in the
-  // telemetry payload. Filled in from the most recent STAT seen from that node, so
-  // the charge state travels to ThingsBoard alongside the sensor data instead of
-  // stopping at Module B.
+  // Salud del nodo. Llega en el paquete STAT, aparte de la telemetria. Se rellena
+  // con el ultimo STAT recibido de ese nodo, para que el estado de carga viaje a
+  // ThingsBoard junto con los datos de los sensores en vez de quedarse en Modulo B.
   //
-  // chargePct is -1 until a STAT has been heard from that node - a real 0% and
-  // "not yet known" are different things, and a node reporting 0% when it simply
-  // has not said anything yet would be alarming for no reason.
+  // chargePct vale -1 hasta que se recibe un STAT de ese nodo: un 0% real y "aun no
+  // se sabe" son cosas distintas, y un nodo que dijera 0% simplemente por no haber
+  // hablado todavia alarmaria sin motivo.
   int16_t chargePct = -1;
   int16_t capMv = -1;
 
-  // Fire state as reported by the node in its STAT packet: 0 normal, 1 pre-alarm,
-  // 2 alarm. -1 means the node never said - an older node whose STAT has only
-  // eight fields. "Unknown" and "normal" must stay distinct: a dashboard showing
-  // a confident NORMAL for a node that is not reporting at all is worse than one
-  // showing nothing.
+  // Estado de incendio segun el STAT del nodo: 0 normal, 1 pre-alarma, 2 alarma.
+  // -1 significa que el nodo nunca lo dijo (un nodo antiguo cuyo STAT solo tiene ocho
+  // campos). "Desconocido" y "normal" tienen que seguir siendo distintos: un panel que
+  // muestra NORMAL con seguridad para un nodo que no informa es peor que uno que no
+  // muestra nada.
   int8_t alarmState = -1;
 };

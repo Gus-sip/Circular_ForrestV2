@@ -4,38 +4,42 @@
 #include <stdio.h>
 #include <string.h>
 
-// LoRa ground-station receiver configuration. Everything tunable lives here,
-// same convention as the sensor-node repo's Config.h.
+// =============================================================================
+// CONFIGURACION DE MODULO B (PASARELA LoRa -> NB-IoT -> ThingsBoard)
+// =============================================================================
+//
+// Todo lo ajustable esta aqui, con la misma convencion que el Config.h del nodo.
+//
+// OJO, SEGURIDAD: este archivo contiene el token de acceso de ThingsBoard y la
+// contrasena del WiFi local. No debe publicarse.
 
-// ---------- RYLR998 wiring (ESP32-S3-Zero) ----------
-// Same crossover convention as the sensor node: module TXD -> ESP RX, module
-// RXD <- ESP TX. Not wired to any sensors on this board - LoRa module only.
-#define LORA_RX_PIN 4  // module TXD -> ESP RX
-#define LORA_TX_PIN 5  // module RXD <- ESP TX
+// ---------- Cableado de la radio RYLR998 ----------
+// El mismo cruce que en el nodo: TXD del modulo -> RX del ESP, RXD del modulo <- TX
+// del ESP. Esta placa no tiene sensores: solo el modulo LoRa.
+#define LORA_RX_PIN 4  // TXD del modulo -> RX del ESP
+#define LORA_TX_PIN 5  // RXD del modulo <- TX del ESP
 #define LORA_BAUD 115200
-#define LORA_EN_PIN 13  // Q4 power-rail gate, LOW = on - 2026-08-19 pin-scan discovery (see project memory)
+#define LORA_EN_PIN 13  // puerta Q4 del rail, LOW = encendido - descubierta probando pines el 2026-08-19
 
-// ---------- LoRa link parameters - MUST match the sensor node exactly ----------
-// SF/BW/CR/preamble are NOT the generic "commonly documented" RYLR998 defaults
-// (7,7,1,4) originally assumed here - that combination came back +ERR=18 from
-// the actual sensor-node-side module. These values were read directly off that
-// module via AT+PARAMETER? (pp1-optimize's src/rylr998_param_probe.cpp)
-// instead of guessed a second time. If you ever change these, change them on
-// both ends together and re-verify with that same probe.
-#define LORA_BAND_HZ 868000000UL  // EU868 - Spain deployment (confirmed, do not change)
+// ---------- Parametros del enlace LoRa - TIENEN que coincidir exactamente con el nodo ----------
+// SF/BW/CR/preambulo NO son los valores por defecto "habitualmente documentados"
+// del RYLR998 (7,7,1,4) que se supusieron al principio: esa combinacion la rechazo
+// con +ERR=18 el modulo del nodo. Estos valores se leyeron directamente de ese
+// modulo con AT+PARAMETER? en vez de adivinarlos otra vez. Si se cambian, hay que
+// cambiarlos en los dos extremos a la vez y volver a comprobarlos.
+#define LORA_BAND_HZ 868000000UL  // EU868 - despliegue en Espana (confirmado, no cambiar)
 #define LORA_NETWORK_ID 5
-// SF7 (was SF9) - MUST match the sensor node's chip_forest_lora_tx.cpp
-// (LORA_PARAM_SF). Dropped from 9 to 7 (2026-08-28) so the node's 15s TX
-// cadence stays under the EU868 1% duty cycle; costs ~5-6dB link budget. See
-// that file's header for the airtime math and the range caveat.
+// SF7 (antes SF9) - TIENE que coincidir con LORA_PARAM_SF de chip_forest_lora_tx.cpp
+// del nodo. Bajado de 9 a 7 el 2026-08-28 para que la cadencia de envio de entonces
+// cumpliera el ciclo de trabajo del 1% de EU868; cuesta ~5-6 dB de enlace. Ver la
+// cabecera de aquel archivo.
 #define LORA_PARAM_SF 7
 #define LORA_PARAM_BW 7
 #define LORA_PARAM_CR 1
 #define LORA_PARAM_PREAMBLE 12
 
-// Most readings one batch packet can carry. A node caps its own batch so the
-// packet fits the RYLR998's 240-byte limit (READINGS_PER_PACKET_MAX on Module C);
-// this is that, plus headroom.
+// Cuantas lecturas puede llevar como mucho un paquete de lote. El nodo parte sus
+// lotes para que quepan en los 240 bytes del RYLR998; esto es eso mas margen.
 #define BATCH_RX_MAX 6
 
 // NODE_TICK_SECONDS se quito el 2026-10-12. Valia 10 y servia para fechar cada
@@ -59,33 +63,33 @@
 // que es donde de verdad importa porque es donde el nodo duerme.
 #define NODE_TIME_SYNC_MIN_GAP_MS 300000UL
 
-#define LORA_NODE_ADDR 1  // sensor node's AT+ADDRESS
-#define LORA_MY_ADDR 2    // this receiver's own AT+ADDRESS - must differ from the node's
+#define LORA_NODE_ADDR 1  // direccion AT+ADDRESS del nodo C1
+#define LORA_MY_ADDR 2    // direccion AT+ADDRESS propia de este receptor - distinta de la de los nodos
 
-// ---------- Node name table (LoRa AT+ADDRESS -> ThingsBoard device name) ----------
-// Used by the MQTT gateway publish to name each node in the
-// v1/gateway/telemetry payload. One entry per node deployed so far - add to
-// this as more nodes join, never remove/renumber an existing entry (the
-// name is what ThingsBoard uses to identify the device going forward).
+// ---------- Tabla de nombres (direccion LoRa -> nombre del dispositivo en ThingsBoard) ----------
+// La usa la publicacion MQTT de pasarela para nombrar cada nodo en el contenido de
+// v1/gateway/telemetry. Una entrada por nodo desplegado; anadir aqui los nodos
+// nuevos y no quitar ni renumerar nunca una entrada existente (el nombre es lo que
+// ThingsBoard usa para identificar el dispositivo en adelante).
 struct NodeNameEntry {
   uint16_t addr;
   const char *name;
 };
 
-// Address 2 is this receiver (LORA_MY_ADDR) and is deliberately absent - it is
-// never a sender. Nodes were all shipped on address 1, which made them
-// indistinguishable on the air; they now get one address each, set per build via
-// the env:module-c-node* environments.
+// La direccion 2 es este receptor (LORA_MY_ADDR) y falta a proposito: nunca emite
+// telemetria. Todos los nodos salieron con la direccion 1, lo que los hacia
+// indistinguibles en el aire; ahora cada uno tiene la suya, fijada en cada
+// compilacion con los entornos env:module-c-node*.
 static const NodeNameEntry NBIOT_NODE_NAMES[] = {
     {LORA_NODE_ADDR, "NodoC-1"},  // 1
     {3, "NodoC-2"},
     {4, "NodoC-3"},
 };
 
-// Resolves addr to its configured name, or "NodoDesconocido-<addr>" if addr
-// isn't in the table above. Deliberately never drops a reading just because
-// its sender isn't recognized - a node with a placeholder name is visible
-// and fixable in ThingsBoard; a node whose data is silently discarded isn't.
+// Traduce addr a su nombre configurado, o a "NodoDesconocido-<addr>" si no esta en
+// la tabla de arriba. A proposito nunca se tira una lectura porque su emisor no se
+// reconozca: un nodo con un nombre provisional se ve y se arregla en ThingsBoard; un
+// nodo cuyos datos se tiran en silencio, no.
 inline void nbiotResolveNodeName(uint16_t addr, char *outName, size_t outCap) {
   for (size_t i = 0; i < sizeof(NBIOT_NODE_NAMES) / sizeof(NBIOT_NODE_NAMES[0]); i++) {
     if (NBIOT_NODE_NAMES[i].addr == addr) {
@@ -97,325 +101,314 @@ inline void nbiotResolveNodeName(uint16_t addr, char *outName, size_t outCap) {
   snprintf(outName, outCap, "NodoDesconocido-%u", addr);
 }
 
-// ---------- OLED status display (GME12864, SSD1306-compatible 128x64 I2C) ----------
+// ---------- Pantalla OLED de estado (GME12864, compatible SSD1306, 128x64 por I2C) ----------
 #define OLED_SDA_PIN 1
 #define OLED_SCL_PIN 2
 #define OLED_I2C_ADDR 0x3C
 #define OLED_WIDTH 128
 #define OLED_HEIGHT 64
 
-// ---------- WiFi AP ----------
-// PLACEHOLDER credentials - change before field deployment. WPA2 requires an
-// 8-63 char passphrase.
+// ---------- Punto de acceso WiFi ----------
+// Credenciales PROVISIONALES - cambiar antes del despliegue. WPA2 exige una clave de
+// 8 a 63 caracteres. (Ojo: setup() imprime la contrasena por el puerto serie.)
 #define WIFI_AP_SSID "CHIP-FOREST-RX"
 #define WIFI_AP_PASSWORD "chipforest1"
 
-// ---------- Local history log ----------
-// In-RAM ring buffer of received readings, downloadable as CSV from
-// /history - lets you record what Module C sent even when Module A/MQTT is
-// unreachable (or you just don't want to wait on ThingsBoard for a quick
-// bench test). Not persisted across a reboot/power loss - this is a bench
-// convenience, not a replacement for the real ThingsBoard uplink.
+// ---------- Historico local ----------
+// Anillo en RAM con las lecturas recibidas, descargable en CSV desde /history:
+// permite registrar lo que mando Modulo C aunque Modulo A/MQTT no este accesible (o
+// para una prueba rapida en el banco sin esperar a ThingsBoard). No sobrevive a un
+// reinicio ni a un corte: es una comodidad de banco, no un sustituto de la subida
+// real a ThingsBoard.
 #define LORA_HISTORY_CAPACITY 200
 
-// ---------- Dashboard staleness ----------
-// If no packet has arrived within this window, the dashboard shows "signal
-// lost" instead of the last numbers, so stale data is never mistaken for live.
-// Must stay comfortably above the node's LoRa send period (LORA_TX_PERIOD_MS,
-// 5 min default in chip_forest_lora_tx.cpp) or the dashboard would flag "lost"
-// between every normal transmission. Set to ~2.4x that (12 min) - roughly two
-// missed packets before it reads stale. The node's send period is remotely
-// tunable via CFG,INTERVAL=..., so a fixed threshold can't track an
-// arbitrarily-pushed value; tracking the last-applied interval dynamically is
-// future work, contingent on Module B relaying CFG downlink (it doesn't yet).
+// ---------- Datos viejos en el panel ----------
+// Si no llega ningun paquete en este tiempo, el panel muestra "senal perdida" en vez
+// de los ultimos numeros, para que un dato viejo no se confunda con uno en vivo.
+// Debe quedar holgadamente por encima del periodo de envio del nodo, o el panel
+// marcaria "perdido" entre dos envios normales. (OJO: se fijo cuando el nodo
+// enviaba cada 5 min; con el calendario actual, en estado NORMAL el nodo envia cada
+// 30 min, asi que con 12 min el panel local mostrara "stale" entre envios normales.)
 #define DATA_STALE_MS 720000
 
-// ---------- NB-IoT uplink (Quectel BC660K-GL, "Module B" cellular backhaul) ----------
-// UART2 - deliberately NOT Serial1 (UART1), which the RYLR998 above already
-// owns on GPIO4/5. ESP32-S3 only has three UART controllers (0/1/2) and
-// USB-CDC is separate from all of them; reusing UART1 for the modem would
-// collide with the LoRa radio the moment both run in the same firmware.
+// ---------- Subida NB-IoT (Quectel BC660K-GL, el enlace movil de Modulo B) ----------
+// UART2 - a proposito NO Serial1 (UART1), que ya es del RYLR998 de arriba en
+// GPIO4/5. El ESP32-S3 solo tiene tres controladores UART (0/1/2) y el USB-CDC va
+// aparte de todos; reutilizar UART1 para el modem chocaria con la radio LoRa en
+// cuanto los dos funcionaran en el mismo firmware.
 #define NBIOT_BAUD 115200
 
-// Power/pin sequence hardware-confirmed 2026-08-19 on the real PCB (see
-// project memory "project_nbiot_uplink_bringup") - supersedes everything
-// this section previously assumed, none of which had been validated against
-// real hardware timing before that session:
-//   GP9 LOW (VIN) -> GP10 LOW (a transistor-gated channel not in any
-//   schematic reviewed - without it, UART carries no signal at all) ->
-//   settle -> GP11 pulsed LOW ~1000ms then released HIGH (PWRKEY - contrary
-//   to the old assumption below, this module does NOT auto-boot on VIN
-//   alone) -> wait for boot -> AT works on RX=GP44/TX=GP43 @ 115200 (the
-//   schematic's UARTDB_TX/RX native-UART0 pins were right all along; the
-//   module just never booted far enough to use them before).
-#define NBIOT_RX_PIN 44  // ESP RX <- module TXD
-#define NBIOT_TX_PIN 43  // ESP TX -> module RXD
+// Secuencia de alimentacion y pines confirmada en el hardware el 2026-08-19 sobre la
+// placa real; sustituye a todo lo que esta seccion suponia antes, que nunca se habia
+// validado con los tiempos reales:
+//   GP9 LOW (VIN) -> GP10 LOW (un canal con transistor que no estaba en ningun
+//   esquema revisado - sin el, el UART no lleva ninguna senal) -> espera -> GP11 a
+//   LOW ~1000 ms y luego HIGH (PWRKEY; al contrario de lo que se suponia, este modulo
+//   NO arranca solo con VIN) -> esperar el arranque -> AT funciona en RX=GP44/TX=GP43
+//   a 115200 (los pines UART0 nativos del esquema eran los buenos desde el
+//   principio; el modulo simplemente nunca habia llegado a arrancar).
+// (Nota posterior: segun la investigacion de octubre, PWRKEY NO esta cableado en
+// esta placa; el modem arranca con VIN.)
+#define NBIOT_RX_PIN 44  // RX del ESP <- TXD del modulo
+#define NBIOT_TX_PIN 43  // TX del ESP -> RXD del modulo
 
 #define NBIOT_EN_PIN 9
 #define NBIOT_EN_ACTIVE LOW
 #define NBIOT_DISABLE (!NBIOT_EN_ACTIVE)
 
-#define NBIOT_CHANNEL_PIN 10  // transistor-gated channel, LOW = open - 2026-08-19 discovery
+#define NBIOT_CHANNEL_PIN 10  // canal con transistor, LOW = abierto - descubierto el 2026-08-19
 #define NBIOT_CHANNEL_ACTIVE LOW
 
 #define NBIOT_PWRKEY_PIN 11
 #define NBIOT_PWRKEY_ACTIVE LOW
 #define NBIOT_PWRKEY_PULSE_MS 1000
 
-// RST, P1 pin 5 (the schematic mislabels this net "RTS" - it is not a UART
-// flow-control line, it's the module's reset input). Active-low pulse. Not
-// exercised by the confirmed bring-up sequence above - kept for a future
-// explicit-reset recovery path, not currently wired into POWERING.
+// RST, P1 pin 5 (el esquema llama a esta pista "RTS" por error: no es una linea de
+// control de flujo del UART, es la entrada de reset del modulo). Pulso activo a
+// nivel bajo. HISTORICO: no lo usa la secuencia confirmada de arriba; se dejo para
+// una futura recuperacion por reset explicito que no esta hecha.
 #define NBIOT_RST_PIN 6
 #define NBIOT_RST_ACTIVE LOW
 #define NBIOT_RST_PULSE_MS 200
 
-// ---------- Network (1NCE SIM) ----------
-// "iot.1nce.net" is 1NCE Platform 1.0 and gets registration denied on this
-// account (Platform 2.0) - confirmed both by 1NCE support directly and by
-// hardware bring-up 2026-08-19. Use sensor.net, PAP, empty user/pass.
+// ---------- Red (SIM de 1NCE) ----------
+// "iot.1nce.net" es la Plataforma 1.0 de 1NCE y en esta cuenta (Plataforma 2.0) da
+// registro denegado - confirmado por el soporte de 1NCE y en la puesta en marcha del
+// 2026-08-19. Usar sensor.net, PAP, usuario y contrasena vacios.
 #define NBIOT_APN "sensor.net"
-// BC660K-GL's own PDP context is numbered from 0, NOT 1 - the BC66 docs (and
-// most Quectel AT-command examples) use context 1, which is a common trap on
-// this specific module. IMPORTANT: context 0 is this module's built-in
-// default context, and the standard AT+CGDCONT command does NOT work on it
-// (rejected with "+CME ERROR: operation not supported", confirmed
-// 2026-08-19) - use AT+QCGDEFCONT="IP",<apn> instead. Also: AT+CFUN=1 must
-// be sent explicitly before AT+CPIN? - this module does not auto-enable its
-// radio/protocol stack on boot (AT+CPIN? fails "+CME ERROR: ue not power
-// on" until CFUN=1 is issued).
+// El contexto PDP propio del BC660K-GL se numera desde 0, NO desde 1: la
+// documentacion del BC66 (y casi todos los ejemplos AT de Quectel) usan el contexto
+// 1, una trampa habitual con este modulo. IMPORTANTE: el contexto 0 es el contexto
+// por defecto integrado del modulo, y el comando estandar AT+CGDCONT NO funciona con
+// el (se rechaza con "+CME ERROR: operation not supported", confirmado el
+// 2026-08-19): usar AT+QCGDEFCONT="IP",<apn>. Ademas AT+CFUN=1 tiene que mandarse
+// expresamente antes de AT+CPIN?: este modulo no activa solo su radio al arrancar
+// (AT+CPIN? falla con "+CME ERROR: ue not power on" hasta que se manda CFUN=1).
 #define NBIOT_CONTEXT_ID 0
 
 // ---------- MQTT / ThingsBoard (ModemNBIoTMqtt) ----------
-// test-moduloa.home.kg is Module A's self-hosted ThingsBoard instance - not
-// ThingsBoard Cloud/demo.thingsboard.io, confirmed by the user 2026-08-19.
+// test-moduloa.home.kg es la instancia propia de ThingsBoard de Modulo A - no
+// ThingsBoard Cloud ni demo.thingsboard.io, confirmado por el usuario el 2026-08-19.
 //
-// Port 1883 is direct-LAN only and NOT reachable from the public internet -
-// found 2026-08-19 by comparing against a working ESPHome device's config
-// for this same broker: internet-connected clients (this one, over
-// cellular) go through an Azure relay + reverse SSH tunnel on port 18831
-// instead. Connecting to 1883 over the internet doesn't fail to connect at
-// the TCP/MQTT-framing level - it produces a real, well-formed CONNACK,
-// just always with reason code 5 ("not authorized"), which looks exactly
-// like a credentials problem and cost real debugging time before the port
-// mismatch was found. Verified directly: a plain Python paho-mqtt client
-// got CONNACK 5 on 1883 and CONNACK 0 (success) on 18831 with the exact
-// same token, no other change.
+// El puerto 1883 solo es accesible desde la red local, NO desde internet - se vio el
+// 2026-08-19 comparando con la configuracion de un dispositivo ESPHome que funcionaba
+// con este mismo servidor: los clientes por internet (este, por la red movil) pasan
+// por un reenvio en Azure + un tunel SSH inverso en el puerto 18831. Conectarse al
+// 1883 por internet no falla a nivel TCP/MQTT: devuelve un CONNACK real y bien
+// formado, pero siempre con el codigo 5 ("no autorizado"), que parece exactamente un
+// problema de credenciales y costo bastante depuracion antes de dar con el puerto.
+// Comprobado: un cliente paho-mqtt en Python recibio CONNACK 5 en 1883 y CONNACK 0
+// (correcto) en 18831 con el mismo token, sin ningun otro cambio.
 #define MQTT_BROKER_HOST "test-moduloa.home.kg"
 #define MQTT_BROKER_PORT 18831
-// MQTT SESSION LABEL ONLY - NOT THE DEVICE NAME, AND DELIBERATELY NOT CHANGED.
+// SOLO LA ETIQUETA DE LA SESION MQTT - NO EL NOMBRE DEL DISPOSITIVO, Y A PROPOSITO
+// SIN CAMBIAR.
 //
-// The device in ThingsBoard is called "CON-01". This string says "CON-1" and
-// that is harmless: ThingsBoard identifies the device by the ACCESS TOKEN below,
-// which arrives as the MQTT username. The client id is just the MQTT session
-// identifier.
+// El dispositivo en ThingsBoard se llama "CON-01". Este texto dice "CON-1" y es
+// inofensivo: ThingsBoard identifica el dispositivo por el TOKEN DE ACCESO de abajo,
+// que llega como usuario MQTT. El client id es solo el identificador de la sesion.
 //
-// Confirmed on 2026-10-06, after the mismatch cost real time: the RPC debug
-// terminal targets "CON-01", there is no device named "CON-1", and B had been
-// connecting correctly the whole time.
+// Confirmado el 2026-10-06, despues de que la diferencia costara tiempo: el terminal
+// de depuracion RPC apunta a "CON-01", no hay ningun dispositivo llamado "CON-1", y B
+// llevaba todo el tiempo conectandose bien.
 //
-// NOT changed to "CON-01" on purpose. Clean-session persistence is keyed on the
-// client id, so renaming it starts a fresh session at the broker and discards
-// anything queued for the old one - including commands published while B is
-// rebooting, which is exactly the delivery we rely on. The confusion is cheaper
-// to document than the dropped messages are to debug.
+// NO se cambia a "CON-01" a proposito. La persistencia de la sesion va ligada al
+// client id, asi que renombrarlo empieza una sesion nueva en el servidor y tira todo
+// lo que hubiera en cola para la vieja - incluidas las ordenes publicadas mientras B
+// se reinicia, que es justo la entrega de la que dependemos. La confusion sale mas
+// barata documentada que los mensajes perdidos depurandolos.
 #define MQTT_CLIENT_ID "CON-1"
-// ThingsBoard access-token auth: token goes in as the MQTT username, no
-// password. This is the gateway device's token - the device is "CON-01" in
-// ThingsBoard, created 2026-08-28 with "Is gateway" enabled to replace the
-// earlier "CON-MODB_TEST" - not any individual node's; the hub publishes on
-// nodes' behalf via the Gateway API (see modem_nbiot_mqtt.h).
-// EACH MODULE B BOARD HAS ITS OWN GATEWAY DEVICE AND ITS OWN TOKEN, and the token
-// is compiled in - so this line has to match the board being flashed, or telemetry
-// silently lands on the other board's device with no error at either end.
+// Autenticacion de ThingsBoard por token de acceso: el token va como usuario MQTT,
+// sin contrasena. Es el token del dispositivo PASARELA - "CON-01" en ThingsBoard,
+// creado el 2026-08-28 con "Is gateway" activado para sustituir al antiguo
+// "CON-MODB_TEST" - y no el de ningun nodo: la pasarela publica en nombre de los
+// nodos con la API de pasarela (ver modem_nbiot_mqtt.h).
+// CADA PLACA MODULO B TIENE SU PROPIO DISPOSITIVO PASARELA Y SU PROPIO TOKEN, y el
+// token va compilado - asi que esta linea tiene que corresponder a la placa que se
+// flashea, o la telemetria acaba en silencio en el dispositivo de la otra placa sin
+// ningun error en ningun extremo.
 //
 //   Module B #1  MAC 28:84:85:6F:8F:DC   QRPJgyk5COJPCavycmpp   <-- set below
 //   Module B #2  MAC 28:84:85:6f:88:94   lIdRdiuBluhDbApBaPmJ
 //
-// Check the MAC before flashing (esptool prints it, and pyserial reports it as
-// serial_number). The two boards' MACs differ only in the last three bytes.
+// Comprobar la MAC antes de flashear (esptool la imprime, y pyserial la da como
+// serial_number). Las MAC de las dos placas solo se diferencian en los tres ultimos
+// bytes.
 #define MQTT_ACCESS_TOKEN "QRPJgyk5COJPCavycmpp"
-#define MQTT_CLIENT_IDX 0  // AT+QMTOPEN/QMTCONN/QMTPUB client index - only one MQTT client is ever open, so a fixed 0 is fine
+#define MQTT_CLIENT_IDX 0  // indice de cliente de AT+QMTOPEN/QMTCONN/QMTPUB - solo hay un cliente MQTT abierto, asi que 0 fijo
 
-// ---------- MQTT batching / publish cadence (ModemNBIoTMqtt) ----------
-// Decoupled from the legacy NBIOT_BATCH_* binary-frame constants below (those
-// still feed the retired raw-UDP path and its host test). The MQTT path
-// buffers LoRa readings and uplinks them in time-driven batches:
+// ---------- Lotes / cadencia de publicacion MQTT (ModemNBIoTMqtt) ----------
+// Independiente de las constantes NBIOT_BATCH_* de la trama binaria de mas abajo
+// (esas son de la via UDP retirada y de su prueba unitaria). La via MQTT acumula las
+// lecturas LoRa y las sube en lotes por tiempo:
 //
-//   MQTT_BATCH_SECONDS       - publish this often. Module C TXes every ~5 min,
-//                              so a 10-min batch carries ~2 readings.
-//   MQTT_BATCH_MAX_READINGS  - count trigger: publish early if the ring hits
-//                              this many before the timer (guards against a
-//                              slowed-down uplink letting the ring overflow).
-//   MQTT_PUB_CHUNK_READINGS  - a single AT+QMTPUB payload must stay under the
-//                              BC660K-GL's ~1400-byte message limit; one
-//                              batch is sent as ceil(N/chunk) back-to-back
-//                              QMTPUBs over the already-open session. A
-//                              timestamped reading is ~230 bytes typical,
-//                              ~300 worst case, so 4 (~1200B worst case)
-//                              keeps margin under 1400.
-// Lowered 600 -> 60 (2026-09-14). Ten minutes is a long time to sit on a reading
-// from a WILDFIRE sensor, and it also made the uplink impossible to verify: with
-// fewer than MQTT_BATCH_MAX_READINGS buffered, nothing was published for ten
-// minutes and the chain looked broken when it was merely waiting. 60UL is
-// MQTT_BATCH_SECONDS_MIN. Raise it again if NB-IoT data volume becomes the
-// binding constraint - the trade is uplink cost against detection latency.
+//   MQTT_BATCH_SECONDS       - publicar cada este tiempo.
+//   MQTT_BATCH_MAX_READINGS  - disparo por cantidad: publicar antes si el anillo
+//                              llega a estas lecturas antes del temporizador (evita
+//                              que una subida lenta haga desbordar el anillo).
+//   MQTT_PUB_CHUNK_READINGS  - un solo AT+QMTPUB tiene que quedar por debajo del
+//                              limite de ~1400 bytes por mensaje del BC660K-GL; un
+//                              lote se manda como ceil(N/trozo) QMTPUB seguidos por la
+//                              sesion ya abierta. Una lectura con marca de tiempo
+//                              son ~230 bytes normalmente y ~300 en el peor caso, asi
+//                              que 4 (~1200 B en el peor caso) deja margen bajo 1400.
+// Bajado de 600 a 60 (2026-09-14). Diez minutos es mucho tiempo para quedarse una
+// lectura de un sensor de INCENDIOS, y ademas hacia imposible comprobar la subida:
+// con menos de MQTT_BATCH_MAX_READINGS en cola no se publicaba nada en diez minutos y
+// la cadena parecia rota cuando solo estaba esperando. 60UL es MQTT_BATCH_SECONDS_MIN.
+// Subirlo otra vez si el volumen de datos NB-IoT pasa a ser el limite: se cambia
+// coste de subida por rapidez de deteccion.
 #define MQTT_BATCH_SECONDS 60UL
 #define MQTT_BATCH_MAX_READINGS 6
 #define MQTT_PUB_CHUNK_READINGS 4
 
-// Both batch targets are runtime-mutable from Module A - see the downlink
-// section below. Clamped so a fat-fingered command can't stop telemetry dead
-// or hammer the SIM's data allowance:
-//   SECONDS floor 60  - below this the uplink costs more in cellular overhead
-//                       than the readings are worth (Module C only produces
-//                       one reading per LORA_TX_PERIOD_MS anyway).
-//   READINGS ceiling  - never above NBIOT_RING_CAPACITY, or the count trigger
-//                       could never fire before the ring wraps and drops.
+// Los dos objetivos de lote se pueden cambiar en marcha desde Modulo A - ver la
+// seccion de ordenes de abajo. Se recortan para que una orden mal tecleada no pueda
+// parar la telemetria ni agotar los datos de la SIM:
+//   suelo de SEGUNDOS 60  - por debajo, la subida cuesta mas en sobrecarga movil de lo
+//                           que valen las lecturas.
+//   techo de LECTURAS     - nunca por encima de NBIOT_RING_CAPACITY, o el disparo por
+//                           cantidad no llegaria nunca antes de que el anillo diera la
+//                           vuelta y tirara lecturas.
 #define MQTT_BATCH_SECONDS_MIN 60UL
 #define MQTT_BATCH_SECONDS_MAX 86400UL
 #define MQTT_BATCH_READINGS_MIN 1
 #define MQTT_BATCH_READINGS_MAX NBIOT_RING_CAPACITY
 
-// ---------- Downlink: Module A -> Module B (-> Module C) ----------
-// Two subscriptions, because ThingsBoard addresses the gateway itself and its
-// child devices on different topics:
-//   MQTT_TOPIC_DEVICE_RPC_SUB  - RPC aimed at THIS device (the CON-01 gateway),
-//                                i.e. Module B's own settings. Response goes to
-//                                MQTT_TOPIC_DEVICE_RPC_RESP + the request id.
-//   MQTT_TOPIC_GATEWAY_RPC     - RPC aimed at a child device (NodoC-1 etc).
-//                                Module B translates it into the LoRa
-//                                "CFG,<key>=<value>" grammar Module C already
-//                                speaks, queues it, and sends it during that
-//                                node's next post-TX listen window. The reply
-//                                is published back on this same topic.
+// ---------- Ordenes: Modulo A -> Modulo B (-> Modulo C) ----------
+// Dos suscripciones, porque ThingsBoard se dirige a la propia pasarela y a sus
+// dispositivos hijos por topics distintos:
+//   MQTT_TOPIC_DEVICE_RPC_SUB  - RPC a ESTE dispositivo (la pasarela CON-01): ajustes
+//                                de Modulo B y la orden configurarModuloC. La
+//                                respuesta va a MQTT_TOPIC_DEVICE_RPC_RESP + el id.
+//   MQTT_TOPIC_GATEWAY_RPC     - RPC a un dispositivo hijo (NodoC-1, etc.). Modulo B
+//                                lo traduce a la gramatica LoRa "CFG,<clave>=<valor>"
+//                                que ya entiende Modulo C, lo pone en cola y lo manda
+//                                en la siguiente ventana de escucha de ese nodo. La
+//                                respuesta se publica en este mismo topic.
 #define MQTT_TOPIC_DEVICE_RPC_SUB "v1/devices/me/rpc/request/+"
 #define MQTT_TOPIC_DEVICE_RPC_RESP "v1/devices/me/rpc/response/"
 #define MQTT_TOPIC_GATEWAY_RPC "v1/gateway/rpc"
 
-// Where commandLog goes. The agreed protocol (Protocolo_comandos_ModA_hacia_
-// ModC_por_B_v1) reports a command's OUTCOME as telemetry rather than as the RPC
-// response, because the RPC is answered immediately with "enviado" long before the
-// node has been reached. Two different messages, two different topics.
+// Donde va el commandLog. El protocolo acordado (Protocolo_comandos_ModA_hacia_
+// ModC_por_B_v1) informa del RESULTADO de una orden como telemetria y no como
+// respuesta RPC, porque el RPC se contesta en el acto con "enviado" mucho antes de
+// llegar al nodo. Dos mensajes distintos, dos topics distintos.
 #define MQTT_TOPIC_DEVICE_TELEMETRY "v1/devices/me/telemetry"
 #define MQTT_DOWNLINK_QOS 1
 
-// A node-directed command can only be delivered during the target node's
-// ~2s post-TX listen window, which comes round once per its send period
-// (5 min by default). Give up and answer the RPC with a timeout after this
-// long rather than holding a command queued forever against a dead node.
+// Una orden para un nodo solo se puede entregar en la ventana de escucha de ~2 s
+// tras cada envio del nodo. Pasado este tiempo se deja de intentar y se informa de
+// un timeout, en vez de mantener la orden en cola para siempre contra un nodo muerto.
+// (OJO: "3 ventanas perdidas a 5 min" era con el envio cada 5 min; con el calendario
+// actual, en estado NORMAL el nodo envia cada 30 min, asi que una orden puede expirar
+// antes de que el nodo abra su siguiente ventana.)
 #define DOWNLINK_QUEUE_TIMEOUT_MS 900000UL  // 15 min = 3 missed windows at 5 min
 
-// Minimum gap between two delivery attempts of the SAME command.
+// Separacion minima entre dos intentos de entrega de LA MISMA orden.
 //
-// A node transmits more than once per window - telemetry, then STAT about 2s
-// later - and main.cpp runs its downlink hook on every frame it receives. Without
-// a floor here the retry would fire again on the STAT frame, spending every
-// attempt inside a single window while the node was already deaf.
+// Un nodo transmite mas de una vez por ventana - telemetria, y el STAT unos 2 s
+// despues - y main.cpp ejecuta su gancho de ordenes con cada trama que recibe. Sin un
+// minimo aqui el reintento saltaria otra vez con la trama STAT, gastando todos los
+// intentos dentro de una misma ventana cuando el nodo ya estaba sordo.
 //
-// 10s sits above that intra-window spacing and below LORA_TX_PERIOD_MIN_MS (15s),
-// the shortest send period a node can be configured to, so one window can never
-// produce two attempts and no window is ever skipped.
+// 10 s queda por encima de esa separacion dentro de la ventana y por debajo de
+// LORA_TX_PERIOD_MIN_MS (15 s), el periodo de envio mas corto que se le puede poner a
+// un nodo, asi que una ventana nunca produce dos intentos y nunca se salta una.
 #define DOWNLINK_RETRY_MIN_GAP_MS 10000UL
 
-// Per-reading timestamps: without a "ts" ThingsBoard stamps every reading in
-// a batch at receipt time, collapsing a 2-min batch to one instant. Module B
-// has no RTC, so it reads network time once per attach via AT+CCLK? (needs
-// AT+CTZU=1, set in CONFIG) and timestamps each reading at its LoRa-receive
-// moment. If the network never provides time (CCLK year < 2023), the uplink
-// falls back to the flat no-"ts" form automatically.
-#define NBIOT_MIN_VALID_EPOCH_MS 1672531200000LL  // 2023-01-01T00:00:00Z - anything earlier = "no network time"
+// Marcas de tiempo por lectura: sin "ts", ThingsBoard pone a todas las lecturas de un
+// lote la hora de llegada, aplastando un lote de minutos en un instante. Modulo B no
+// tiene reloj, asi que lee la hora de red una vez por registro con AT+CCLK? (necesita
+// AT+CTZU=1, puesto en CONFIG) y fecha cada lectura. Si la red no da nunca la hora
+// (ano de CCLK < 2023), la subida pasa sola a la forma plana sin "ts".
+#define NBIOT_MIN_VALID_EPOCH_MS 1672531200000LL  // 2023-01-01T00:00:00Z - anterior = "sin hora de red"
 
-// KEEPALIVE: short, because Module B has to be LISTENING, not merely reachable.
+// KEEPALIVE: corto, porque Modulo B tiene que estar ESCUCHANDO, no solo accesible.
 //
-// This was 3600s - the maximum - with the reasoning that pinging between real
-// sends was wasteful: "a PINGREQ cadence tight enough to matter (e.g. every 90s)
-// would run ~13x the actual telemetry traffic". That arithmetic was done when
-// batching was every 10-20 minutes. MQTT_BATCH_SECONDS is now 60, and the figure
-// is wrong by four orders of magnitude:
+// Valia 3600 s - el maximo - con el razonamiento de que hacer ping entre envios
+// reales era un desperdicio: "un ritmo de PINGREQ lo bastante corto para importar
+// (por ejemplo cada 90 s) supondria ~13 veces el trafico real de telemetria". Esa
+// cuenta se hizo cuando los lotes eran cada 10-20 minutos. MQTT_BATCH_SECONDS vale
+// ahora 60, y la cifra se equivoca en cuatro ordenes de magnitud:
 //
-//   PINGREQ + PINGRESP = 4 bytes, every 120s   ->    120 B/hour
-//   one telemetry payload ~1100 bytes, every 60s -> 66000 B/hour
+//   PINGREQ + PINGRESP = 4 bytes, cada 120 s       ->    120 B/hora
+//   un mensaje de telemetria ~1100 bytes, cada 60 s -> 66000 B/hora
 //
-//   pings are 0.18% of telemetry - about 1 MB per YEAR
+//   los ping son el 0,18% de la telemetria - aproximadamente 1 MB al ANO
 //
-// The old value was fine for UPLINK, where a dead session is discovered at the
-// next send and rebuilt lazily. It is wrong for DOWNLINK. With a 3600s keepalive
-// neither end questions a silently dropped TCP connection for up to an hour:
-// Module B believes it is connected, the broker believes the client is alive, and
-// every command sent meanwhile goes nowhere. Nothing in the logs looks wrong.
+// El valor viejo servia para la SUBIDA, donde una sesion muerta se descubre en el
+// siguiente envio y se reconstruye en ese momento. Es incorrecto para la BAJADA de
+// ordenes. Con un keepalive de 3600 s ningun extremo cuestiona una conexion TCP caida
+// en silencio durante hasta una hora: Modulo B cree que esta conectado, el servidor
+// cree que el cliente esta vivo, y todas las ordenes de mientras no van a ninguna
+// parte. Nada en los logs parece ir mal.
 //
-// At 120s the modem sends PINGREQ itself (no AT traffic from us - it is handled
-// inside the module from this setting), so a dead link is detected within a couple
-// of minutes and rebuilt, and the session is held open through carrier NAT
-// timeouts even when the nodes have nothing to say.
+// A 120 s el propio modem manda el PINGREQ (sin trafico AT nuestro - lo gestiona el
+// modulo a partir de este ajuste), asi que un enlace muerto se detecta en un par de
+// minutos y se reconstruye, y la sesion se mantiene a traves de los tiempos de NAT del
+// operador aunque los nodos no tengan nada que decir.
 #define MQTT_KEEPALIVE_S 120UL
 
-// JSON is far more verbose than the legacy binary batch frame (~15 fields/
-// reading as "key":value text runs well over 100 bytes/reading, vs. the
-// binary format's fixed 30) - sized generously for a full
-// NBIOT_BATCH_DEFAULT_READINGS-reading batch with room to spare, not
-// trimmed tight the way the old NBIOT_PAYLOAD_MAX_BYTES was.
+// El JSON es mucho mas largo que la antigua trama binaria (~15 campos por lectura
+// como texto "clave":valor pasan de 100 bytes por lectura, frente a los 30 fijos del
+// formato binario): dimensionado con generosidad.
 #define MQTT_PAYLOAD_MAX_BYTES 4096
 
-// ---------- Batching ----------
-// Uplink payload is a packed binary frame (see nbiot/NbiotProtocol.h), not
-// text CSV: 10 full 13-field readings as text (matching TelemetryParser's
-// schema, one line per reading) runs to ~700-800 bytes even at 1 decimal
-// place, well over budget. Binary gets one reading down to
-// kBatchRecordSize (30) bytes, so the numbers below are chosen to keep
-// worst-case payload size (see the static_assert next to kBatchRecordSize)
-// under NBIOT_PAYLOAD_MAX_BYTES with room to spare.
-// Legacy raw-UDP binary-frame path only (retired ModemNBIoT + its host test).
-// The live MQTT path uses MQTT_BATCH_* in the MQTT section above instead.
+// ---------- Lotes de la via UDP antigua (HISTORICO) ----------
+// La subida de la via UDP era una trama binaria compacta (ver nbiot/NbiotProtocol.h),
+// no CSV de texto: 10 lecturas completas de 13 campos como texto ocupan ~700-800
+// bytes. Solo para la via UDP retirada (ModemNBIoT) y su prueba unitaria; la via MQTT
+// usa MQTT_BATCH_* de arriba.
+// EXCEPCION: NBIOT_RING_CAPACITY SI se usa hoy - es el tamano del anillo de lecturas
+// pendientes de la via MQTT.
 #define NBIOT_BATCH_DEFAULT_READINGS 10
 #define NBIOT_BATCH_DEFAULT_SECONDS (20UL * 60UL)
-#define NBIOT_RING_CAPACITY 24  // > max batch so a slow upload doesn't force an immediate drop
+#define NBIOT_RING_CAPACITY 24  // > lote maximo, para que una subida lenta no obligue a tirar lecturas en el acto
 #define NBIOT_PAYLOAD_MAX_BYTES 500
 
-// Ceiling used by NbiotProtocol.h's batch-frame static_assert. The downlink
-// CFG mechanism that used to retune this at runtime (ModemNBIoT/legacy UDP
-// path) has been removed with that class - ModemNBIoTMqtt doesn't do
-// downlink yet (see its header for why), so this is compile-time fixed.
-#define NBIOT_CFG_READINGS_MAX 16  // (500 - kBatchHeaderSize) / kBatchRecordSize, see static_assert
+// Techo que usa el static_assert de la trama binaria en NbiotProtocol.h (HISTORICO,
+// solo de la via UDP).
+#define NBIOT_CFG_READINGS_MAX 16  // (500 - kBatchHeaderSize) / kBatchRecordSize, ver el static_assert
 
-// ---------- State timeouts (ms) - every state in ModemNBIoT::tick() has one ----------
+// ---------- Plazos de cada estado (ms) ----------
 #define NBIOT_TIMEOUT_POWERING_MS 3000
-// Time allowed for the modem to answer a bare AT after PWRKEY is released.
+// Tiempo que se le da al modem para contestar a un AT tras soltar PWRKEY.
 //
-// RAISED 8000 -> 30000 (2026-09-11). The old budget gave the BC660K-GL only
-// ~9.7s from PWRKEY release to its first AT reply before the firmware declared
-// failure and CUT ITS POWER: PWRKEY is released at t=1300ms, POWERING hands over
-// at t=3000ms, and WAIT_AT gave up 8s later. A BC660K-GL routinely needs longer
-// than that to reach a UART-ready state, so the recovery path was power-cycling a
-// modem that was still booting - forever, since each retry restarted the same
-// race. Observed symptom: "-> AT" repeating indefinitely with not one "<- OK".
+// SUBIDO de 8000 a 30000 (2026-09-11). El plazo viejo solo le daba al BC660K-GL
+// ~9,7 s desde soltar PWRKEY hasta su primera respuesta antes de que el firmware lo
+// diera por fallido y LE CORTARA LA ALIMENTACION: PWRKEY se suelta a t=1300 ms,
+// POWERING pasa el testigo a t=3000 ms, y WAIT_AT se rendia 8 s despues. Un
+// BC660K-GL necesita a menudo mas que eso para tener el UART listo, asi que la
+// recuperacion apagaba un modem que todavia estaba arrancando - para siempre, porque
+// cada reintento repetia la misma carrera. Sintoma observado: "-> AT" repitiendose
+// sin fin sin un solo "<- OK".
 //
-// This must stay comfortably longer than the module's worst-case boot time. It
-// costs nothing when the modem is healthy, because WAIT_AT exits as soon as the
-// first OK arrives - it is a ceiling, not a delay.
+// Tiene que seguir siendo holgadamente mayor que el peor arranque del modulo. No
+// cuesta nada con el modem sano, porque WAIT_AT sale en cuanto llega el primer OK: es
+// un techo, no una espera.
 #define NBIOT_TIMEOUT_WAIT_AT_MS 30000
 #define NBIOT_TIMEOUT_CONFIG_MS 8000
-#define NBIOT_TIMEOUT_ATTACH_MS 60000  // AT+CEREG? polling until state 1 or 5
-#define NBIOT_TIMEOUT_SOCKET_MS 15000  // covers OK ack + the async +QIOPEN URC
+#define NBIOT_TIMEOUT_ATTACH_MS 60000  // preguntando AT+CEREG? hasta estado 1 o 5
+#define NBIOT_TIMEOUT_SOCKET_MS 15000  // cubre el OK y el aviso asincrono posterior
 #define NBIOT_TIMEOUT_SEND_MS 10000
-#define NBIOT_AT_CMD_TIMEOUT_MS 5000  // ceiling for a plain query/set command (AT, ATE0, CPIN?, ...)
-#define NBIOT_ATTACH_POLL_INTERVAL_MS 2000  // how often AT+CEREG? is re-issued while attaching
-#define NBIOT_AT_PING_GAP_MS 1000  // how often a bare "AT" liveness ping is retried in WAIT_AT
-#define NBIOT_CSQ_POLL_INTERVAL_MS 30000  // how often RSSI is refreshed for the dashboard while IDLE
+#define NBIOT_AT_CMD_TIMEOUT_MS 5000  // techo de un comando simple (AT, ATE0, CPIN?, ...)
+#define NBIOT_ATTACH_POLL_INTERVAL_MS 2000  // cada cuanto se repite AT+CEREG? mientras se registra
+#define NBIOT_AT_PING_GAP_MS 1000  // cada cuanto se repite el "AT" de comprobacion en WAIT_AT
+#define NBIOT_CSQ_POLL_INTERVAL_MS 30000  // cada cuanto se refresca el RSSI para el panel en IDLE
 
-// ---------- Escalating recovery / backoff ----------
-// retry send -> reopen socket -> re-attach -> power cycle. A cold power cycle
-// forces a full network attach (slow - can be tens of seconds - and it's the
-// most expensive thing this modem does), so it must only ever be the last
-// resort, never the first response to a single failed send.
+// ---------- Recuperacion escalonada / espera creciente ----------
+// reintentar el envio -> reconectar MQTT -> volver a registrarse -> apagar y
+// encender. Apagar y encender en frio obliga a un registro completo en la red (lento,
+// puede ser de decenas de segundos, y lo mas caro que hace este modem), asi que solo
+// puede ser el ultimo recurso, nunca la primera respuesta a un envio fallido.
 #define NBIOT_MAX_SEND_RETRIES 2
 #define NBIOT_MAX_SOCKET_RETRIES 2
 #define NBIOT_MAX_ATTACH_RETRIES 2
 #define NBIOT_BACKOFF_BASE_MS 2000
 #define NBIOT_BACKOFF_MAX_MS 120000
-// EN held deasserted this long before re-asserting on a power cycle. RAISED
-// 500 -> 3000 (2026-09-11): 500ms is not long enough for the module's own supply
-// rail to actually collapse, so the "power cycle" could leave it half-powered in
-// an undefined state rather than giving it the clean cold start intended.
+// Tiempo que EN se mantiene desactivado antes de volver a activarlo en un apagado y
+// encendido. SUBIDO (2026-09-11): 500 ms no bastan para que el rail propio del modulo
+// caiga de verdad, asi que el "apagado" podia dejarlo medio alimentado en un estado
+// indefinido en vez del arranque en frio limpio que se pretendia.
 #define NBIOT_POWER_OFF_SETTLE_MS 4000

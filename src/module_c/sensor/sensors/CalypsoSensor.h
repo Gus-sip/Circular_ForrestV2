@@ -3,19 +3,26 @@
 #include "ISensor.h"
 #include <Arduino.h>
 
-// UART, streaming NMEA 0183 (confirmed TTL-UART/NMEA variant, not RS485). The sensor
-// streams unprompted - read() drains whatever's buffered and returns the last
-// complete, checksum-valid $..MWV sentence seen this call; NotReady if nothing new
-// arrived since the last call. Poll mode (sending a command instead of streaming) is
-// supported by the hardware per the datasheet but isn't implemented here - not needed
-// until the duty-cycled version, and streaming is fine for a continuously-powered bench.
+// =============================================================================
+// CALYPSO ULP PRO - ANEMOMETRO ULTRASONICO (VIENTO)
+// =============================================================================
 //
-// values[]: [0]=wind angle (deg, relative), [1]=wind speed (as reported - typically m/s
-// on this unit's default NMEA field), [2]=status (1=valid/A, 0=invalid).
+// UART, frases NMEA 0183 (variante TTL-UART/NMEA confirmada, no RS485). Necesita
+// 5 V y unos 20 s desde que recibe corriente hasta que empieza a emitir.
 //
-// Sentence buffer is a fixed-size char array, not String - this sensor streams
-// continuously, and a String rebuilt every line on a device meant to run for days
-// would fragment the heap over time.
+// El sensor emite SOLO, sin que se le pregunte. read() vacia lo que haya en el
+// buffer y devuelve la ultima frase $..MWV completa y con checksum valido vista en
+// esa llamada; NotReady si no llego nada nuevo desde la anterior. El hardware
+// admite tambien modo pregunta-respuesta segun la hoja de datos, pero no esta
+// implementado: no hace falta.
+//
+// values[]: [0] = angulo del viento (grados, relativo), [1] = velocidad (tal como
+// la da el sensor; normalmente m/s en el campo NMEA por defecto de esta unidad),
+// [2] = estado (1 = valido/A, 0 = no valido).
+//
+// La frase se guarda en un array de char de tamano fijo, no en un String: el
+// sensor emite sin parar, y un String reconstruido en cada linea en un aparato que
+// debe funcionar dias enteros acabaria fragmentando la memoria.
 class CalypsoSensor : public ISensor {
 public:
   CalypsoSensor(HardwareSerial &serial, uint8_t rxPin, uint8_t txPin, uint32_t baud = 38400)
@@ -26,15 +33,15 @@ public:
   void sleep() override {}
   const char *name() const override { return "Calypso"; }
 
-  // Drops any buffered bytes and resets the partial-line parser. Call right
-  // after a light-sleep wake: the UART ISR was halted through the sleep, so
-  // whatever survived in the RX FIFO is a stale, likely-truncated fragment -
-  // parsing it just wastes the first read() and can desync the next one.
+  // Descarta los bytes del buffer y reinicia la linea a medio construir. Se llama
+  // justo antes de escuchar: lo que hubiera en el buffer es un fragmento viejo y
+  // seguramente cortado, y procesarlo solo desperdicia la primera lectura y puede
+  // descolocar la siguiente.
   void flushInput();
 
-  // Bytes drained by the last read() call - lets the caller tell "sensor not
-  // wired / silent" (0 across every cycle) from "data arriving but no valid
-  // sentence yet" (>0).
+  // Bytes leidos en la ultima llamada a read(). Distingue "sensor sin conectar o
+  // mudo" (0 en todos los ciclos) de "llegan datos pero aun ninguna frase valida"
+  // (>0).
   uint16_t lastReadBytes() const { return _lastReadBytes; }
 
   // La ultima trama MWV que paso el checksum, TAL CUAL llego.

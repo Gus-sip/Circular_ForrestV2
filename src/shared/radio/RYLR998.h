@@ -2,84 +2,99 @@
 
 #include <Arduino.h>
 
-// Shared by both Module C (TX) and Module B (RX) - see radio/README.md
-// (carried over in src/sensor_node/radio/) for the starting link-parameter
-// values and how they trade range against airtime. Previously duplicated
-// per-module with only comment differences; deduped here since the driver
-// itself was already identical.
+// =============================================================================
+// DRIVER DE LA RADIO LoRa REYAX RYLR998
+// =============================================================================
+//
+// Lo comparten Modulo C (transmite) y Modulo B (recibe). Antes habia una copia en
+// cada modulo que solo se diferenciaba en los comentarios; se unifico aqui porque
+// el driver era identico. Ver radio/README.md para los parametros de enlace de
+// partida y como cambian alcance por tiempo en el aire.
+//
+// La radio se maneja con comandos de texto AT por un puerto serie (UART): se le
+// manda "AT+SEND=..." y contesta "+OK" o "+ERR=..."; cuando llega un paquete por
+// el aire, la radio escribe sola una linea "+RCV=...".
 
-// One inbound packet, parsed from a "+RCV=<addr>,<len>,<data>,<rssi>,<snr>" line.
-// Payload cap (240 bytes) is the commonly documented RYLR998 AT+SEND limit - not
-// re-derived from a vendored datasheet (none is in this repo), so treat it as a
-// starting assumption to verify against this module's actual firmware/datasheet.
+// Un paquete recibido, interpretado a partir de una linea
+// "+RCV=<direccion>,<longitud>,<datos>,<rssi>,<snr>".
+// El limite de 240 bytes de carga es el que documenta habitualmente AT+SEND del
+// RYLR998. No se ha sacado de una hoja de datos incluida en este repositorio (no
+// hay ninguna), asi que es una suposicion de partida a verificar contra el
+// firmware real del modulo.
 struct LoRaMessage {
-  uint16_t senderAddr = 0;
-  char payload[241] = {0};
-  uint8_t length = 0;
-  int16_t rssi = 0;
-  int8_t snr = 0;
+  uint16_t senderAddr = 0;    // direccion AT+ADDRESS de quien lo envio
+  char payload[241] = {0};    // los datos, terminados en '\0'
+  uint8_t length = 0;         // longitud de los datos
+  int16_t rssi = 0;           // intensidad de la senal recibida (dBm)
+  int8_t snr = 0;             // relacion senal/ruido (dB)
 };
 
-// AT+PARAMETER=<spreadingFactor>,<bandwidth>,<codingRate>,<preamble>. Bandwidth
-// is the module's index/code, not a raw kHz value - see radio/README.md for the
-// starting values used here and how they trade range against airtime.
+// AT+PARAMETER=<factorDeEnsanchamiento>,<anchoDeBanda>,<tasaDeCodificacion>,<preambulo>.
+// El ancho de banda es el INDICE/codigo del modulo, no un valor en kHz - ver
+// radio/README.md para los valores de partida y su efecto en alcance y tiempo.
 struct RYLR998Params {
-  uint8_t spreadingFactor;
-  uint8_t bandwidth;
-  uint8_t codingRate;
-  uint16_t preamble;
+  uint8_t spreadingFactor;  // SF: mas alto = mas alcance y mas tiempo en el aire
+  uint8_t bandwidth;        // codigo de ancho de banda (7 = 125 kHz)
+  uint8_t codingRate;       // tasa de codificacion (1 = 4/5)
+  uint16_t preamble;        // longitud del preambulo
 };
 
-// Minimal REYAX RYLR998 AT-command driver. begin()/send() are blocking (both
-// wait on a quick +OK/+ERR from the module); poll() is not - it only drains
-// bytes already sitting in the UART's RX buffer, so it's safe to call every
-// loop() iteration without ever stalling on the radio (on Module B in
-// particular, it must never stall the web server's handleClient()).
+// Driver minimo por comandos AT.
+//
+// begin() y send() son BLOQUEANTES: esperan la respuesta rapida +OK/+ERR del
+// modulo. poll() NO lo es: solo vacia los bytes que ya estan en el buffer de
+// recepcion del UART, asi que se puede llamar en cada vuelta de loop() sin que
+// la radio detenga nunca el programa (en Modulo B en particular, nunca debe
+// detener el servidor web de handleClient()).
 class RYLR998 {
 public:
   RYLR998(HardwareSerial &serial, uint8_t rxPin, uint8_t txPin, uint32_t baud = 115200)
       : _serial(serial), _rxPin(rxPin), _txPin(txPin), _baud(baud) {}
 
-  // Blocking: runs AT, AT+ADDRESS, AT+NETWORKID, AT+BAND, AT+PARAMETER in turn,
-  // bailing out on the first one that doesn't come back +OK. False here means
-  // check wiring/baud (rylr998_bridge.cpp) before assuming a parameter is bad.
-  // Pass a `debug` stream (e.g. &Serial) to print each command and its reply
-  // as it happens, so you can confirm the module actually accepted each
-  // setting instead of just trusting one pass/fail bool at the end.
+  // Bloqueante: ejecuta AT, AT+ADDRESS, AT+NETWORKID, AT+BAND y AT+PARAMETER por
+  // orden, y abandona en el primero que no conteste +OK. Si devuelve false, revisa
+  // primero el cableado y la velocidad (rylr998_bridge.cpp) antes de suponer que
+  // un parametro es incorrecto.
+  // Pasando un flujo `debug` (por ejemplo &Serial) imprime cada comando y su
+  // respuesta en el momento, para confirmar que el modulo acepto cada ajuste en
+  // vez de fiarse de un unico verdadero/falso al final.
   bool begin(uint16_t addr, uint16_t networkId, uint32_t bandHz, const RYLR998Params &params,
              Print *debug = nullptr);
 
-  // Blocking: writes AT+SEND=<addr>,<len>,<data> and waits for +OK, bounded by
-  // kSendTimeoutMs. Actual on-air time depends on payload length and the
-  // SF/BW/CR in effect, but this call never waits indefinitely. Not used by
-  // Module B's dashboard path today, but kept available for a future LoRa ACK
-  // back to the sensor node.
+  // Bloqueante: escribe AT+SEND=<direccion>,<longitud>,<datos> y espera +OK, con
+  // un limite de kSendTimeoutMs. El tiempo real en el aire depende de la longitud
+  // y del SF/BW/CR configurados, pero esta llamada nunca espera indefinidamente.
   bool send(uint16_t destAddr, const char *data, uint8_t len);
 
-  // Blocking: AT+CRFOP=<dbm>, 0..22. The module defaults to 22 dBm, whose TX
-  // burst pulls ~120mA - enough to brown out a supply that cannot source a step
-  // load, which is exactly what Module C's PCB does (it reset on every transmit).
-  // Lower power trades range for a smaller burst. Deliberately NOT folded into
-  // begin(): this file is shared with Module B, which is mains-adjacent and has
-  // no reason to give up range.
+  // Bloqueante: AT+CRFOP=<dbm>, de 0 a 22. El modulo arranca a 22 dBm, y su rafaga
+  // de transmision pide ~120 mA - suficiente para tumbar una alimentacion que no
+  // aguanta un escalon de carga, que es exactamente lo que le pasa a la placa de
+  // Modulo C (se reiniciaba en cada transmision). Menos potencia cambia alcance
+  // por una rafaga mas pequena. NO se incluye en begin() a proposito: este archivo
+  // lo comparte Modulo B, que tiene alimentacion de sobra y ningun motivo para
+  // renunciar a alcance.
   bool setTxPower(uint8_t dbm, Print *debug = nullptr);
 
-  // Non-blocking: drains whatever's already buffered, returns true (with
-  // outMsg populated) the moment a complete, well-formed +RCV= line is found.
-  // Anything else seen along the way (bare +OK echoes, garbage) is dropped.
+  // No bloqueante: vacia lo que haya en el buffer y devuelve true (con outMsg
+  // relleno) en cuanto encuentra una linea +RCV= completa y bien formada. Todo lo
+  // demas que vea por el camino (ecos +OK sueltos, basura) se descarta.
   bool poll(LoRaMessage &outMsg);
 
 private:
-  static constexpr uint16_t kLineMax = 260;  // "+RCV=" + addr + len + 240B payload + rssi + snr
+  static constexpr uint16_t kLineMax = 260;  // "+RCV=" + dir + long + 240 B de datos + rssi + snr
   static constexpr uint32_t kSendTimeoutMs = 2000;
 
   HardwareSerial &_serial;
   uint8_t _rxPin, _txPin;
   uint32_t _baud;
 
+  // Linea en construccion para poll(): los bytes llegan sueltos y se juntan aqui
+  // hasta ver el fin de linea.
   char _line[kLineMax + 1] = {0};
   uint16_t _lineLen = 0;
 
+  // Un paquete que llego mientras se esperaba el +OK de un comando. Se guarda
+  // aqui para que el siguiente poll() lo entregue en vez de perderlo.
   LoRaMessage _pending;
   bool _hasPending = false;
 

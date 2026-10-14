@@ -1,7 +1,9 @@
 #include "Cm1106Sensor.h"
 
+// Comando "leer CO2" del protocolo Cubic: 11 01 01 ED.
 static const uint8_t READ_CO2_CMD[] = {0x11, 0x01, 0x01, 0xED};
 
+// Enciende el sensor (EN alto), abre el UART y espera el calentamiento.
 bool Cm1106Sensor::begin() {
   if (_enPin != kNoEnPin) {
     pinMode(_enPin, OUTPUT);
@@ -9,9 +11,11 @@ bool Cm1106Sensor::begin() {
   }
   _serial.begin(_baud, SERIAL_8N1, _rxPin, _txPin);
   if (_warmupMs > 0) delay(_warmupMs);
-  return true;  // no handshake beyond EN + baud - presence is confirmed by the first valid read
+  return true;  // sin saludo inicial: la presencia se confirma con la primera lectura valida
 }
 
+// Manda el comando de lectura y espera hasta 1 s los 8 bytes de respuesta:
+//   16 05 01 <CO2 alto> <CO2 bajo> <estado> <contador> <checksum>
 Reading Cm1106Sensor::read() {
   Reading r;
 
@@ -25,8 +29,9 @@ Reading Cm1106Sensor::read() {
     if (_serial.available()) resp[len++] = _serial.read();
   }
 
-  // Record the wire bytes before any verdict is reached, so a caller can tell a
-  // frozen-but-fresh frame from a recycled value regardless of how this read ends.
+  // Guardar los bytes del cable ANTES de decidir nada, para que quien llama pueda
+  // distinguir una trama congelada pero nueva de un valor reciclado, acabe como
+  // acabe esta lectura.
   memcpy(_prevRaw, _lastRaw, sizeof(_prevRaw));
   _prevRawLen = _lastRawLen;
   memcpy(_lastRaw, resp, sizeof(_lastRaw));
@@ -52,7 +57,7 @@ Reading Cm1106Sensor::read() {
   r.status = ReadingStatus::Ok;
   const uint16_t value = (uint16_t)resp[3] * 256 + resp[4];
 
-  // Track staleness of the MEASUREMENT, not of the frame - see frozenValueRun().
+  // Vigilar si la MEDIDA se ha quedado clavada, no la trama - ver frozenValueRun().
   if (_haveValue && value == _lastValue) {
     if (_frozenRun < 0xFFFF) _frozenRun++;
   } else {
@@ -66,6 +71,7 @@ Reading Cm1106Sensor::read() {
   return r;
 }
 
+// Reposo = quitarle la alimentacion con EN.
 void Cm1106Sensor::sleep() {
   if (_enPin != kNoEnPin) digitalWrite(_enPin, LOW);
 }
@@ -76,7 +82,7 @@ void Cm1106Sensor::powerCycle(uint32_t offMs) {
   delay(offMs);
   digitalWrite(_enPin, HIGH);
   if (_warmupMs > 0) delay(_warmupMs);
-  // Frames from before the cycle say nothing about the sensor after it.
+  // Las tramas de antes del ciclo no dicen nada del sensor despues de el.
   _frozenRun = 0;
   _lastRawLen = 0;
   _prevRawLen = 0;
