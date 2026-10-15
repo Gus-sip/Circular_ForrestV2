@@ -6,7 +6,7 @@
 // con la primera frase valida que llegue.
 bool CalypsoSensor::begin() {
   _serial.begin(_baud, SERIAL_8N1, _rxPin, _txPin);
-  return true;  // no handshake beyond opening the UART - presence confirmed by the first valid sentence
+  return true;  // sin saludo inicial: la presencia se confirma con la primera frase valida
 }
 
 // Checksum NMEA: XOR de todos los caracteres entre '$' y '*', comparado con los
