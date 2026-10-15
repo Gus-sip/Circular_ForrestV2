@@ -217,7 +217,13 @@ inline void nbiotResolveNodeName(uint16_t addr, char *outName, size_t outCap) {
 // lo que hubiera en cola para la vieja - incluidas las ordenes publicadas mientras B
 // se reinicia, que es justo la entrega de la que dependemos. La confusion sale mas
 // barata documentada que los mensajes perdidos depurandolos.
+// El B2 (entorno module-b-b2) lleva su propio client id: dos placas conectadas con
+// el mismo client id se echan una a otra del servidor en cada reconexion.
+#if defined(MODULE_B_BOARD_B2)
+#define MQTT_CLIENT_ID "CON-2"
+#else
 #define MQTT_CLIENT_ID "CON-1"
+#endif
 // Autenticacion de ThingsBoard por token de acceso: el token va como usuario MQTT,
 // sin contrasena. Es el token del dispositivo PASARELA - "CON-01" en ThingsBoard,
 // creado el 2026-08-28 con "Is gateway" activado para sustituir al antiguo
@@ -228,13 +234,18 @@ inline void nbiotResolveNodeName(uint16_t addr, char *outName, size_t outCap) {
 // flashea, o la telemetria acaba en silencio en el dispositivo de la otra placa sin
 // ningun error en ningun extremo.
 //
-//   Module B #1  MAC 28:84:85:6F:8F:DC   QRPJgyk5COJPCavycmpp   <-- set below
-//   Module B #2  MAC 28:84:85:6f:88:94   lIdRdiuBluhDbApBaPmJ
+//   Module B #1  MAC 28:84:85:6F:8F:DC   QRPJgyk5COJPCavycmpp   <-- entorno module-b-main
+//   Module B #2  MAC 28:84:85:6f:88:94   lIdRdiuBluhDbApBaPmJ   (ESTROPEADA el 2026-10-15)
+//   Module B2    MAC AC:27:6E:CB:8D:F8   lIdRdiuBluhDbApBaPmJ   <-- entorno module-b-b2
 //
 // Comprobar la MAC antes de flashear (esptool la imprime, y pyserial la da como
 // serial_number). Las MAC de las dos placas solo se diferencian en los tres ultimos
 // bytes.
+#if defined(MODULE_B_BOARD_B2)
+#define MQTT_ACCESS_TOKEN "lIdRdiuBluhDbApBaPmJ"
+#else
 #define MQTT_ACCESS_TOKEN "QRPJgyk5COJPCavycmpp"
+#endif
 #define MQTT_CLIENT_IDX 0  // indice de cliente de AT+QMTOPEN/QMTCONN/QMTPUB - solo hay un cliente MQTT abierto, asi que 0 fijo
 
 // ---------- Lotes / cadencia de publicacion MQTT (ModemNBIoTMqtt) ----------

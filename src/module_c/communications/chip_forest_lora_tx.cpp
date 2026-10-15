@@ -558,9 +558,10 @@ static uint16_t readingsPerPacket(uint16_t sensorReadEvery, uint16_t loraTransEv
 //
 // Alimentado de forma permanente eso ya no aplica: los 210 s se pagan UNA VEZ, al
 // encender la placa, y a partir de ahi el sensor esta siempre caliente y listo.
-// Desde el 2026-10-14 tiene su propia puerta en GPIO16, que en el banco se mantiene
-// encendida tambien durante el sueno (SEN0466_GATE_ALWAYS_ON), asi que sigue
-// valiendo 0.
+// Desde el 2026-10-14 tiene su propia puerta en GPIO16, y desde el 2026-10-15 esa
+// puerta se enciende SEN0466_PREHEAT_MS antes de cada lectura (ver
+// SEN0466_GATE_ALWAYS_ON): el calentamiento lo hace el calendario, no este ciclo,
+// asi que sigue valiendo 0.
 #define SLEEP_SKIP_SEN0466 0
 
 // Tiempo de estabilizacion del SEN0466, segun su hoja de datos y confirmado por los
@@ -605,14 +606,35 @@ static uint16_t readingsPerPacket(uint16_t sensorReadEvery, uint16_t loraTransEv
 static const gpio_num_t kHeldGates[] = {(gpio_num_t)PIN_PCB_EN_A, (gpio_num_t)PIN_PCB_EN_B,
                                         (gpio_num_t)PIN_LORA_EN, (gpio_num_t)PIN_SEN0466_EN};
 
-// Politica de la puerta del SEN0466 (GPIO16). AJUSTE DE BANCO: encendida desde el
-// arranque y mantenida tambien durante el sueno, para que el sensor este siempre
-// caliente y su presencia en el bus se pueda comprobar enseguida. Necesita ~210 s
-// de calentamiento tras encenderse antes de que una lectura signifique algo, y un
-// despertar NORMAL dura ~20 s: conmutarla con los demas rails significaria que nunca
-// esta caliente fuera de la pre-alarma. El coste es su consumo (~15 mA medidos)
-// durante todo el sueno. La decision para el despliegue sigue abierta.
-#define SEN0466_GATE_ALWAYS_ON 1
+// Politica de la puerta del SEN0466 (GPIO16).
+//
+// 1 = encendida siempre, tambien durante el sueno (el ajuste de banco hasta el
+// 2026-10-15). Medido asi: 13 mA de media en sueno en vez de microamperios, porque
+// el sensor no tiene modo de reposo y gasta ~15 mA mientras tenga corriente.
+//
+// 0 = PRECALENTAMIENTO: apagada durante el sueno y encendida SEN0466_PREHEAT_MS
+// antes de cada lectura de CO. Con lectura cada 30 min en normal, se enciende en el
+// minuto 26 y lee en el 30: el nodo despierta solo para encenderla, vuelve a
+// dormir con la puerta enclavada encendida y el sensor calienta mientras el resto
+// de la placa duerme. Tras la lectura se apaga. En pre-alarma y alarma el nodo no
+// duerme y la lectura es cada 10 / 5 min, asi que se queda encendida todo el estado.
+#define SEN0466_GATE_ALWAYS_ON 0
+
+// Cuanto antes de la lectura se enciende. La hoja de datos pide 210 s
+// (SEN0466_WARMUP_MS); 240 s deja 30 s de margen para la deriva del oscilador, que
+// como mucho son unos segundos porque el T/H/P despierta al nodo cada 5 minutos.
+#define SEN0466_PREHEAT_MS 240000UL
+
+// Holgura al decidir si ya toca encender: si el nodo despierta un poco antes de lo
+// pedido, que encienda igualmente en vez de dormir un segundo y volver a despertar.
+#define SEN0466_PREHEAT_SLACK_MS 5000UL
+
+// Estado de la puerta y desde cuando esta encendida, en tiempo propio del nodo
+// (nodeNowMs, que no salta al sincronizar el reloj). En RTC porque el
+// calentamiento atraviesa un sueno entero: la puerta se enciende en un despertar y
+// se lee en el siguiente.
+RTC_NOINIT_ATTR uint8_t g_coGateOn;
+RTC_NOINIT_ATTR uint64_t g_coGateOnAtMs;
 
 // ---------- Recuperacion del CM1106 congelado ----------
 // Esta unidad sigue contestando con tramas validas cuyo contador sube mientras el
@@ -683,6 +705,7 @@ RYLR998 radio(Serial0, LORA_RX_PIN, LORA_TX_PIN);  // UART0 libre: UART1 y UART2
 // (Antes ya habia costado tres sesiones de depuracion: g_hibernating con basura
 // podia hacer hibernar al nodo con la bateria llena.)
 //
+// 0xC0FFEE0B: g_coGateOn y g_coGateOnAtMs (precalentamiento del SEN0466).
 // 0xC0FFEE0A: StoredReading.tickAge pasa a takenS. MISMO TAMANO, OTRO SIGNIFICADO:
 //             antes era una cuenta de despertares y ahora son segundos del reloj
 //             propio del nodo. Como el tamano no cambia, la RTC sobrevivia al
@@ -695,7 +718,7 @@ RYLR998 radio(Serial0, LORA_RX_PIN, LORA_TX_PIN);  // UART0 libre: UART1 y UART2
 // 0xC0FFEE08: planificador por tiempo (g_nextDueMs, multiplicadores,
 //             g_schedPhasedForState) y reloj (g_nodeBaseMs, g_clockDrift, ...)
 // 0xC0FFEE07: g_thr[][] sembrado desde kAlarmRules
-#define BOOTCOUNT_MAGIC 0xC0FFEE0AUL
+#define BOOTCOUNT_MAGIC 0xC0FFEE0BUL
 RTC_NOINIT_ATTR uint32_t g_bootMagic;
 // Arranques desde la ultima perdida de alimentacion. Un valor > 1 dejando la placa
 // sola prueba que se reinicia por si misma, y no porque el PC toque DTR/RTS por USB:
@@ -1010,7 +1033,17 @@ static uint64_t schedNextWakeMs(uint8_t state) {
     const uint64_t wake = (due > prep) ? (due - prep) : 0;
     if (wake < best) best = wake;
   }
-  (void)state;
+#if !SEN0466_GATE_ALWAYS_ON
+  // Un despertar mas: el de encender la puerta del SEN0466, SEN0466_PREHEAT_MS antes
+  // de su lectura. Solo en normal (en alerta la puerta ya esta encendida) y solo si
+  // queda en el futuro - si ya paso, la puerta ya se encendio en este despertar, y
+  // contarlo daria suenos de un segundo en bucle.
+  if (state == ALARM_NORMAL && !g_coGateOn) {
+    const uint64_t due = g_nextDueMs[JOB_SEN0466];
+    const uint64_t wake = (due > SEN0466_PREHEAT_MS) ? (due - SEN0466_PREHEAT_MS) : 0;
+    if (wake > schedNowMs() && wake < best) best = wake;
+  }
+#endif
   return best;
 }
 
@@ -1114,6 +1147,45 @@ static uint32_t schedSleepSeconds(uint8_t state) {
   if (nodeMs < 1000.0) nodeMs = 1000.0;          // nunca un sueno de cero
   if (nodeMs > 3600000.0) nodeMs = 3600000.0;    // tope de 1 h, defensivo
   return (uint32_t)((nodeMs + 500.0) / 1000.0);  // al segundo mas cercano
+}
+
+// Si la puerta del SEN0466 debe estar encendida AHORA.
+static bool sen0466GateWanted() {
+#if SEN0466_GATE_ALWAYS_ON
+  return true;
+#else
+  if (g_alarmState != ALARM_NORMAL) return true;  // en alerta, todo el estado
+  return schedNowMs() + SEN0466_PREHEAT_MS + SEN0466_PREHEAT_SLACK_MS >=
+         g_nextDueMs[JOB_SEN0466];
+#endif
+}
+
+// Pone la puerta en el nivel que toque. Se llama al arrancar, en cada vuelta de
+// loop() y justo antes de dormir, asi que sigue al calendario sin que nadie tenga
+// que acordarse de encenderla o apagarla.
+//
+// Suelta el enclavamiento SOLO de este pin y escribe el nivel antes de la
+// direccion, para que no haya un pulso: un corte de un instante reiniciaria el
+// calentamiento sin que se notara en ningun sitio.
+static void sen0466GateUpdate() {
+  const bool on = sen0466GateWanted();
+  const int level = on ? PIN_SEN0466_EN_ACTIVE : !PIN_SEN0466_EN_ACTIVE;
+  gpio_hold_dis((gpio_num_t)PIN_SEN0466_EN);
+  gpio_set_level((gpio_num_t)PIN_SEN0466_EN, level);
+  gpio_set_direction((gpio_num_t)PIN_SEN0466_EN, GPIO_MODE_OUTPUT);
+  if (on != (bool)g_coGateOn) {
+    g_coGateOn = on ? 1 : 0;
+    if (on) g_coGateOnAtMs = nodeNowMs();
+    Serial.printf("[co] puerta SEN0466 (GPIO%d) %s\n", PIN_SEN0466_EN,
+                  on ? "ENCENDIDA - empieza el calentamiento" : "APAGADA");
+  }
+}
+
+// Cuanto lleva la puerta encendida, en ms. 0 si esta apagada.
+static uint32_t sen0466WarmedMs() {
+  if (!g_coGateOn) return 0;
+  const uint64_t d = nodeNowMs() - g_coGateOnAtMs;
+  return (d > 0xFFFFFFFFULL) ? 0xFFFFFFFFUL : (uint32_t)d;
 }
 // Milisegundos acumulados en pre-alarma, y por que no es una simple marca de millis().
 //
@@ -2126,6 +2198,8 @@ void setup() {
     // cual, que es lo que el usuario especifico.
     g_readMultiplier = 1.0f;
     g_txMultiplier = 1.0f;
+    g_coGateOn = 0;  // tras un corte la puerta parte apagada y fria
+    g_coGateOnAtMs = 0;
     for (uint8_t j = 0; j < JOB_COUNT; j++) g_nextDueMs[j] = 0;
     g_schedPhasedForState = ALARM_NORMAL;
     // La cache de lecturas tambien vive en RTC_NOINIT, asi que en un encendido real
@@ -2320,6 +2394,13 @@ void setup() {
   // ese trabajo no se hace NUNCA, porque esta salida duerme antes de encender ningun
   // rail. (En el planificador por ticks se olvido asi una de las banderas al anadir
   // el grupo caro de sensores.)
+  // Antes de la salida de abajo: el despertar de precalentamiento del SEN0466 es
+  // justamente uno de estos sin trabajo, y su unica tarea es encender la puerta.
+  // En un arranque en frio el pin estuvo suelto durante el reset, asi que el
+  // calentamiento que dijera la RTC ya no vale.
+  if (isColdBoot()) g_coGateOn = 0;
+  sen0466GateUpdate();
+
   if (!g_readDue && !g_txDue && !isColdBoot()) {
     // Con el planificador por tiempo este caso casi no se da: el nodo despierta
     // porque ALGO vence, no porque haya pasado un tick. Se conserva como red de
@@ -2358,12 +2439,8 @@ void setup() {
   }
   gpio_deep_sleep_hold_dis();
 
-  // Alimentacion del sensor de CO, lo primero de todo: es la pieza de la placa que
-  // mas tarda en ser utilizable, asi que cada segundo que se encienda antes es un
-  // segundo de calentamiento. Tambien en modo seguro: no es la carga que el modo
-  // seguro existe para quitar.
-  pinMode(PIN_SEN0466_EN, OUTPUT);
-  digitalWrite(PIN_SEN0466_EN, SEN0466_GATE_ALWAYS_ON ? PIN_SEN0466_EN_ACTIVE : !PIN_SEN0466_EN_ACTIVE);
+  // La puerta del sensor de CO ya la puso sen0466GateUpdate() mas arriba, y soltar
+  // los enclavamientos no cambia su nivel. Aqui solo se informa.
   Serial.printf("SEN0466 EN: GPIO%d -> %s\n", PIN_SEN0466_EN,
                 digitalRead(PIN_SEN0466_EN) == LOW ? "LOW" : "HIGH");
 
@@ -2562,11 +2639,14 @@ static void enterDeepSleep(const char *why, uint32_t seconds) {
   // Rails apagados. Las dos puertas tienen polaridad OPUESTA, asi que cada una
   // necesita el inverso de su propio nivel activo - un unico "nivel de apagado"
   // compartido apagaria un rail y ENCENDERIA el otro durante todo el sueno.
-  // (GPIO16, la puerta del SEN0466, no se toca aqui: conserva el nivel que le dio
-  // setup() y se enclava con las demas.)
   digitalWrite(PIN_PCB_EN_A, (PIN_PCB_EN_A_ACTIVE == LOW) ? HIGH : LOW);
   digitalWrite(PIN_PCB_EN_B, (PIN_PCB_EN_B_ACTIVE == LOW) ? HIGH : LOW);
   digitalWrite(PIN_LORA_EN, (PIN_LORA_EN_ACTIVE == LOW) ? HIGH : LOW);
+
+  // GPIO16, la puerta del SEN0466, no sigue a los demas rails: sigue al calendario.
+  // Recien leido el CO queda apagada hasta el siguiente precalentamiento; en el
+  // despertar de precalentamiento queda encendida y el sensor calienta durmiendo.
+  sen0466GateUpdate();
 
   // Enclavar esos niveles durante el sueno - ver kHeldGates.
   for (size_t i = 0; i < sizeof(kHeldGates) / sizeof(kHeldGates[0]); i++) {
@@ -2895,6 +2975,15 @@ static void runSlot(int slot) {
 
     case SLOT_SEN0466: {
       if (!sen0466Ready || !g_sen0466Enabled) break;
+      // Un sensor a medio calentar contesta con seguridad y mal. Si la puerta lleva
+      // menos de SEN0466_WARMUP_MS encendida (arranque en frio, o recien entrado en
+      // alerta), la lectura no se usa: el CO queda como "no medido" en esta ronda.
+      const uint32_t warmed = sen0466WarmedMs();
+      if (warmed < SEN0466_WARMUP_MS) {
+        Serial.printf("[co] SEN0466 solo lleva %lus de %lus de calentamiento - lectura descartada\n",
+                      (unsigned long)(warmed / 1000), (unsigned long)(SEN0466_WARMUP_MS / 1000));
+        break;
+      }
       Reading co = sen0466.read();
       g_coSt = co.status;
       if (co.ok()) {
@@ -4301,6 +4390,10 @@ void loop() {
     markedGood = true;
     bootGuardMarkGood();
   }
+
+  // La puerta del SEN0466 sigue al estado: entrar en alerta la enciende al momento,
+  // y terminar la lectura en normal la apaga.
+  sen0466GateUpdate();
 
   // ---- MODO SEGURO ----
   // Los sensores siguen apagados, pero el nodo NO se queda callado, y NO se queda
