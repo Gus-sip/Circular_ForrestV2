@@ -2,8 +2,8 @@
 CHIP FOREST - MODULO B (CONCENTRADOR) - CODIGO COMPLETO
 ===============================================================================
 
-Codigo fuente real del firmware de produccion, con sus comentarios.
-Version: commit be92110 (rama main), 2026-10-14.
+Codigo fuente real del firmware de produccion, con sus comentarios en espanol.
+Version: commit 4b9e688 (rama main), 2026-10-15.
 Las credenciales (token de ThingsBoard, contrasena WiFi) aparecen como <OCULTO>.
 
 Archivos incluidos, en orden de lectura:

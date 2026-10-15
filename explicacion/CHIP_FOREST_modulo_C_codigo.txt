@@ -2,8 +2,8 @@
 CHIP FOREST - MODULO C (NODO SENSOR) - CODIGO COMPLETO
 ===============================================================================
 
-Codigo fuente real del firmware de produccion, con sus comentarios.
-Version: commit be92110 (rama main), 2026-10-14.
+Codigo fuente real del firmware de produccion, con sus comentarios en espanol.
+Version: commit 4b9e688 (rama main), 2026-10-15.
 Las credenciales (token de ThingsBoard, contrasena WiFi) aparecen como <OCULTO>.
 
 Archivos incluidos, en orden de lectura:
@@ -5773,7 +5773,7 @@ ARCHIVO: src/module_c/sensor/sensors/CalypsoSensor.cpp
 // con la primera frase valida que llegue.
 bool CalypsoSensor::begin() {
   _serial.begin(_baud, SERIAL_8N1, _rxPin, _txPin);
-  return true;  // no handshake beyond opening the UART - presence confirmed by the first valid sentence
+  return true;  // sin saludo inicial: la presencia se confirma con la primera frase valida
 }
 
 // Checksum NMEA: XOR de todos los caracteres entre '$' y '*', comparado con los
