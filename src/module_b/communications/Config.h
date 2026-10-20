@@ -167,6 +167,7 @@ inline void nbiotResolveNodeName(uint16_t addr, char *outName, size_t outCap) {
 // control de flujo del UART, es la entrada de reset del modulo). Pulso activo a
 // nivel bajo. HISTORICO: no lo usa la secuencia confirmada de arriba; se dejo para
 // una futura recuperacion por reset explicito que no esta hecha.
+// [ELIMINAR] solo lo usa modem_probe.cpp; el firmware nunca conduce el RESET del modem (ver memoria: PWRKEY no esta cableado).
 #define NBIOT_RST_PIN 6
 #define NBIOT_RST_ACTIVE LOW
 #define NBIOT_RST_PULSE_MS 200
@@ -314,7 +315,11 @@ inline void nbiotResolveNodeName(uint16_t addr, char *outName, size_t outCap) {
 // (OJO: "3 ventanas perdidas a 5 min" era con el envio cada 5 min; con el calendario
 // actual, en estado NORMAL el nodo envia cada 30 min, asi que una orden puede expirar
 // antes de que el nodo abra su siguiente ventana.)
-#define DOWNLINK_QUEUE_TIMEOUT_MS 900000UL  // 15 min = 3 missed windows at 5 min
+// Subido a 40 min el 2026-10-18: en NORMAL el nodo solo escucha tras su envio de
+// los :01 y :31, asi que con 15 min una orden mandada justo despues de una ventana
+// caducaba siempre antes de la siguiente. 40 min = un ciclo de 30 + el desfase de 1
+// + margen para la deriva del reloj del nodo.
+#define DOWNLINK_QUEUE_TIMEOUT_MS 2400000UL  // 40 min
 
 // Separacion minima entre dos intentos de entrega de LA MISMA orden.
 //
@@ -373,9 +378,11 @@ inline void nbiotResolveNodeName(uint16_t addr, char *outName, size_t outCap) {
 // usa MQTT_BATCH_* de arriba.
 // EXCEPCION: NBIOT_RING_CAPACITY SI se usa hoy - es el tamano del anillo de lecturas
 // pendientes de la via MQTT.
+// [ELIMINAR] sin uso (y NBIOT_BATCH_DEFAULT_SECONDS): restos de la via UDP.
 #define NBIOT_BATCH_DEFAULT_READINGS 10
 #define NBIOT_BATCH_DEFAULT_SECONDS (20UL * 60UL)
 #define NBIOT_RING_CAPACITY 24  // > lote maximo, para que una subida lenta no obligue a tirar lecturas en el acto
+// [ELIMINAR] solo para la via UDP retirada (y NBIOT_CFG_READINGS_MAX).
 #define NBIOT_PAYLOAD_MAX_BYTES 500
 
 // Techo que usa el static_assert de la trama binaria en NbiotProtocol.h (HISTORICO,

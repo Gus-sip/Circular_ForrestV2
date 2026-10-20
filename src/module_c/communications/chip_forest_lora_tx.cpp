@@ -134,6 +134,7 @@
 #define LORA_TX_PERIOD_MS 300000UL      // 5 min - ya es el plazo de RESERVA, no la cadencia
 #define LORA_TX_PERIOD_MIN_MS 15000UL   // suelo de seguridad: CFG,INTERVAL no puede bajar de aqui
 #define LORA_TX_PERIOD_MAX_MS 86400000UL  // techo de 24 h: protege de un CFG mal tecleado
+// [ELIMINAR] sin uso: ninguna linea la lee.
 #define FIRST_TX_DELAY_MS 30000UL       // HISTORICO: ya no se usa en ningun sitio
 
 // ---------- Envio condicionado a tener todo leido (HISTORICO) ----------
@@ -141,6 +142,7 @@
 // habian dado una lectura nueva desde el paquete anterior, con un hueco minimo
 // entre envios. Hoy el envio lo marca el calendario. LORA_TX_MIN_GAP_MS ya no se
 // usa en ningun sitio.
+// [ELIMINAR] sin uso: ninguna linea la lee.
 #define LORA_TX_MIN_GAP_MS 15000UL      // HISTORICO: ya no se usa
 
 // En pre-alarma y alarma el nodo transmite mucho mas a menudo: un incendio es la
@@ -152,6 +154,7 @@
 // ESTADO ACTUAL: esta constante ya no se usa; en alarma el envio lo marca el
 // calendario (JOB_TX: 15 min en pre-alarma, 3 min en alarma), muy por debajo del
 // limite.
+// [ELIMINAR] sin uso: ninguna linea la lee.
 #define ALARM_TX_MIN_GAP_MS 5000UL
 
 // ---------- Encendido por turnos del BMV080 ----------
@@ -159,6 +162,7 @@
 // anterior lo tenia encendido sin parar (unas 90 veces su presupuesto de energia) y
 // la placa se reiniciaba en cada arranque en que estaba midiendo. Ahora solo se
 // enciende durante una medida y se apaga en cuanto llega un dato.
+// [ELIMINAR] sin uso: ninguna linea la lee.
 #define BMV080_MEASURE_TIMEOUT_MS 30000UL  // dejar de esperar un dato pasado este tiempo
 #define BMV080_SETTLE_MS 2000UL            // precalentamiento del laser antes de que los datos valgan
 
@@ -294,6 +298,7 @@ static float *thresholdSlot(const char *key);
 #define LED_WHITE_R 30
 #define LED_WHITE_G 30
 #define LED_WHITE_B 30
+// [ELIMINAR] sin uso: ninguna linea la lee.
 #define LED_FLASH_MS 120  // HISTORICO: ya no se usa
 
 // Forma del indicador de despertar: una rampa suave de subida y bajada en vez de un
@@ -497,18 +502,24 @@ static bool railsArePowered() { return g_railsUp; }
 // SENSOR_READ_EVERY_DEFAULT, LORA_TRANS_EVERY_DEFAULT, COUNTER_EVERY_MIN/MAX,
 // READINGS_PER_PACKET_MAX, BATCH_READING_WORST_BYTES y readingsPerPacket() ya no
 // se usan en ningun sitio.
+// [ELIMINAR] sin efecto: contaba ticks del planificador viejo; solo lo usa el entorno medir-normal-t, tambien marcado.
 #ifndef BURST_EVERY_DEFAULT
 #define BURST_EVERY_DEFAULT 90   // ticks; 90 x 10s nominal = 15 min, 26.7 min real
 #endif
 
+// [ELIMINAR] sin uso: contaba ticks del planificador viejo.
 #define SENSOR_READ_EVERY_DEFAULT 3
+// [ELIMINAR] sin uso: contaba ticks del planificador viejo.
 #define LORA_TRANS_EVERY_DEFAULT 4
+// [ELIMINAR] sin uso (y COUNTER_EVERY_MAX): limites de los contadores de ticks.
 #define COUNTER_EVERY_MIN 1
 #define COUNTER_EVERY_MAX 360           // 1 hour at a 10s tick
 
 // El RYLR998 admite como mucho 240 bytes por paquete. Una lectura en formato de lote
 // ocupa ~56 bytes normalmente y hasta ~70 en el peor caso.
+// [ELIMINAR] sin uso: ninguna linea la lee.
 #define READINGS_PER_PACKET_MAX 3
+// [ELIMINAR] sin uso: ninguna linea la lee.
 #define BATCH_READING_WORST_BYTES 70
 
 // CUANTAS LECTURAS CABEN ESPERANDO AL PROXIMO ENVIO.
@@ -538,6 +549,7 @@ static bool railsArePowered() { return g_railsUp; }
 
 // HISTORICO (planificador por ticks): lecturas que acumularia un par de contadores
 // entre envios. Ya no se llama desde ningun sitio.
+// [ELIMINAR] funcion sin llamadas.
 static uint16_t readingsPerPacket(uint16_t sensorReadEvery, uint16_t loraTransEvery) {
   if (sensorReadEvery == 0) return 0xFFFF;
   return (uint16_t)((loraTransEvery + sensorReadEvery - 1) / sensorReadEvery);
@@ -597,6 +609,7 @@ static uint16_t readingsPerPacket(uint16_t sensorReadEvery, uint16_t loraTransEv
 
 // Red de seguridad: no quedarse nunca despierto indefinidamente porque un sensor no
 // conteste. HISTORICO: ya no se usa en ningun sitio.
+// [ELIMINAR] sin uso: ninguna linea la lee.
 #define SLEEP_MAX_AWAKE_MS 120000UL
 
 // Las puertas de los rails se enclavan durante el sueno profundo. Sin enclavar
@@ -618,6 +631,7 @@ static const gpio_num_t kHeldGates[] = {(gpio_num_t)PIN_PCB_EN_A, (gpio_num_t)PI
 // dormir con la puerta enclavada encendida y el sensor calienta mientras el resto
 // de la placa duerme. Tras la lectura se apaga. En pre-alarma y alarma el nodo no
 // duerme y la lectura es cada 10 / 5 min, asi que se queda encendida todo el estado.
+// [ELIMINAR] ajuste de banco superado por el precalentamiento; con 0 fijo se pueden quitar las ramas "#if SEN0466_GATE_ALWAYS_ON".
 #define SEN0466_GATE_ALWAYS_ON 0
 
 // Cuanto antes de la lectura se enciende. La hoja de datos pide 210 s
@@ -641,9 +655,11 @@ RTC_NOINIT_ATTR uint64_t g_coGateOnAtMs;
 // valor de CO2 se queda clavado (ver Cm1106Sensor::frozenValueRun). Solo se ha
 // recuperado siempre con un corte completo. HISTORICO: este limite ya no se usa;
 // hoy el CM1106 recibe un ciclo de alimentacion en CADA lectura (ver runSlot).
+// [ELIMINAR] sin uso: el CM1106 ya se cicla en cada lectura.
 #define CM1106_FREEZE_LIMIT 20
 
 #define SAMPLE_GAP_MS 2000UL   // pausa entre vueltas de loop() cuando el nodo esta despierto
+// [ELIMINAR] sin uso: ninguna linea la lee.
 #define READ_LOG_GAP_MS 10000UL  // HISTORICO: ya no se usa
 
 #define LORA_POST_TX_LISTEN_MS 2000  // ventana tras cada envio para recibir un comando CFG - ver la cabecera
@@ -705,6 +721,7 @@ RYLR998 radio(Serial0, LORA_RX_PIN, LORA_TX_PIN);  // UART0 libre: UART1 y UART2
 // (Antes ya habia costado tres sesiones de depuracion: g_hibernating con basura
 // podia hacer hibernar al nodo con la bateria llena.)
 //
+// 0xC0FFEE0C: g_forcedActive y g_forcedUntilMs (orden forzar_estado de Modulo A).
 // 0xC0FFEE0B: g_coGateOn y g_coGateOnAtMs (precalentamiento del SEN0466).
 // 0xC0FFEE0A: StoredReading.tickAge pasa a takenS. MISMO TAMANO, OTRO SIGNIFICADO:
 //             antes era una cuenta de despertares y ahora son segundos del reloj
@@ -718,7 +735,7 @@ RYLR998 radio(Serial0, LORA_RX_PIN, LORA_TX_PIN);  // UART0 libre: UART1 y UART2
 // 0xC0FFEE08: planificador por tiempo (g_nextDueMs, multiplicadores,
 //             g_schedPhasedForState) y reloj (g_nodeBaseMs, g_clockDrift, ...)
 // 0xC0FFEE07: g_thr[][] sembrado desde kAlarmRules
-#define BOOTCOUNT_MAGIC 0xC0FFEE0BUL
+#define BOOTCOUNT_MAGIC 0xC0FFEE0CUL
 RTC_NOINIT_ATTR uint32_t g_bootMagic;
 // Arranques desde la ultima perdida de alimentacion. Un valor > 1 dejando la placa
 // sola prueba que se reinicia por si misma, y no porque el PC toque DTR/RTS por USB:
@@ -833,7 +850,13 @@ static uint64_t nodeNowMs() { return g_nodeBaseMs + (uint64_t)millis(); }
 // ThingsBoard no se distingue de un dato legitimo antiguo.
 static uint64_t wallNowMs() {
   if (!g_clockSynced) return 0;
-  const uint64_t elapsed = nodeNowMs() - g_nodeMsAtSync;
+  // La resta es SIN SIGNO. Si el tiempo del nodo quedara por detras de la marca de
+  // sincronizacion, daria la vuelta a ~1,8e19 ms y el planificador calcularia todos
+  // los vencimientos para dentro de millones de anos: el nodo seguiria vivo sin
+  // medir ni enviar nunca. Visto el 2026-10-17 tras un brownout. setup() ya evita
+  // la causa (ver isColdBoot), esto es la red por si vuelve por otro camino.
+  const uint64_t nodeNow = nodeNowMs();
+  const uint64_t elapsed = (nodeNow > g_nodeMsAtSync) ? (nodeNow - g_nodeMsAtSync) : 0;
   return g_epochMsAtSync + (uint64_t)((double)elapsed * (double)g_clockDrift);
 }
 
@@ -1198,6 +1221,25 @@ static uint32_t sen0466WarmedMs() {
 //
 // Acumulando, la ventana sobrevive haga lo que haga el nodo.
 RTC_NOINIT_ATTR uint32_t g_prealarmMs;
+
+// ESTADO FORZADO POR MODULO A (accion forzar_estado: CFG,FORZAR_MIN=<m>,FORZAR_ESTADO=<e>).
+//
+// Mientras dura, el estado lo fija la orden y las lecturas no lo cambian: ni suben,
+// ni bajan, ni confirman la pre-alarma. Pasado el plazo, el nodo vuelve a decidir
+// por si mismo con sus umbrales, partiendo del estado en el que quedo.
+//
+// El plazo va en tiempo propio del nodo (nodeNowMs) y no en hora de red: tiene que
+// funcionar aunque el reloj no este sincronizado, y no salta al sincronizar. En RTC
+// porque atraviesa suenos: en normal el nodo duerme entre lecturas.
+RTC_NOINIT_ATTR uint8_t g_forcedActive;
+RTC_NOINIT_ATTR uint64_t g_forcedUntilMs;
+// Minutos pedidos en el mismo CFG, hasta que llega FORZAR_ESTADO. No va en RTC: los
+// dos campos llegan en el mismo mensaje.
+static long g_forcedPendingMin = -1;
+#define FORZAR_MIN_MAX 1440L  // 24 h: una orden olvidada no puede dejar el nodo sordo para siempre
+
+static void updateAlarmState();  // definida mas abajo; la usa applyConfigCommand()
+// [ELIMINAR] se siembra a 0 y nunca se lee; ocupa memoria RTC.
 RTC_NOINIT_ATTR float g_gasBaseline;        // resistencia de gas del BME690 en aire limpio
 
 // Que sensores leyeron bien en la ultima lectura, como un campo de 5 bits
@@ -1222,6 +1264,7 @@ uint32_t g_setupDoneMs = 0;
 // Estado del encendido por turnos del BMV080 - ver BMV080_MEASURE_TIMEOUT_MS.
 enum class BmvPhase { Idle, Measuring };
 BmvPhase g_bmvPhase = BmvPhase::Idle;
+// [ELIMINAR] se declara y nunca se usa.
 uint32_t g_bmvPhaseStartedMs = 0;
 
 // Arranco cada sensor (y la radio) en este despertar?
@@ -1274,6 +1317,7 @@ ReadingStatus g_bmeSt = ReadingStatus::NotInitialized;
 ReadingStatus g_coSt = ReadingStatus::NotInitialized;
 ReadingStatus g_bmvSt = ReadingStatus::NotInitialized;
 ReadingStatus g_co2St = ReadingStatus::NotInitialized;
+// [ELIMINAR] se escribe en cada lectura del Calypso y nunca se lee.
 ReadingStatus g_calSt = ReadingStatus::NotInitialized;
 
 // =============================================================================
@@ -1283,6 +1327,7 @@ ReadingStatus g_calSt = ReadingStatus::NotInitialized;
 // Configuracion modificable en marcha mediante comandos CFG - ver la cabecera del
 // archivo. Solo en RAM: vuelve a estos valores compilados en cada reinicio, a
 // proposito (salvo lo que se guarda expresamente en RTC).
+// [ELIMINAR] CFG,INTERVAL no hace nada: g_txPeriodMs se guarda y se recorta pero el calendario (kJobs) no lo lee. Quitar junto con LORA_TX_PERIOD_*, g_txPeriodMsPersist, la clave INTERVAL de applyConfigCommand() y la accion "frecuencia" de Modulo B; NXT_ENVIO la sustituye.
 uint32_t g_txPeriodMs = LORA_TX_PERIOD_MS;  // CFG,INTERVAL=<segundos>
 bool g_bmeEnabled = true;
 bool g_sen0466Enabled = true;
@@ -1450,6 +1495,48 @@ static bool applyConfigCommand(const char *payload, uint8_t len, char *ackPayloa
                         (double)n, (unsigned long)(jobPeriodMs(JOB_TX, g_alarmState) / 1000UL),
                         (unsigned)g_alarmState);
           snprintf(appliedKv, sizeof(appliedKv), "NXT_ENVIO=%.2f", (double)n);
+        }
+      // ---- forzar_estado: CFG,FORZAR_MIN=<minutos>,FORZAR_ESTADO=<0|1|2> ----
+      //
+      // Modulo B manda los MINUTOS PRIMERO a proposito: el estado no se aplica hasta
+      // saber cuanto dura, y las claves se procesan en el orden en que llegan.
+      } else if (strcmp(key, "FORZAR_MIN") == 0) {
+        const long m = atol(valueStr);
+        if (m < 1 || m > FORZAR_MIN_MAX) {
+          Serial.printf("[cfg] FORZAR_MIN=%ld fuera de [1..%ld] - ignorado\n", m, FORZAR_MIN_MAX);
+          g_forcedPendingMin = -1;
+          matched = false;
+        } else {
+          g_forcedPendingMin = m;
+          snprintf(appliedKv, sizeof(appliedKv), "FORZAR_MIN=%ld", m);
+        }
+      } else if (strcmp(key, "FORZAR_ESTADO") == 0) {
+        const int e = atoi(valueStr);
+        const bool numerico = (valueStr[0] >= '0' && valueStr[0] <= '9');
+        if (!numerico || e < ALARM_NORMAL || e > ALARM_FIRE || g_forcedPendingMin < 1) {
+          // Sin FORZAR_MIN valido no se fuerza nada: un estado forzado sin plazo
+          // dejaria al nodo sordo a sus sensores indefinidamente.
+          Serial.printf("[cfg] FORZAR_ESTADO=%s rechazado (estado 0..2 y FORZAR_MIN antes)\n",
+                        valueStr);
+          matched = false;
+        } else {
+          static const char *kNombre[] = {"NORMAL", "PRE-ALARMA", "ALARMA"};
+          const uint8_t antes = g_alarmState;
+          g_alarmState = (uint8_t)e;
+          g_alarmClearRun = 0;
+          g_prealarmMs = 0;
+          g_forcedActive = 1;
+          g_forcedUntilMs = nodeNowMs() + (uint64_t)g_forcedPendingMin * 60000ULL;
+          Serial.printf("[cfg] ESTADO FORZADO por Modulo A: %s -> %s durante %ld min "
+                        "(los sensores no cambian el estado hasta entonces)\n",
+                        kNombre[antes <= ALARM_FIRE ? antes : 0], kNombre[e], g_forcedPendingMin);
+          g_forcedPendingMin = -1;
+          // Re-fasear el calendario al estado nuevo YA, no en la siguiente lectura:
+          // en normal el nodo puede dormirse justo despues de esta ventana, y lo
+          // haria con los periodos del estado viejo. Con el estado forzado,
+          // updateAlarmStateInner() no evalua las reglas, asi que esto solo re-fasea.
+          updateAlarmState();
+          snprintf(appliedKv, sizeof(appliedKv), "FORZAR_ESTADO=%d", e);
         }
       } else if (strcmp(key, "ALARM") == 0) {
         // Bajar la alarma a mano desde Modulo A. ACTIVARLA a distancia NO se admite,
@@ -1905,6 +1992,7 @@ static void enableRails(bool safeMode) {
     return;
   }
 
+  // [ELIMINAR] 2 s despierto (~50 mA) en CADA despertar solo para que el USB enumere. En despliegue no hay USB: es el mayor gasto evitable del ciclo normal.
   delay(2000);  // dejar que el USB enumere antes de cargar nada la alimentacion
   Serial.println("3V3: about to assert");
   Serial.flush();
@@ -2082,6 +2170,7 @@ void setup() {
   // masa AQUI, ningun codigo nuestro lo ha hecho - no ha corrido nada todavia.
   // Si en cambio aparece libre aqui y sujeto mas adelante, lo sujeta algo que
   // corre entre los dos puntos, y entonces se puede bisecar.
+  // [ELIMINAR] diagnostico del bus I2C en cada arranque (300 ms + varias comprobaciones). Era para la averia de SCL a masa, ya resuelta.
   delay(300);  // que el puerto USB llegue a enumerar y se vea esta linea
   i2cReportPullups("PRIMERA LINEA de setup");
   {
@@ -2239,6 +2328,8 @@ void setup() {
     g_alarmState = ALARM_NORMAL;
     g_alarmClearRun = 0;
     g_prealarmMs = 0;
+    g_forcedActive = 0;  // ningun estado forzado tras un corte de corriente
+    g_forcedUntilMs = 0;
     seedThresholds();
     g_gasBaseline = 0.0f;
     g_lastReadHealth = 0;
@@ -2359,6 +2450,24 @@ void setup() {
   // la ventana de escucha POSTERIOR a una transmision, asi que sin esto el nodo
   // estaria media hora sin reloj - y por tanto sin poder alinearse.
   if (isColdBoot()) {
+    // LA HORA GUARDADA YA NO VALE tras un arranque que no viene de nuestro sueno.
+    //
+    // El tiempo propio del nodo solo suma lo despierto al entrar en enterDeepSleep().
+    // Un brownout o un reset a mitad de un despertar se lleva ese rato, asi que el
+    // tiempo del nodo vuelve unos segundos ATRAS - por detras de una sincronizacion
+    // que si se hizo durante ese despertar. Con la resta sin signo de wallNowMs()
+    // eso dejo a C3 el 2026-10-17 vivo pero sin medir ni enviar nada: todos los
+    // vencimientos acabaron en un futuro astronomico.
+    //
+    // Sin saber cuanto duro el corte, lo honrado es volver a planificar con tiempo
+    // propio. La hora de red vuelve en la ventana del envio que se fuerza aqui
+    // abajo, y esa primera sincronizacion re-fasea al reloj de pared. La deriva
+    // aprendida se conserva: es una propiedad del oscilador, no de la hora.
+    if (g_clockSynced) {
+      g_clockSynced = 0;
+      Serial.println("[clock] arranque sin sueno previo - hora descartada hasta la "
+                     "siguiente sincronizacion");
+    }
     schedRephase(schedNowMs(), g_alarmState, "arranque en frio");
     // TODO vence ya, no solo el envio.
     //
@@ -2453,6 +2562,7 @@ void setup() {
   // Medido ANTES y DESPUES de encender los rails. Si el bus esta igual en los dos
   // momentos, el rail no esta llegando a las pull-up y encenderlo no cambia nada -
   // que es exactamente la pregunta abierta.
+  // [ELIMINAR] diagnostico de la averia de SCL ya resuelta; se ejecuta en cada despertar (y su pareja "DESPUES").
   i2cReportPullups("ANTES de encender rails");
 
 
@@ -2472,6 +2582,7 @@ void setup() {
     return;  // sin alimentacion no puede funcionar nada de lo de abajo
   }
 
+  // [ELIMINAR] PowerManager es un stub que solo imprime. Quitar la llamada, el objeto power y PowerManager.h/.cpp.
   power.enable3V3Sensors();  // stub: solo imprime, ver PowerManager.h
   // Antes de Wire.begin: si un esclavo quedo colgado sujetando SDA de un reset
   // anterior, el bus esta inservible y Wire no lo detecta - devuelve ACK falsos.
@@ -2479,7 +2590,9 @@ void setup() {
   Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
 
   // Diagnostico del bus en cada arranque.
+  // [ELIMINAR] escaneo del bus en cada despertar: diagnostico de puesta en marcha.
   scanI2C("after rails, before sensor init");
+  // [ELIMINAR] sonda del BME690 dos veces por despertar (y la de "after BMV080 wait"); la de 0x77 siempre falla y llena el log de "Error -1".
   probeBmeChipId("right after scan");
 
   // ---- ARRANQUE SELECTIVO: solo los sensores que vencen en este despertar ----
@@ -2519,6 +2632,7 @@ void setup() {
                   bme690.address());
   }
 
+// [ELIMINAR] rama muerta: SLEEP_SKIP_SEN0466 vale 0. Quitar la macro, esta rama y el #else.
 #if SLEEP_ENABLED && SLEEP_SKIP_SEN0466
   // Fuera del ciclo: sus 210 s de estabilizacion dominarian cada despertar. Se
   // desactiva en vez de simplemente no leerlo. (Hoy SLEEP_SKIP_SEN0466 vale 0, asi
@@ -2543,6 +2657,7 @@ void setup() {
   // El CM1106 hace un ciclo de alimentacion y espera su calentamiento en begin(),
   // asi que tambien cuesta segundos que no hay que pagar si no vence.
   if (g_jobDue[JOB_CM1106]) {
+    // [ELIMINAR] etiquetas "SWAPPED" de una prueba de orden ya cerrada (tambien en bmv080.begin).
     step("cm1106.begin (SWAPPED: now before bmv080)");
     cm1106.begin();
     step("cm1106.begin returned");
@@ -2859,6 +2974,7 @@ static const char *slotName(int slot) {
 static void powerDownSensorRails() {
   g_railsUp = false;
   digitalWrite(PIN_PCB_EN_A, (PIN_PCB_EN_A_ACTIVE == LOW) ? HIGH : LOW);
+// [ELIMINAR] rama muerta: TX_KEEP_5V_RAIL vale 1 y se queda asi (el SEN0466 necesita el 5V continuo).
 #if !TX_KEEP_5V_RAIL
   digitalWrite(PIN_PCB_EN_B, (PIN_PCB_EN_B_ACTIVE == LOW) ? HIGH : LOW);
   Serial.println("[tx] sensor rails off for the transmit");
@@ -3572,6 +3688,19 @@ static void updateAlarmStateInner() {
   // sensores. Ver FORCE_ALARM_STATE.
   return;
 #endif
+  // Estado forzado por Modulo A (forzar_estado): mientras dure el plazo, el estado
+  // es el de la orden. Al vencer se vuelve a decidir con las lecturas, partiendo del
+  // estado forzado: de ALARMA se baja de nivel en nivel con lecturas limpias, igual
+  // que de una alarma de verdad, y la ventana de confirmacion empieza de cero.
+  if (g_forcedActive) {
+    if (nodeNowMs() < g_forcedUntilMs) return;
+    g_forcedActive = 0;
+    g_prealarmMs = 0;
+    g_alarmClearRun = 0;
+    Serial.printf("[alarm] fin del estado forzado por Modulo A - el nodo vuelve a decidir "
+                  "con sus sensores (estado actual %s)\n",
+                  alarmStateName((AlarmState)g_alarmState));
+  }
   const char *why = "";
   const AlarmState want = evaluateRules(&why);
 
@@ -4071,6 +4200,18 @@ static void recoverRailsAfterHeater() {
   digitalWrite(PIN_PCB_EN_A, PIN_PCB_EN_A_ACTIVE);
   delay(PIN_PCB_EN_SETTLE_MS);
 
+  // EL BME690 ACABA DE PERDER LA ALIMENTACION, y con ella toda su configuracion: va
+  // en este mismo rail. El driver seguia creyendolo listo (bmeReady) y las lecturas
+  // rapidas siguientes iban a un chip recien encendido sin configurar. Visto en C3:
+  // en estados que no duermen, despues de la primera lectura de VOC, cada T/H/P
+  // fallaba con errores de I2C (263 / -1) o devolvia un valor fijo imposible -
+  // 54,8 C, 100 % y 915,4 hPa, por encima del umbral de pre-alarma de temperatura.
+  // En normal no se notaba porque cada despertar vuelve a pasar por setup().
+  //
+  // Marcarlo como no arrancado hace que readJob() lo vuelva a inicializar en su
+  // siguiente turno (arranque perezoso), igual que tras un despertar.
+  bmeReady = false;
+
   // El BMV080 necesita su ventana de arranque completa despues de cualquier ciclo de
   // alimentacion o da NoAck - justo el fallo que esta recuperacion existe para
   // evitar, asi que saltarse esta espera anularia su sentido.
@@ -4092,6 +4233,7 @@ static void recoverRailsAfterHeater() {
 static uint32_t g_coWarmStartMs = 0;
 static bool g_coWarmRunning = false;
 
+// [ELIMINAR] funcion vacia (todo su cuerpo esta en "#if SLEEP_SKIP_SEN0466 && ..."). Quitar con g_coWarmStartMs, g_coWarmRunning, SEN0466_RUN_WHEN_AWAKE y sus dos llamadas en loop(). El calentamiento lo hace ahora la puerta GPIO16 (sen0466GateUpdate).
 static void sen0466MaintainWarmup() {
 #if SLEEP_SKIP_SEN0466 && SEN0466_RUN_WHEN_AWAKE
   if (sen0466Ready && g_sen0466Enabled) return;  // ya esta funcionando

@@ -32,4 +32,5 @@
 
 // Cada cuanto imprimia una tabla de lecturas un antiguo programa de banco. Hoy no
 // lo usa ningun programa del proyecto.
+// [ELIMINAR] sin uso: del firmware antiguo sin calendario.
 #define SAMPLE_INTERVAL_MS 1000

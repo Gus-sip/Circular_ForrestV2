@@ -791,7 +791,8 @@ void ModemNBIoTMqtt::publishCommandLogApplied(long requestId, const char *status
 // ventana de subida del nodo. El resultado llega despues como commandLog.
 //
 // Acciones: umbrales_de1variable (alias umbral), NxT_lectura, NxT_enviodatos,
-// NxTglobalenviodatos (a todos los nodos), y frecuencia (antigua, aun aceptada).
+// NxTglobalenviodatos (a todos los nodos), forzar_estado, y frecuencia (antigua,
+// aun aceptada).
 void ModemNBIoTMqtt::handleConfigurarModuloC(const NbiotProtocol::MqttMessage &msg,
                                              const char *idStr) {
   const long requestId = strtol(idStr, nullptr, 10);
@@ -843,6 +844,7 @@ void ModemNBIoTMqtt::handleConfigurarModuloC(const NbiotProtocol::MqttMessage &m
 
   // ---- accion -> el vocabulario CFG que ya entiende Modulo C ----
   char cfg[128] = {0};
+  // [ELIMINAR] accion "frecuencia": genera CFG,INTERVAL, que el nodo acepta pero no aplica. El Modulo A ya usa NxT_enviodatos.
   if (strcmp(action, "frecuencia") == 0) {
     // Los tres ritmos con nombre. ESTOS SEGUNDOS SON UNA ELECCION, NO DE LA
     // ESPECIFICACION, que nombra los ajustes sin dar valores: son la traduccion
@@ -933,9 +935,39 @@ void ModemNBIoTMqtt::handleConfigurarModuloC(const NbiotProtocol::MqttMessage &m
     }
     snprintf(cfg, sizeof(cfg), "CFG,NXT_ENVIO=%s", value);
 
+  } else if (strcmp(action, "forzar_estado") == 0) {
+    // Poner el nodo en un estado durante un tiempo, ignorando sus lecturas. Formato
+    // acordado con Modulo A el 2026-10-16 y visto en vivo el 2026-10-18:
+    //
+    //   {"action":"forzar_estado","estado":1,"minutos":15}
+    //
+    // estado como alarmState del nodo: 0 NORMAL, 1 PRE-ALARMA, 2 ALARMA.
+    //
+    // Los MINUTOS van primero en el CFG: el nodo procesa las claves en orden y no
+    // aplica el estado sin saber cuanto dura. Se valida aqui ademas de en el nodo
+    // para que un valor imposible se rechace en el acto, en el propio RPC, en vez de
+    // esperar a la ventana del nodo para recibir un NACK.
+    char estado[8] = {0}, minutos[12] = {0};
+    NbiotProtocol::jsonScalar(params, "estado", estado, sizeof(estado));
+    NbiotProtocol::jsonScalar(params, "minutos", minutos, sizeof(minutos));
+    char *fin = nullptr;
+    const long e = strtol(estado, &fin, 10);
+    const bool estadoOk = estado[0] && fin && *fin == 0 && e >= 0 && e <= 2;
+    const long m = strtol(minutos, &fin, 10);
+    const bool minutosOk = minutos[0] && fin && *fin == 0 && m >= 1 && m <= 1440;
+    if (!estadoOk) {
+      refuse("forzar_estado: estado must be 0 (normal), 1 (prealarma) or 2 (alarma)");
+      return;
+    }
+    if (!minutosOk) {
+      refuse("forzar_estado: minutos must be an integer 1..1440");
+      return;
+    }
+    snprintf(cfg, sizeof(cfg), "CFG,FORZAR_MIN=%ld,FORZAR_ESTADO=%ld", m, e);
+
   } else {
     refuse("unknown action, expected 'umbrales_de1variable', 'NxT_lectura', "
-           "'NxT_enviodatos' or 'NxTglobalenviodatos'");
+           "'NxT_enviodatos', 'NxTglobalenviodatos' or 'forzar_estado'");
     return;
   }
 

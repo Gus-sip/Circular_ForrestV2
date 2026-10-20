@@ -43,6 +43,7 @@
 // habilitacion del BMV080, antes de que se describiera la placa. El CM1106
 // funciona, y forzar una linea contra un sensor que funciona es una buena manera
 // de dejar de tenerlo.
+// [ELIMINAR] sin uso: ninguna linea la lee.
 #define PIN_CM1106_RDY 12
 
 // Habilitacion del BMV080. Tiene que estar a nivel BAJO para que el sensor funcione.
@@ -112,6 +113,7 @@
 
 // Se conserva para que compilen programas antiguos, pero solo es correcto para la
 // puerta A. Mejor usar las macros por puerta de arriba.
+// [ELIMINAR] sin uso y enganoso: las dos puertas tienen polaridad OPUESTA (PIN_PCB_EN_A_ACTIVE / _B_ACTIVE).
 #define PIN_PCB_EN_ACTIVE PIN_PCB_EN_A_ACTIVE
 
 // ---------- Puerta de alimentacion de la radio LoRa RYLR998 (GPIO13) ----------

@@ -1,3 +1,4 @@
+// [ELIMINAR] todo el fichero (y PowerManager.cpp): stub que solo imprime. Los rails los maneja enableRails().
 #pragma once
 
 // GESTOR DE ALIMENTACION - VERSION DE PRUEBA (stub), DE LA EPOCA DEL BANCO.

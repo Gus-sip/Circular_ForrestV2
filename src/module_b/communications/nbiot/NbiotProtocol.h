@@ -63,6 +63,7 @@ bool parseCclk(const char *line, int64_t &epochMs);
 
 // HISTORICO (via UDP): "+QIOPEN: <connectID>,<err>", el aviso que sigue al OK de
 // AT+QIOPEN. err==0 significa que el socket se abrio.
+// [ELIMINAR] via UDP retirada: parseQiopen, parseQiurcRecv, parseQirdHeader, parseDownlink y encodeBatch* solo los usa la prueba unitaria test_nbiot_protocol. Quitar con sus pruebas.
 bool parseQiopen(const char *line, int &connectId, int &err);
 
 // HISTORICO (via UDP): "+QIURC: \"recv\",<connectID>,<dataLen>" - avisa de que hay
